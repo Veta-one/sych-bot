@@ -74,18 +74,18 @@ class AiService {
   
   // === ОСНОВНОЙ ОТВЕТ ===
   async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false) {
+    console.log(`[DEBUG AI] getResponse вызван. Текст: ${currentMessage.text.slice(0, 20)}...`);
     const requestLogic = async () => {
         let promptParts = [];
         
         if (imageBuffer) {
           promptParts.push({ inlineData: { mimeType: mimeType, data: imageBuffer.toString("base64") } });
-          promptParts.push({ text: "Проанализируй этот файл (изображение, видео или документ). Опиши, что там, или ответь на вопрос по нему." });
+          promptParts.push({ text: "Проанализируй этот файл. Опиши, что там, или ответь на вопрос по нему." });
         }
 
         const relevantHistory = history.slice(-20); 
         const contextStr = relevantHistory.map(m => `${m.role}: ${m.text}`).join('\n');
         
-        // --- ЛОГИКА ОТНОШЕНИЙ И ЛИЧНЫЕ ДАННЫЕ ---
         let personalInfo = "";
         let replyContext = "";
 
@@ -105,8 +105,6 @@ class AiService {
             personalInfo += `\n--- ДОСЬЕ ---\nФакты: ${userProfile.facts || "Нет"}\n${relationText}\n-----------------\n`;
         }
 
-        // --- СОБИРАЕМ ПРОМПТ ИЗ ФАЙЛА PROMPTS.JS ---
-        // [FIX] System prompt убран отсюда, так как он задан в initModel
         const fullPromptText = 
             prompts.mainChat({
                 time: this.getCurrentTime(),
@@ -120,9 +118,30 @@ class AiService {
 
         promptParts.push({ text: fullPromptText });
 
-        const result = await this.model.generateContent(promptParts);
+        console.log(`[DEBUG AI] Отправляю запрос...`);
+        
+        // !!! ВОТ ТУТ ГЛАВНОЕ ИЗМЕНЕНИЕ !!!
+        // Переопределяем конфиг ТОЛЬКО для этого запроса.
+        // maxOutputTokens: 1000 — это примерно 1 длинное сообщение в Telegram.
+        // Это не даст ему генерировать бесконечные статьи.
+        const result = await this.model.generateContent({
+            contents: [{ role: 'user', parts: promptParts }],
+            generationConfig: {
+                maxOutputTokens: 2500, 
+                temperature: 0.9
+            }
+        });
+        
         const response = result.response;
         let text = response.text();
+
+        // === CLEANUP (ОБЯЗАТЕЛЬНО!) ===
+        // Убираем "мысли вслух", из-за которых был глюк с магнитными бурями
+        text = text.replace(/^toolcode[\s\S]*?print\(.*?\)\s*/i, '');
+        text = text.replace(/^thought[\s\S]*?\n\n/i, '');
+        // Убираем markdown мусор
+        text = text.replace(/```json/g, '').replace(/```/g, '').trim();
+        // ==============================
 
         // --- ИСТОЧНИКИ ---
         if (response.candidates && response.candidates[0].groundingMetadata) {
