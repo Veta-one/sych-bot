@@ -7,11 +7,10 @@ class AiService {
   constructor() {
     this.keyIndex = 0; 
     this.keys = config.geminiKeys;
-    this.usingFallback = false; // Флаг: false = Flash, true = Lite
+    this.usingFallback = false; 
+    this.bot = null; // Ссылка на бота для уведомлений
 
     // === СТАТИСТИКА ===
-    // status: true (🟢), false (🔴)
-    // Структура: { flash: 0, lite: 0, gemma: 0, status: true }
     this.stats = this.keys.map(() => ({ flash: 0, lite: 0, gemma: 0, status: true }));
     this.lastResetDate = new Date().getDate(); 
     // ==================
@@ -20,31 +19,50 @@ class AiService {
     this.initModel();
   }
 
+  setBot(botInstance) {
+    this.bot = botInstance;
+  }
+
+  notifyAdmin(message) {
+    if (this.bot && config.adminId) {
+        this.bot.sendMessage(config.adminId, message, { parse_mode: 'Markdown' }).catch(() => {});
+    }
+  }
+
   // Метод для подсчета (вставь его сразу после конструктора или перед initModel)
   countRequest(type) {
     const today = new Date().getDate();
     
-    // Сброс статистики в полночь (сохраняем статус ключей)
+    // === СБРОС В ПОЛНОЧЬ ===
     if (today !== this.lastResetDate) {
-        this.stats = this.keys.map(s => ({ flash: 0, lite: 0, gemma: 0, status: s.status }));
+        this.stats = this.keys.map(s => ({ flash: 0, lite: 0, gemma: 0, status: true })); // Оживляем все ключи
         this.lastResetDate = today;
+        
+        // Если сидели на Lite — возвращаемся на Flash
+        if (this.usingFallback) {
+            this.usingFallback = false;
+            this.keyIndex = 0;
+            this.initModel(); // Пересоздаем модель с конфигом Flash
+            this.notifyAdmin("🌙 **Новый день!**\nЛимиты сброшены.\nРежим переключен на: ⚡ **FLASH**");
+        } else {
+             // Если и так были на Flash, просто сбрасываем индекс на первый ключ
+             this.keyIndex = 0;
+             this.initModel();
+        }
     }
+    // =======================
 
     if (this.stats[this.keyIndex]) {
-        // Логика распределения
         if (type === 'gemma') {
             this.stats[this.keyIndex].gemma++;
         } 
         else if (type === 'gemini') {
-            // Если включен режим Fallback — это Lite, иначе — Flash
             if (this.usingFallback) {
                 this.stats[this.keyIndex].lite++;
             } else {
                 this.stats[this.keyIndex].flash++;
             }
         }
-        
-        // Подтверждаем, что ключ жив
         this.stats[this.keyIndex].status = true; 
     }
   }
@@ -106,20 +124,22 @@ class AiService {
 
     // Если прошли все ключи
     if (this.keyIndex >= this.keys.length) {
-        if (!this.usingFallback) {
-            // КРУГ 1 ЗАКОНЧИЛСЯ. ВКЛЮЧАЕМ LITE (КРУГ 2)
-            console.log("⚠️ ВСЕ КЛЮЧИ НА FLASH ИСЧЕРПАНЫ! ПЕРЕХОЖУ НА FLASH-LITE.");
-            this.usingFallback = true; // Включаем режим Lite
-            this.keyIndex = 0; // Сбрасываем на первый ключ
-            
-            // "Воскрешаем" статусы для Lite (даем им шанс)
-            this.stats.forEach(s => s.status = true);
-        } else {
-            // КРУГ 2 ТОЖЕ ЗАКОНЧИЛСЯ. ВСЁ.
-            // Сбрасываем индексы, чтобы не крашнулось, но кидаем ошибку
-            this.keyIndex = 0;
-            console.error("☠️ GAME OVER. Все ключи на Flash и Lite мертвы.");
-        }
+      if (!this.usingFallback) {
+        // КРУГ 1 ЗАКОНЧИЛСЯ. ВКЛЮЧАЕМ LITE (КРУГ 2)
+        console.log("⚠️ ВСЕ КЛЮЧИ НА FLASH ИСЧЕРПАНЫ! ПЕРЕХОЖУ НА FLASH-LITE.");
+        
+        this.usingFallback = true; 
+        this.keyIndex = 0; 
+        this.stats.forEach(s => s.status = true);
+        
+        // Уведомляем админа
+        this.notifyAdmin("⚠️ **Внимание!**\nВсе ключи Flash исчерпаны.\nРежим переключен на: 🕯 **LITE**");
+      } else {
+        // КРУГ 2 ТОЖЕ ЗАКОНЧИЛСЯ. ВСЁ.
+        // Сбрасываем индексы, чтобы не крашнулось, но кидаем ошибку
+        this.keyIndex = 0;
+        console.error("☠️ GAME OVER. Все ключи на Flash и Lite мертвы.");
+      }
     }
 
     this.initModel();

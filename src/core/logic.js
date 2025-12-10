@@ -375,12 +375,13 @@ async function processMessage(bot, msg) {
 
   addToHistory(chatId, senderName, text);
 
-    // === СТАТИСТИКА ===
-    if (cleanText === 'сыч стата' || cleanText === 'сыч статистика') {
-        const stats = ai.getStatsReport();
-        const report = `📊 **Статистика за сутки:**\n(Ключ — Gemini • Gemma)\n\n${stats}`;
-        return bot.sendMessage(chatId, report, getBaseOptions(threadId));
-    }
+  // === СТАТИСТИКА ===
+  if (cleanText === 'сыч стата' || cleanText === 'сыч статистика') {
+    const stats = ai.getStatsReport();
+    const report = `**Статистика за сутки:**\n${stats}`;
+    // ИСПРАВЛЕНИЕ: Отвечаем реплаем, это безопаснее для комментариев каналов
+    return bot.sendMessage(chatId, report, getReplyOptions(msg));
+}
 
   // === НАПОМИНАЛКИ ===
   if (isDirectlyCalled && (cleanText.includes("напомни") || cleanText.includes("напоминай"))) {

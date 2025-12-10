@@ -23,6 +23,10 @@ console.error = (...args) => originalError(getTimestamp(), ...args);
 // Создаем бота
 const bot = new TelegramBot(config.telegramToken, { polling: true });
 
+// Передаем бота в AI-сервис для уведомлений
+const ai = require('./services/ai');
+ai.setBot(bot);
+
 console.log("Сыч запущен и готов пояснять за жизнь.");
 console.log(`Admin ID: ${config.adminId}`);
 
