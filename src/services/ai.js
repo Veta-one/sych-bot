@@ -7,8 +7,59 @@ class AiService {
   constructor() {
     this.keyIndex = 0; 
     this.keys = config.geminiKeys;
+    this.usingFallback = false; // Флаг: false = Flash, true = Lite
+
+    // === СТАТИСТИКА ===
+    // status: true (🟢), false (🔴)
+    // Структура: { flash: 0, lite: 0, gemma: 0, status: true }
+    this.stats = this.keys.map(() => ({ flash: 0, lite: 0, gemma: 0, status: true }));
+    this.lastResetDate = new Date().getDate(); 
+    // ==================
+
     if (this.keys.length === 0) console.error("CRITICAL: Нет ключей Gemini в .env!");
     this.initModel();
+  }
+
+  // Метод для подсчета (вставь его сразу после конструктора или перед initModel)
+  countRequest(type) {
+    const today = new Date().getDate();
+    
+    // Сброс статистики в полночь (сохраняем статус ключей)
+    if (today !== this.lastResetDate) {
+        this.stats = this.keys.map(s => ({ flash: 0, lite: 0, gemma: 0, status: s.status }));
+        this.lastResetDate = today;
+    }
+
+    if (this.stats[this.keyIndex]) {
+        // Логика распределения
+        if (type === 'gemma') {
+            this.stats[this.keyIndex].gemma++;
+        } 
+        else if (type === 'gemini') {
+            // Если включен режим Fallback — это Lite, иначе — Flash
+            if (this.usingFallback) {
+                this.stats[this.keyIndex].lite++;
+            } else {
+                this.stats[this.keyIndex].flash++;
+            }
+        }
+        
+        // Подтверждаем, что ключ жив
+        this.stats[this.keyIndex].status = true; 
+    }
+  }
+
+  // Метод для вывода отчета
+  getStatsReport() {
+    const mode = this.usingFallback ? "⚠️ LITE РЕЖИМ" : "⚡ FLASH РЕЖИМ";
+    
+    const rows = this.stats.map((s, i) => {
+        const icon = s.status ? "🟢" : "🔴";
+        // Формат: 🟢1 — Flash • Lite • Gemma
+        return `${icon}${i + 1} — ${s.flash} • ${s.lite} • ${s.gemma}`;
+    }).join('\n');
+
+    return `Текущий режим: ${mode}\n\n(Flash • Lite • Gemma)\n${rows}`;
   }
 
   initModel() {
@@ -22,33 +73,68 @@ class AiService {
         { category: HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT, threshold: HarmBlockThreshold.BLOCK_NONE },
     ];
 
-    const generationConfig = {
-        maxOutputTokens: 8000,
-        temperature: 0.9,
-    };
+    // Выбираем модель: Основная или Lite
+    const currentModelName = this.usingFallback ? config.fallbackModelName : config.modelName;
+    
+    console.log(`[AI INIT] Ключ #${this.keyIndex + 1} | Модель: ${currentModelName} | Режим: ${this.usingFallback ? "FALLBACK (LITE)" : "NORMAL"}`);
 
-    // [FIX] Добавляем системную инструкцию прямо в модель для железного характера
-      this.model = genAI.getGenerativeModel({ 
-        model: config.modelName,
-        systemInstruction: prompts.system(), 
+    // 1. ТВОРЧЕСКАЯ МОДЕЛЬ
+    this.creativeModel = genAI.getGenerativeModel({ 
+        model: currentModelName,
+        systemInstruction: prompts.system(),
         safetySettings: safetySettings,
-        generationConfig: generationConfig, 
+        generationConfig: { maxOutputTokens: 8000, temperature: 0.9 }, 
         tools: [{ googleSearch: {} }] 
+    });
+
+    // 2. ЛОГИЧЕСКАЯ МОДЕЛЬ (Gemma всегда одна и та же)
+    this.logicModel = genAI.getGenerativeModel({ 
+        model: config.logicModelName,
+        safetySettings: safetySettings,
+        generationConfig: { maxOutputTokens: 8000, temperature: 0.2 }, 
     });
   }
 
   rotateKey() {
-    this.keyIndex = (this.keyIndex + 1) % this.keys.length;
-    console.log(`[AI WARNING] Лимит ключа исчерпан! Переключаюсь на ключ #${this.keyIndex + 1}...`);
+    // Помечаем текущий ключ как "Мертвый" (🔴)
+    if (this.stats[this.keyIndex]) this.stats[this.keyIndex].status = false;
+
+    console.log(`[AI WARNING] Ключ #${this.keyIndex + 1} исчерпан (🔴).`);
+
+    // Переходим к следующему
+    this.keyIndex++;
+
+    // Если прошли все ключи
+    if (this.keyIndex >= this.keys.length) {
+        if (!this.usingFallback) {
+            // КРУГ 1 ЗАКОНЧИЛСЯ. ВКЛЮЧАЕМ LITE (КРУГ 2)
+            console.log("⚠️ ВСЕ КЛЮЧИ НА FLASH ИСЧЕРПАНЫ! ПЕРЕХОЖУ НА FLASH-LITE.");
+            this.usingFallback = true; // Включаем режим Lite
+            this.keyIndex = 0; // Сбрасываем на первый ключ
+            
+            // "Воскрешаем" статусы для Lite (даем им шанс)
+            this.stats.forEach(s => s.status = true);
+        } else {
+            // КРУГ 2 ТОЖЕ ЗАКОНЧИЛСЯ. ВСЁ.
+            // Сбрасываем индексы, чтобы не крашнулось, но кидаем ошибку
+            this.keyIndex = 0;
+            console.error("☠️ GAME OVER. Все ключи на Flash и Lite мертвы.");
+        }
+    }
+
     this.initModel();
   }
 
   async executeWithRetry(apiCallFn) {
-    for (let attempt = 0; attempt < this.keys.length; attempt++) {
+    // Умножаем на 2, так как у нас теперь 2 прохода (Flash + Lite)
+    const maxAttempts = this.keys.length * 2 + 1; 
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
         try {
             return await apiCallFn();
         } catch (error) {
-            const isQuotaError = error.message.includes('429') || error.message.includes('Quota') || error.message.includes('Resource has been exhausted');
+            const isQuotaError = error.message.includes('429') || error.message.includes('Quota') || error.message.includes('Resource has been exhausted') || error.message.includes('Too Many Requests');
+            
             if (isQuotaError) {
                 this.rotateKey();
                 continue;
@@ -57,7 +143,7 @@ class AiService {
             }
         }
     }
-    throw new Error("Все ключи Gemini исчерпали лимит!");
+    throw new Error("Все ключи Gemini (Flash и Lite) исчерпали лимит!");
   }
 
   getCurrentTime() {
@@ -124,7 +210,7 @@ class AiService {
         // Переопределяем конфиг ТОЛЬКО для этого запроса.
         // maxOutputTokens: 1000 — это примерно 1 длинное сообщение в Telegram.
         // Это не даст ему генерировать бесконечные статьи.
-        const result = await this.model.generateContent({
+        const result = await this.creativeModel.generateContent({
             contents: [{ role: 'user', parts: promptParts }],
             generationConfig: {
                 maxOutputTokens: 2500, 
@@ -168,8 +254,8 @@ class AiService {
   async determineReaction(contextText) {
     const allowed = ["👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", "😡"];
     const requestLogic = async () => {
-        const result = await this.model.generateContent(prompts.reaction(contextText, allowed.join(" ")));
-        let text = result.response.text().trim();
+      const result = await this.logicModel.generateContent(prompts.reaction(contextText, allowed.join(" ")));
+      let text = result.response.text().trim();
         const match = text.match(/(\p{Emoji_Presentation}|\p{Extended_Pictographic})/u);
         if (match && allowed.includes(match[0])) return match[0];
         return null;
@@ -180,8 +266,9 @@ class AiService {
   // === БЫСТРЫЙ АНАЛИЗ (С НОРМАЛЬНОЙ ЧИСТКОЙ) ===
   async analyzeUserImmediate(lastMessages, currentProfile) {
     const requestLogic = async () => {
-        const result = await this.model.generateContent(prompts.analyzeImmediate(currentProfile, lastMessages));
-        let text = result.response.text();
+      this.countRequest('gemma');
+      const result = await this.logicModel.generateContent(prompts.analyzeImmediate(currentProfile, lastMessages));
+      let text = result.response.text();
         
         // 1. Чистим Markdown-обертку (```json ... ```)
         text = text.replace(/```json/g, '').replace(/```/g, '').trim();
@@ -210,10 +297,11 @@ class AiService {
   // === МАССОВЫЙ АНАЛИЗ ===
   async analyzeBatch(messagesBatch, currentProfiles) {
     const requestLogic = async () => {
-        const chatLog = messagesBatch.map(m => `[ID:${m.userId}] ${m.name}: ${m.text}`).join('\n');
-        const knownInfo = Object.entries(currentProfiles).map(([uid, p]) => `ID:${uid} -> ${p.realName}, ${p.facts}, ${p.attitude}`).join('\n');
-        
-        const result = await this.model.generateContent(prompts.analyzeBatch(knownInfo, chatLog));
+      this.countRequest('gemma');
+      const chatLog = messagesBatch.map(m => `[ID:${m.userId}] ${m.name}: ${m.text}`).join('\n');
+      const knownInfo = Object.entries(currentProfiles).map(([uid, p]) => `ID:${uid} -> ${p.realName}, ${p.facts}, ${p.attitude}`).join('\n');
+      
+      const result = await this.logicModel.generateContent(prompts.analyzeBatch(knownInfo, chatLog));
         let text = result.response.text();
         text = text.replace(/```json/g, '').replace(/```/g, '').trim();
         const firstBrace = text.indexOf('{');
@@ -226,7 +314,8 @@ class AiService {
 
   async generateProfileDescription(profileData, targetName) {
      const requestLogic = async () => {
-        const res = await this.model.generateContent(prompts.profileDescription(targetName, profileData));
+        this.countRequest('gemini');
+        const res = await this.creativeModel.generateContent(prompts.profileDescription(targetName, profileData));
         return res.response.text();
      };
      try { return await this.executeWithRetry(requestLogic); } catch(e) { return "Не знаю такого."; }
@@ -234,7 +323,8 @@ class AiService {
 
   async generateFlavorText(task, result) {
     const requestLogic = async () => {
-        const res = await this.model.generateContent(prompts.flavor(task, result));
+        this.countRequest('gemma');
+        const res = await this.creativeModel.generateContent(prompts.flavor(task, result));
         return res.response.text().trim().replace(/^["']|["']$/g, '');
     };
     try { return await this.executeWithRetry(requestLogic); } catch(e) { return `${result}`; }
@@ -242,7 +332,8 @@ class AiService {
   
   async shouldAnswer(lastMessages) {
     const requestLogic = async () => {
-      const res = await this.model.generateContent(prompts.shouldAnswer(lastMessages));
+      this.countRequest('gemma');
+      const res = await this.logicModel.generateContent(prompts.shouldAnswer(lastMessages));
       return res.response.text().toUpperCase().includes('YES');
   };
     try { return await this.executeWithRetry(requestLogic); } catch(e) { return false; }
@@ -251,11 +342,12 @@ class AiService {
   // === ТРАНСКРИБАЦИЯ ===
   async transcribeAudio(audioBuffer, userName = "Пользователь", mimeType = "audio/ogg") {
     const requestLogic = async () => {
+        this.countRequest('gemini');
         const parts = [
             { inlineData: { mimeType: mimeType, data: audioBuffer.toString("base64") } },
             { text: prompts.transcription(userName) }
         ];
-        const result = await this.model.generateContent(parts);
+        const result = await this.creativeModel.generateContent(parts);
         let text = result.response.text();
         text = text.replace(/```json/g, '').replace(/```/g, '').trim();
         const firstBrace = text.indexOf('{');
@@ -269,11 +361,12 @@ class AiService {
   // === ПАРСИНГ НАПОМИНАНИЯ (С КОНТЕКСТОМ) ===
   async parseReminder(userText, contextText = "") {
     const requestLogic = async () => {
+        this.countRequest('gemma');
         const now = this.getCurrentTime(); 
         // Передаем теперь три аргумента: Время, Текст юзера, Текст сообщения-исходника
         const prompt = prompts.parseReminder(now, userText, contextText);
         
-        const result = await this.model.generateContent(prompt);
+        const result = await this.logicModel.generateContent(prompt);
         let text = result.response.text();
         text = text.replace(/```json/g, '').replace(/```/g, '').trim();
         const firstBrace = text.indexOf('{');

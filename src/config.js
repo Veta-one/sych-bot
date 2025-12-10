@@ -20,7 +20,10 @@ module.exports = {
   
   geminiKeys: geminiKeys,
   
-  modelName: 'gemini-2.5-flash',
+  modelName: 'gemini-2.5-flash', 
+  fallbackModelName: 'gemini-2.5-flash-lite', // Запасной вариант
+  logicModelName: 'gemma-3-27b-it', // Рабочая лошадка для логики
+  contextSize: 30,
   contextSize: 30,
   triggerRegex: /(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i,
 
