@@ -1,3 +1,4 @@
+const packageInfo = require('../package.json');
 require('dotenv').config();
 
 // Собираем все ключи Gemini в массив
@@ -15,6 +16,7 @@ console.log(`[CONFIG] Загружено ключей Gemini: ${geminiKeys.lengt
 
 module.exports = {
   telegramToken: process.env.TELEGRAM_BOT_TOKEN,
+  version: packageInfo.version,
   botId: parseInt(process.env.TELEGRAM_BOT_TOKEN.split(':')[0], 10),
   adminId: parseInt(process.env.ADMIN_USER_ID, 10),
   

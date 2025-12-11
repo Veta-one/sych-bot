@@ -317,6 +317,9 @@ async function processMessage(bot, msg) {
   const isMuted = storage.isTopicMuted(chatId, threadId);
 
   // === КОМАНДЫ ===
+  if (command === '/version') {
+    return bot.sendMessage(chatId, `🦉 **Sych Bot**\nВерсия: \`v${config.version}\``, getBaseOptions(threadId));
+}
   if (command === '/help' || command === '/start') {
     const helpText = `
 *Вот тебе гайд*
@@ -339,6 +342,9 @@ async function processMessage(bot, msg) {
 **⚙️ Настройки:**
 • /mute — Режим тишины (перестану встревать в разговор сам).
 • /reset — Сброс памяти (если я начал тупить или забыл контекст).
+• /version — Узнать текущую версию бота.
+
+_ver: ${config.version}_
         `;
     try { return await bot.sendMessage(chatId, helpText, getBaseOptions(threadId)); } catch (e) {}
 }

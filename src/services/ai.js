@@ -11,7 +11,11 @@ class AiService {
     this.bot = null; // Ссылка на бота для уведомлений
 
     // === СТАТИСТИКА ===
-    this.stats = this.keys.map(() => ({ flash: 0, lite: 0, gemma: 0, status: true }));
+    this.stats = this.keys.map(() => ({ 
+      flash: 0, flashStatus: true,
+      lite: 0, liteStatus: true,
+      gemma: 0, gemmaStatus: true 
+    }));
     this.lastResetDate = new Date().getDate(); 
     // ==================
 
@@ -35,17 +39,21 @@ class AiService {
     
     // === СБРОС В ПОЛНОЧЬ ===
     if (today !== this.lastResetDate) {
-        this.stats = this.keys.map(s => ({ flash: 0, lite: 0, gemma: 0, status: true })); // Оживляем все ключи
+        // Оживляем все статусы
+        this.stats = this.keys.map(() => ({ 
+            flash: 0, flashStatus: true,
+            lite: 0, liteStatus: true,
+            gemma: 0, gemmaStatus: true 
+        })); 
         this.lastResetDate = today;
         
         // Если сидели на Lite — возвращаемся на Flash
         if (this.usingFallback) {
             this.usingFallback = false;
             this.keyIndex = 0;
-            this.initModel(); // Пересоздаем модель с конфигом Flash
+            this.initModel(); 
             this.notifyAdmin("🌙 **Новый день!**\nЛимиты сброшены.\nРежим переключен на: ⚡ **FLASH**");
         } else {
-             // Если и так были на Flash, просто сбрасываем индекс на первый ключ
              this.keyIndex = 0;
              this.initModel();
         }
@@ -63,7 +71,6 @@ class AiService {
                 this.stats[this.keyIndex].flash++;
             }
         }
-        this.stats[this.keyIndex].status = true; 
     }
   }
 
@@ -72,9 +79,11 @@ class AiService {
     const mode = this.usingFallback ? "⚠️ LITE РЕЖИМ" : "⚡ FLASH РЕЖИМ";
     
     const rows = this.stats.map((s, i) => {
-        const icon = s.status ? "🟢" : "🔴";
-        // Формат: 🟢1 — Flash • Lite • Gemma
-        return `${icon}${i + 1} — ${s.flash} • ${s.lite} • ${s.gemma}`;
+        const fIcon = s.flashStatus ? "🟢" : "🔴";
+        const lIcon = s.liteStatus ? "🟢" : "🔴";
+        const gIcon = s.gemmaStatus ? "🟢" : "🔴";
+        // Формат: 1 —🟢 0 • 🟢0 • 🔴121
+        return `${i + 1} — ${fIcon}${s.flash} • ${lIcon}${s.lite} • ${gIcon}${s.gemma}`;
     }).join('\n');
 
     return `Текущий режим: ${mode}\n\n(Flash • Lite • Gemma)\n${rows}`;
@@ -113,11 +122,21 @@ class AiService {
     });
   }
 
-  rotateKey() {
-    // Помечаем текущий ключ как "Мертвый" (🔴)
-    if (this.stats[this.keyIndex]) this.stats[this.keyIndex].status = false;
+  rotateKey(failedModelType) {
+    // Помечаем красным только ту модель, которая отвалилась
+    if (this.stats[this.keyIndex]) {
+        if (failedModelType === 'gemma') {
+            this.stats[this.keyIndex].gemmaStatus = false;
+        } else if (failedModelType === 'gemini') {
+            if (this.usingFallback) {
+                this.stats[this.keyIndex].liteStatus = false;
+            } else {
+                this.stats[this.keyIndex].flashStatus = false;
+            }
+        }
+    }
 
-    console.log(`[AI WARNING] Ключ #${this.keyIndex + 1} исчерпан (🔴).`);
+    console.log(`[AI WARNING] Ключ #${this.keyIndex + 1} исчерпан на модели ${failedModelType} (🔴).`);
 
     // Переходим к следующему
     this.keyIndex++;
@@ -145,8 +164,7 @@ class AiService {
     this.initModel();
   }
 
-  async executeWithRetry(apiCallFn) {
-    // Умножаем на 2, так как у нас теперь 2 прохода (Flash + Lite)
+  async executeWithRetry(apiCallFn, modelType) {
     const maxAttempts = this.keys.length * 2 + 1; 
 
     for (let attempt = 0; attempt < maxAttempts; attempt++) {
@@ -156,7 +174,7 @@ class AiService {
             const isQuotaError = error.message.includes('429') || error.message.includes('Quota') || error.message.includes('Resource has been exhausted') || error.message.includes('Too Many Requests');
             
             if (isQuotaError) {
-                this.rotateKey();
+                this.rotateKey(modelType); // <-- Передаем тип модели
                 continue;
             } else {
                 throw error;
@@ -182,6 +200,7 @@ class AiService {
   async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false) {
     console.log(`[DEBUG AI] getResponse вызван. Текст: ${currentMessage.text.slice(0, 20)}...`);
     const requestLogic = async () => {
+        this.countRequest('gemini');
         let promptParts = [];
         
         if (imageBuffer) {
@@ -239,13 +258,28 @@ class AiService {
         });
         
         const response = result.response;
-        let text = response.text();
+        const candidate = response.candidates[0];
+        let text = "";
 
-        // === CLEANUP (ОБЯЗАТЕЛЬНО!) ===
-        // Убираем только технический мусор, не трогая текст сообщения
-        text = text.replace(/^toolcode[\s\S]*?print\(.*?\)\s*/i, ''); // Следы от поиска
-        text = text.replace(/^thought[\s\S]*?\n\n/i, ''); // Технический блок мыслей (если API его вернет явно)
-        text = text.replace(/```json/g, '').replace(/```/g, '').trim(); // Маркдаун обертки
+        // === ЛЕЧИМ ЗАДВАИВАНИЕ (Проблема Grounding) ===
+        // Если есть части (parts) и их несколько, берем только ПОСЛЕДНЮЮ текстовую часть.
+        // Это отсекает "черновики", которые модель пишет перед тем, как погуглить.
+        if (candidate.content && candidate.content.parts && candidate.content.parts.length > 0) {
+            const textParts = candidate.content.parts.filter(p => p.text && p.text.trim() !== "");
+            if (textParts.length > 0) {
+                // Берем самый последний кусок текста (это и есть финальный ответ)
+                text = textParts[textParts.length - 1].text;
+            } else {
+                text = response.text(); // Если вдруг частей нет, берем стандартно
+            }
+        } else {
+            text = response.text();
+        }
+
+        // Чистка мусора
+        text = text.replace(/^toolcode[\s\S]*?print\(.*?\)\s*/i, ''); 
+        text = text.replace(/^thought[\s\S]*?\n\n/i, ''); 
+        text = text.replace(/```json/g, '').replace(/```/g, '').trim(); 
         // ==============================
 
         // --- ИСТОЧНИКИ ---
@@ -267,20 +301,22 @@ class AiService {
         return text;
     };
 
-    try { return await this.executeWithRetry(requestLogic); } catch (e) { throw e; }
+    try { return await this.executeWithRetry(requestLogic, 'gemini'); } catch (e) { throw e; }
   }
 
   // === РЕАКЦИЯ ===
   async determineReaction(contextText) {
     const allowed = ["👍", "👎", "❤", "🔥", "🥰", "👏", "😁", "🤔", "🤯", "😱", "🤬", "😢", "🎉", "🤩", "🤮", "💩", "🙏", "👌", "🕊", "🤡", "🥱", "🥴", "😍", "🐳", "❤‍🔥", "🌚", "🌭", "💯", "🤣", "⚡", "🍌", "🏆", "💔", "🤨", "😐", "🍓", "🍾", "💋", "🖕", "😈", "😴", "😭", "🤓", "👻", "👨‍💻", "👀", "🎃", "🙈", "😇", "😨", "🤝", "✍", "🤗", "🫡", "🎅", "🎄", "☃", "💅", "🤪", "🗿", "🆒", "💘", "🙉", "🦄", "😘", "💊", "🙊", "😎", "👾", "🤷‍♂", "🤷", "🤷‍♀", "😡"];
     const requestLogic = async () => {
+      this.countRequest('gemma'); // <-- ДОБАВИЛИ СЧЕТЧИК
       const result = await this.logicModel.generateContent(prompts.reaction(contextText, allowed.join(" ")));
       let text = result.response.text().trim();
         const match = text.match(/(\p{Emoji_Presentation}|\p{Extended_Pictographic})/u);
         if (match && allowed.includes(match[0])) return match[0];
         return null;
     };
-    try { return await this.executeWithRetry(requestLogic); } catch (e) { return null; }
+    // Передаем 'gemma' для ротации
+    try { return await this.executeWithRetry(requestLogic, 'gemma'); } catch (e) { return null; }
   }
 
   // === БЫСТРЫЙ АНАЛИЗ (С НОРМАЛЬНОЙ ЧИСТКОЙ) ===
@@ -306,7 +342,7 @@ class AiService {
     };
 
     try { 
-        return await this.executeWithRetry(requestLogic); 
+        return await this.executeWithRetry(requestLogic, 'gemma'); 
     } catch (e) { 
         console.error(`[AI ANALYSIS ERROR]: ${e.message}`);
         // Возвращаем null, чтобы бот не падал, а просто пропускал этот шаг
@@ -329,7 +365,7 @@ class AiService {
         if (firstBrace !== -1 && lastBrace !== -1) text = text.substring(firstBrace, lastBrace + 1);
         return JSON.parse(text);
     };
-    try { return await this.executeWithRetry(requestLogic); } catch (e) { return null; }
+    try { return await this.executeWithRetry(requestLogic, 'gemma'); } catch (e) { return null; }
   }
 
   async generateProfileDescription(profileData, targetName) {
@@ -338,16 +374,16 @@ class AiService {
         const res = await this.creativeModel.generateContent(prompts.profileDescription(targetName, profileData));
         return res.response.text();
      };
-     try { return await this.executeWithRetry(requestLogic); } catch(e) { return "Не знаю такого."; }
+     try { return await this.executeWithRetry(requestLogic, 'gemini'); } catch(e) { return "Не знаю такого."; }
   }
 
   async generateFlavorText(task, result) {
     const requestLogic = async () => {
-        this.countRequest('gemma');
+        this.countRequest('gemini');
         const res = await this.creativeModel.generateContent(prompts.flavor(task, result));
         return res.response.text().trim().replace(/^["']|["']$/g, '');
     };
-    try { return await this.executeWithRetry(requestLogic); } catch(e) { return `${result}`; }
+    try { return await this.executeWithRetry(requestLogic, 'gemini'); } catch(e) { return `${result}`; }
   }
   
   async shouldAnswer(lastMessages) {
@@ -356,7 +392,7 @@ class AiService {
       const res = await this.logicModel.generateContent(prompts.shouldAnswer(lastMessages));
       return res.response.text().toUpperCase().includes('YES');
   };
-    try { return await this.executeWithRetry(requestLogic); } catch(e) { return false; }
+    try { return await this.executeWithRetry(requestLogic, 'gemma'); } catch(e) { return false; }
   }
 
   // === ТРАНСКРИБАЦИЯ ===
@@ -375,7 +411,7 @@ class AiService {
         if (firstBrace !== -1 && lastBrace !== -1) text = text.substring(firstBrace, lastBrace + 1);
         return JSON.parse(text);
     };
-    try { return await this.executeWithRetry(requestLogic); } catch (e) { return null; }
+    try { return await this.executeWithRetry(requestLogic, 'gemini'); } catch (e) { return null; }
   }
 
   // === ПАРСИНГ НАПОМИНАНИЯ (С КОНТЕКСТОМ) ===
@@ -395,7 +431,7 @@ class AiService {
         
         return JSON.parse(text);
     };
-    try { return await this.executeWithRetry(requestLogic); } catch (e) { return null; }
+    try { return await this.executeWithRetry(requestLogic, 'gemma'); } catch (e) { return null; }
   }
 }
 
