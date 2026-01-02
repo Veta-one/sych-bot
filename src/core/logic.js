@@ -538,14 +538,14 @@ _ver: ${config.version}_
     shouldAnswer = true;
   } else {
     // Увеличили контекст до 5 сообщений и добавили имена (m.role), чтобы бот понимал диалог
-    if (text.length > 10 && Math.random() < 0.01) { 
+    if (text.length > 10 && Math.random() < 0.005) {
         const historyBlock = chatHistory[chatId].slice(-15).map(m => `${m.role}: ${m.text}`).join('\n');
         shouldAnswer = await ai.shouldAnswer(historyBlock);
     }
   }
 
   // === ЛОГИКА РЕАКЦИЙ (15%) ===
-  if (!shouldAnswer && text.length > 10 && !isReplyToBot && Math.random() < 0.07) {
+  if (!shouldAnswer && text.length > 10 && !isReplyToBot && Math.random() < 0.015) {
       
     // Берем контекст (последние 10 сообщений), чтобы реакция была в тему
     const historyBlock = chatHistory[chatId].slice(-15).map(m => `${m.role}: ${m.text}`).join('\n');
