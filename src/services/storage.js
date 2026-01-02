@@ -252,8 +252,9 @@ class StorageService {
         if (data.realName && data.realName !== "Неизвестно") current.realName = data.realName;
         if (data.facts) current.facts = data.facts;
         if (data.attitude) current.attitude = data.attitude;
+
+        if (data.location) current.location = data.location;
         
-        // === ДОБАВЛЯЕМ ЭТУ СТРОКУ ===
         if (data.relationship !== undefined) {
           const score = parseInt(data.relationship, 10);
           if (!isNaN(score)) current.relationship = score;
