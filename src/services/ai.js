@@ -223,12 +223,45 @@ class AiService {
       minute: '2-digit'
     });
   }
+
+  // === НОВЫЙ МЕТОД: ЧИСТЫЙ ПОИСК ===
+  async performSearch(query) {
+    if (!this.openai) return null;
+    try {
+        console.log(`[SEARCH] Запрос в Perplexity: ${query}`);
+        const completion = await this.openai.chat.completions.create({
+            model: 'perplexity/llama-3.1-sonar-large-128k-online',
+            messages: [
+                { role: "system", content: `Current Date: ${this.getCurrentTime()}. You are a search engine. Find the latest information. Provide citations.` },
+                { role: "user", content: query }
+            ],
+            temperature: 0.1
+        });
+        // Если хочешь считать статистику поиска отдельно, раскомментируй:
+        // this.countRequest('openrouter-search'); 
+        return completion.choices[0].message.content;
+    } catch (e) {
+        console.error(`[SEARCH FAIL] ${e.message}`);
+        return null;
+    }
+  }
   
 // === ОСНОВНОЙ ОТВЕТ ===
 async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false) {
-  console.log(`[DEBUG AI] getResponse вызван. Текст: ${currentMessage.text.slice(0, 20)}...`);
+  console.log(`[DEBUG AI] getResponse вызван.`);
 
-  // 1. Подготовка данных
+  // 1. ПРОВЕРЯЕМ И ДЕЛАЕМ ПОИСК (RAG)
+  const searchTriggers = /(курс|погода|новости|цена|стоимость|сколько стоит|найди|погугли|информация о|события|счет матча|кто такой|что такое|где купить|дата выхода|когда)/i;
+  const needsSearch = searchTriggers.test(currentMessage.text);
+  
+  let searchResultText = "";
+
+  if (needsSearch && this.openai) {
+      // Сначала идем в Perplexity за фактами
+      searchResultText = await this.performSearch(currentMessage.text);
+  }
+
+  // 2. ПОДГОТОВКА ДАННЫХ ДЛЯ GEMINI
   const relevantHistory = history.slice(-20); 
   const contextStr = relevantHistory.map(m => `${m.role}: ${m.text}`).join('\n');
   let personalInfo = "";
@@ -236,6 +269,16 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
 
   if (currentMessage.replyText) replyContext = `!!! ПОЛЬЗОВАТЕЛЬ ОТВЕТИЛ НА СООБЩЕНИЕ:\n"${currentMessage.replyText}"`;
   if (userInstruction) personalInfo += `\n!!! СПЕЦ-ИНСТРУКЦИЯ !!!\n${userInstruction}\n`;
+  
+  // Внедряем найденную инфу в "память" бота перед ответом
+  if (searchResultText) {
+      personalInfo += `
+!!! ВАЖНАЯ ИНФОРМАЦИЯ ИЗ ПОИСКА !!!
+${searchResultText}
+ИНСТРУКЦИЯ: Используй эти данные и ссылки для ответа, но сохраняй свой стиль.
+`;
+  }
+
   if (userProfile) {
       const score = userProfile.relationship || 50;
       let relationText = "";
@@ -255,10 +298,6 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       senderName: currentMessage.sender
   });
 
-  // === ОПРЕДЕЛЯЕМ НУЖЕН ЛИ ПОИСК ===
-  const searchTriggers = /(курс|погода|новости|цена|стоимость|сколько стоит|найди|погугли|информация о|события|счет матча|кто такой|что такое|где купить|дата выхода|когда)/i;
-  const needsSearch = searchTriggers.test(currentMessage.text);
-
   // 2. ПОПЫТКА OPENROUTER
   if (this.openai) {
       try {
@@ -272,18 +311,9 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
               });
           }
 
-          // Настройки по умолчанию (Gemini)
-          let currentModel = config.openRouterModel;
-          
-          // ЕСЛИ НУЖЕН ПОИСК -> ПЕРЕКЛЮЧАЕМСЯ НА PERPLEXITY
-          // Perplexity создана для поиска, она сама найдет и сама проставит ссылки [1][2].
-          if (needsSearch) {
-              console.log("[OPENROUTER] Запрос требует инфы. Переключаюсь на Perplexity (Sonar)...");
-              currentModel = 'perplexity/llama-3.1-sonar-large-128k-online'; 
-          }
-
-          const requestOptions = {
-              model: currentModel,
+            // Всегда используем основную модель (Gemini), так как инфу мы уже нашли на Шаге 1
+            const requestOptions = {
+              model: config.openRouterModel,
               messages: messages,
               max_tokens: 2500,
               temperature: 0.9,
