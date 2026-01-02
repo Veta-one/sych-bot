@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - main
-      - master  # На всякий случай, если ветка называется master
+      - master
 
 jobs:
   deploy:
@@ -18,14 +18,20 @@ jobs:
           key: ${{ secrets.SSH_KEY }}
           port: 22
           script: |
-            # Переходим в папку (ЗАМЕНИ ПУТЬ НИЖЕ НА ТОТ, ЧТО ТЫ ПОЛУЧИЛ В ШАГЕ 1)
-            cd /home/your_user/sych-bot
+            # 1. Загружаем переменные окружения (чтобы работали npm и pm2)
+            # Это нужно, потому что SSH сессия GitHub "слепая" и не видит пути
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
+            source ~/.bashrc
+
+            # 2. Переходим в папку (ИСПРАВИЛ ОПЕЧАТКУ sych-bot -> sych_bot)
+            cd /home/your_user/sych_bot
             
-            # Скачиваем обновления
+            # 3. Скачиваем обновления
             git pull origin main
             
-            # Обновляем библиотеки (вдруг ты добавил новые)
+            # 4. Обновляем библиотеки
             npm install --production
             
-            # Перезапускаем бота
+            # 5. Перезапускаем бота
             pm2 restart sych-bot
