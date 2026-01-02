@@ -256,7 +256,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   });
 
   // === ОПРЕДЕЛЯЕМ НУЖЕН ЛИ ПОИСК ===
-  const searchTriggers = /(курс|погода|новости|цена|стоимость|сколько стоит|найди|погугли|информация о|события|счет матча|кто такой|что такое|где купить|дата выхода)/i;
+  const searchTriggers = /(курс|погода|новости|цена|стоимость|сколько стоит|найди|погугли|информация о|события|счет матча|кто такой|что такое|где купить|дата выхода|когда)/i;
   const needsSearch = searchTriggers.test(currentMessage.text);
 
   // 2. ПОПЫТКА OPENROUTER
@@ -272,34 +272,36 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
               });
           }
 
-          // Базовые настройки
+          // Настройки по умолчанию (Gemini)
+          let currentModel = config.openRouterModel;
+          
+          // ЕСЛИ НУЖЕН ПОИСК -> ПЕРЕКЛЮЧАЕМСЯ НА PERPLEXITY
+          // Perplexity создана для поиска, она сама найдет и сама проставит ссылки [1][2].
+          if (needsSearch) {
+              console.log("[OPENROUTER] Запрос требует инфы. Переключаюсь на Perplexity (Sonar)...");
+              currentModel = 'perplexity/llama-3.1-sonar-large-128k-online'; 
+          }
+
           const requestOptions = {
-              model: config.openRouterModel,
+              model: currentModel,
               messages: messages,
               max_tokens: 2500,
               temperature: 0.9,
           };
-
-          // Если нужен поиск — подключаем плагин Exa
-          if (needsSearch) {
-              console.log("[OPENROUTER] Запрос требует инфы. Подключаю Web Search (Exa)...");
-              requestOptions.extraBody = {
-                  plugins: [
-                      {
-                          id: "web",
-                          engine: "exa",       // Явно указываем движок Exa (для Gemini это обязательно)
-                          max_results: 3,      // Экономим: берем 3 результата вместо 5
-                          search_prompt: "Найди актуальную информацию на 2026 год: " // Помогаем модели понять контекст
-                      }
-                  ]
-              };
-          }
+          
+          // Если используем Perplexity, плагины не нужны (поиск у неё встроенный/нативный)
+          // Если остаемся на Gemini и вдруг захотим Exa, можно добавить logic here, 
+          // но Perplexity надежнее и дешевле.
 
           const completion = await this.openai.chat.completions.create(requestOptions);
           
           this.countRequest('openrouter-creative'); 
           
           let text = completion.choices[0].message.content;
+          
+          // Если Perplexity вернула citations в отдельном поле (редко, но бывает), добавим их
+          // Но обычно она пишет их прямо в тексте в формате [1].
+          
           return text.replace(/^thought[\s\S]*?\n\n/i, ''); 
       } catch (e) {
           console.error(`[OPENROUTER FAIL] Creative Error: ${e.message}. Fallback to Google...`);
@@ -307,7 +309,6 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   }
 
   // 3. GOOGLE NATIVE (FALLBACK)
-  // Сюда попадем только если OpenRouter вернет ошибку (например, кончились деньги)
   const requestLogic = async () => {
       this.countRequest('gemini');
       let promptParts = [];
