@@ -289,24 +289,23 @@ ${searchResultText}
 `;
 }
 
-  if (userProfile) {
-      const score = userProfile.relationship || 50;
-      let relationText = "";
-      if (score <= 20) relationText = `СТАТУС: ВРАГ (${score}/100). Отвечай грубо, с сарказмом.`;
-      else if (score <= 40) relationText = `СТАТУС: ХОЛОД (${score}/100). Язви, не доверяй.`;
-      else if (score >= 80) relationText = `СТАТУС: БРАТАН (${score}/100). Поддерживай, шути по-доброму.`;
-        // Формируем текст досье
-        personalInfo += `\n--- ДОСЬЕ НА СОБЕСЕДНИКА ---\n`;
-        personalInfo += `Факты: ${userProfile.facts || "Нет"}\n`;
-        
-        if (userProfile.location) {
-            personalInfo += `📍 ЛОКАЦИЯ: ${userProfile.location} (Учитывай часовой пояс этого города при ответах о времени!)\n`;
-        }
-
-        personalInfo += `${relationText}\n-----------------\n`;
-    }
-      
+if (userProfile) {
+  const score = userProfile.relationship || 50;
+  let relationText = "";
+  if (score <= 20) relationText = `СТАТУС: ВРАГ (${score}/100). Отвечай грубо, с сарказмом.`;
+  else if (score <= 40) relationText = `СТАТУС: ХОЛОД (${score}/100). Язви, не доверяй.`;
+  else if (score >= 80) relationText = `СТАТУС: БРАТАН (${score}/100). Поддерживай, шути по-доброму.`;
+  
+  // Формируем текст досье
+  personalInfo += `\n--- ДОСЬЕ НА СОБЕСЕДНИКА ---\n`;
+  personalInfo += `Факты: ${userProfile.facts || "Нет"}\n`;
+  
+  if (userProfile.location) {
+      personalInfo += `📍 ЛОКАЦИЯ: ${userProfile.location} (Учитывай часовой пояс этого города при ответах о времени!)\n`;
   }
+
+  personalInfo += `${relationText}\n-----------------\n`;
+}
 
   const fullPromptText = prompts.mainChat({
       time: this.getCurrentTime(),
