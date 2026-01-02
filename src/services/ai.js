@@ -230,15 +230,17 @@ class AiService {
     try {
         console.log(`[SEARCH] Запрос в Perplexity: ${query}`);
         const completion = await this.openai.chat.completions.create({
-            model: 'perplexity/llama-3.1-sonar-large-128k-online',
+            model: config.openRouterSearchModel, // <--- Теперь берем из конфига
             messages: [
                 { role: "system", content: `Current Date: ${this.getCurrentTime()}. You are a search engine. Find the latest information. Provide citations.` },
                 { role: "user", content: query }
             ],
             temperature: 0.1
         });
-        // Если хочешь считать статистику поиска отдельно, раскомментируй:
+        
+        // Можем раскомментировать, если хотим считать статистику поиска
         // this.countRequest('openrouter-search'); 
+        
         return completion.choices[0].message.content;
     } catch (e) {
         console.error(`[SEARCH FAIL] ${e.message}`);

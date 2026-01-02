@@ -38,6 +38,9 @@ module.exports = {
   // Модель для ЛОГИКИ (бесплатная/дешевая: реакции, анализ, проверки)
   openRouterLogicModel: 'google/gemma-3-27b-it:free', 
 
+  // Модель для ПОИСКА (RAG)
+  openRouterSearchModel: 'perplexity/sonar',
+
 };
 
 
