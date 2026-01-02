@@ -22,8 +22,8 @@ module.exports = {
   
   geminiKeys: geminiKeys,
   
-  modelName: 'gemini-2.5-flash', 
-  fallbackModelName: 'gemini-2.5-flash-lite', // Запасной вариант
+  modelName: 'gemini-3-flash-preview', //gemini-2.5-flash
+  fallbackModelName: 'gemini-2.5-flash', // Запасной вариант
   logicModelName: 'gemma-3-27b-it', // Рабочая лошадка для логики
   contextSize: 30,
   contextSize: 30,

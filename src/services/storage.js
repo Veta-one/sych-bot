@@ -33,7 +33,7 @@ class StorageService {
     try {
       this.data = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
       // Если базы напоминаний нет — создаем пустую
-      if (!this.data.reminders) this.data.reminders = [];
+      if (!this.data.bannedUsers) this.data.bannedUsers = {}; // { userId: "reason/name" }
     } catch (e) { 
       console.error("Ошибка чтения DB, сброс."); 
       this.data = { chats: {}, reminders: [] };
@@ -289,6 +289,43 @@ class StorageService {
 
     return null;
   }
+
+    // === БАН-ХАММЕР ===
+
+    isBanned(userId) {
+      if (!this.data.bannedUsers) return false;
+      return !!this.data.bannedUsers[userId];
+    }
+  
+    banUser(userId, info) {
+      if (!this.data.bannedUsers) this.data.bannedUsers = {};
+      this.data.bannedUsers[userId] = info || "Banned by Admin";
+      this.save();
+    }
+  
+    unbanUser(userId) {
+      if (!this.data.bannedUsers) return;
+      delete this.data.bannedUsers[userId];
+      this.save();
+    }
+  
+    getBannedList() {
+      return this.data.bannedUsers || {};
+    }
+  
+    // Поиск ID по никнейму (сканируем все чаты)
+    findUserIdByUsername(username) {
+      const target = username.replace('@', '').toLowerCase();
+      
+      for (const chat of Object.values(this.data.chats)) {
+          for (const [uid, uName] of Object.entries(chat.users)) {
+              if (String(uName).toLowerCase().includes(target)) {
+                  return uid;
+              }
+          }
+      }
+      return null;
+    }
 }
 
 module.exports = new StorageService();

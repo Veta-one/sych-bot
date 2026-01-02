@@ -7,6 +7,8 @@ const { exec } = require('child_process');
 const chatHistory = {}; 
 const analysisBuffers = {}; 
 const BUFFER_SIZE = 20; 
+// Храним 10 последних активных юзеров для удобного бана
+const recentActiveUsers = []; 
 
 // === ГЕНЕРАТОР ОТМАЗОК СЫЧА ===
 function getSychErrorReply(errText) {
@@ -105,6 +107,10 @@ async function processBuffer(chatId) {
 async function processMessage(bot, msg) {
     const chatId = msg.chat.id;
     const userId = msg.from.id;
+    // === ⛔ ГЛОБАЛЬНЫЙ БАН ===
+    if (storage.isBanned(userId) && userId !== config.adminId) {
+        return; // Полный игнор
+    }
     
     // 1. УМНЫЙ ПОИСК ТОПИКА
     // Если это топик, ID должен быть тут. Если это реплай, иногда ID лежит внутри reply_to_message.
@@ -163,7 +169,21 @@ async function processMessage(bot, msg) {
   
     // Определяем красивое имя чата (Название группы или Имя юзера в личке)
     const chatTitle = msg.chat.title || msg.chat.username || msg.chat.first_name || "Unknown";
-
+    // Запоминаем активность для команды /ban (кроме Админа)
+    if (userId !== config.adminId) {
+        const senderInfo = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
+        // Убираем дубли, если юзер уже есть в начале списка
+        const existingIndex = recentActiveUsers.findIndex(u => u.id === userId);
+        if (existingIndex !== -1) recentActiveUsers.splice(existingIndex, 1);
+        
+        recentActiveUsers.unshift({
+            id: userId,
+            name: senderInfo,
+            text: text.slice(0, 30), // Сохраняем начало сообщения
+            chat: chatTitle
+        });
+        if (recentActiveUsers.length > 10) recentActiveUsers.pop();
+    }
       // === УВЕДОМЛЕНИЕ О НОВОМ ЧАТЕ ===
   // Если чата нет в базе И это не сам админ пишет себе в личку
   if (!storage.hasChat(chatId) && chatId !== config.adminId) {
@@ -320,6 +340,60 @@ async function processMessage(bot, msg) {
   if (command === '/version') {
     return bot.sendMessage(chatId, `🦉 **Sych Bot**\nВерсия: \`v${config.version}\``, getBaseOptions(threadId));
 }
+
+  // === АДМИН-ПАНЕЛЬ (БАНЫ) ===
+  if (userId === config.adminId) {
+      
+    // 1. СПИСОК ЗАБАНЕННЫХ
+    if (command === '/banlist') {
+        const banned = storage.getBannedList();
+        const list = Object.entries(banned).map(([uid, name]) => `⛔ \`${uid}\` — ${name}`).join('\n');
+        return bot.sendMessage(chatId, list.length ? `**Черный список:**\n${list}` : "Список пуст.", getBaseOptions(threadId));
+    }
+
+    // 2. РАЗБАН
+    if (command === '/unban') {
+        const targetId = text.split(' ')[1];
+        if (!targetId) return bot.sendMessage(chatId, "⚠️ Введи ID: `/unban 123456`", getBaseOptions(threadId));
+        
+        storage.unbanUser(targetId);
+        return bot.sendMessage(chatId, `✅ Юзер \`${targetId}\` разбанен.`, getBaseOptions(threadId));
+    }
+
+    // 3. БАН (С интерфейсом)
+    if (command === '/ban') {
+        const args = text.split(/\s+/);
+        const target = args[1]; // Может быть ID или @username
+
+        // Вариант А: Просто /ban (показываем последних активных)
+        if (!target) {
+            if (recentActiveUsers.length === 0) return bot.sendMessage(chatId, "Список активности пуст.", getBaseOptions(threadId));
+            
+            const list = recentActiveUsers.map((u, i) => {
+                return `${i+1}. **${u.name}**\n🆔 \`${u.id}\`\n💬 "${u.text}..."\n📂 ${u.chat}`;
+            }).join('\n\n');
+            
+            return bot.sendMessage(chatId, `**Последние активные:**\n\n${list}\n\nЧтобы забанить: \`/ban ID\``, getBaseOptions(threadId));
+        }
+
+        // Вариант Б: /ban @username или /ban 123456
+        let targetId = target;
+        let targetName = target;
+
+        // Если ввели username (начинается с @ или буквы)
+        if (isNaN(target)) {
+           const foundId = storage.findUserIdByUsername(target);
+           if (!foundId) return bot.sendMessage(chatId, `❌ Не нашел юзера с ником ${target} в своей базе. Нужен точный ID.`, getBaseOptions(threadId));
+           targetId = foundId;
+        }
+
+        if (parseInt(targetId) === config.adminId) return bot.sendMessage(chatId, "🤡 Себя банить плохая примета.", getBaseOptions(threadId));
+
+        storage.banUser(targetId, targetName);
+        return bot.sendMessage(chatId, `🚫 **BANNED**\nПользователь: ${targetName}\nID: \`${targetId}\`\n\nТеперь я буду его игнорить везде.`, getBaseOptions(threadId));
+    }
+}
+
   if (command === '/help' || command === '/start') {
     const helpText = `
 *Вот тебе гайд*
