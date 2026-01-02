@@ -36,7 +36,7 @@ module.exports = {
   openRouterModel: 'google/gemini-3-flash-preview', // Или 'google/gemini-3-flash-preview' если она там уже есть
   
   // Модель для ЛОГИКИ (бесплатная/дешевая: реакции, анализ, проверки)
-  openRouterLogicModel: 'google/gemma-3-27b-it:free', 
+  openRouterLogicModel: 'google/gemma-3-27b-it', 
 
   // Модель для ПОИСКА (RAG)
   openRouterSearchModel: 'perplexity/sonar',
