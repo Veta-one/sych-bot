@@ -224,116 +224,123 @@ class AiService {
     });
   }
   
-  // === ОСНОВНОЙ ОТВЕТ ===
-  async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false) {
-    console.log(`[DEBUG AI] getResponse вызван. Текст: ${currentMessage.text.slice(0, 20)}...`);
+// === ОСНОВНОЙ ОТВЕТ ===
+async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false) {
+  console.log(`[DEBUG AI] getResponse вызван. Текст: ${currentMessage.text.slice(0, 20)}...`);
 
-    // 1. Подготовка данных
-    const relevantHistory = history.slice(-20); 
-    const contextStr = relevantHistory.map(m => `${m.role}: ${m.text}`).join('\n');
-    let personalInfo = "";
-    let replyContext = "";
+  // 1. Подготовка данных
+  const relevantHistory = history.slice(-20); 
+  const contextStr = relevantHistory.map(m => `${m.role}: ${m.text}`).join('\n');
+  let personalInfo = "";
+  let replyContext = "";
 
-    if (currentMessage.replyText) replyContext = `!!! ПОЛЬЗОВАТЕЛЬ ОТВЕТИЛ НА СООБЩЕНИЕ:\n"${currentMessage.replyText}"`;
-    if (userInstruction) personalInfo += `\n!!! СПЕЦ-ИНСТРУКЦИЯ !!!\n${userInstruction}\n`;
-    if (userProfile) {
-        const score = userProfile.relationship || 50;
-        let relationText = "";
-        if (score <= 20) relationText = `СТАТУС: ВРАГ (${score}/100). Отвечай грубо, с сарказмом.`;
-        else if (score <= 40) relationText = `СТАТУС: ХОЛОД (${score}/100). Язви, не доверяй.`;
-        else if (score >= 80) relationText = `СТАТУС: БРАТАН (${score}/100). Поддерживай, шути по-доброму.`;
-        personalInfo += `\n--- ДОСЬЕ ---\nФакты: ${userProfile.facts || "Нет"}\n${relationText}\n-----------------\n`;
-    }
-
-    const fullPromptText = prompts.mainChat({
-        time: this.getCurrentTime(),
-        isSpontaneous: isSpontaneous,
-        userMessage: currentMessage.text,
-        replyContext: replyContext,
-        history: contextStr,
-        personalInfo: personalInfo,
-        senderName: currentMessage.sender
-    });
-
-    // === ОПРЕДЕЛЯЕМ НУЖЕН ЛИ ПОИСК ===
-    const searchTriggers = /(курс|погода|новости|цена|стоимость|сколько стоит|найди|погугли|информация о|события|счет матча|кто такой|что такое|где купить|дата выхода)/i;
-    const needsSearch = searchTriggers.test(currentMessage.text);
-
-    // 2. ПОПЫТКА OPENROUTER
-    if (this.openai) {
-        try {
-            // console.log(`[AI] OpenRouter Creative: ${config.openRouterModel}`);
-            const messages = [{ role: "system", content: prompts.system() }, { role: "user", content: [] }];
-            
-            messages[1].content.push({ type: "text", text: fullPromptText });
-            if (imageBuffer) {
-                messages[1].content.push({
-                    type: "image_url",
-                    image_url: { url: `data:${mimeType};base64,${imageBuffer.toString('base64')}` }
-                });
-            }
-
-            // Формируем параметры запроса
-            const requestOptions = {
-                model: config.openRouterModel,
-                messages: messages,
-                max_tokens: 2500,
-                temperature: 0.9,
-            };
-
-            // !!! ВАЖНО: ВКЛЮЧАЕМ ПЛАГИН ЧЕРЕЗ extraBody !!!
-            if (needsSearch) {
-                console.log("[OPENROUTER] Включаю Web Search Plugin...");
-                requestOptions.extraBody = {
-                    plugins: [ { id: "web" } ]
-                };
-            }
-
-            const completion = await this.openai.chat.completions.create(requestOptions);
-            
-            this.countRequest('openrouter-creative'); 
-            
-            let text = completion.choices[0].message.content;
-            return text.replace(/^thought[\s\S]*?\n\n/i, ''); 
-        } catch (e) {
-            console.error(`[OPENROUTER FAIL] Creative Error: ${e.message}. Fallback to Google...`);
-        }
-    }
-
-    // 3. FALLBACK: ORIGINAL GEMINI LOGIC
-    const requestLogic = async () => {
-        this.countRequest('gemini');
-        let promptParts = [];
-        if (imageBuffer) {
-          promptParts.push({ inlineData: { mimeType: mimeType, data: imageBuffer.toString("base64") } });
-          promptParts.push({ text: "Проанализируй этот файл. Опиши, что там, или ответь на вопрос по нему." });
-        }
-        promptParts.push({ text: fullPromptText });
-
-        const result = await this.creativeModel.generateContent({
-            contents: [{ role: 'user', parts: promptParts }],
-            generationConfig: { maxOutputTokens: 2500, temperature: 0.9 }
-        });
-        
-        let text = result.response.text();
-        if (result.response.candidates && result.response.candidates[0].content && result.response.candidates[0].content.parts) {
-            const parts = result.response.candidates[0].content.parts;
-            if (parts.length > 0) text = parts[parts.length - 1].text;
-        }
-        
-        text = text.replace(/^toolcode[\s\S]*?print\(.*?\)\s*/i, '').replace(/^thought[\s\S]*?\n\n/i, '').replace(/```json/g, '').replace(/```/g, '').trim();
-        
-        if (result.response.candidates[0].groundingMetadata?.groundingChunks) {
-            const links = result.response.candidates[0].groundingMetadata.groundingChunks
-                .filter(c => c.web?.uri).map(c => `[${c.web.title || "Источник"}](${c.web.uri})`);
-            const unique = [...new Set(links)].slice(0, 3);
-            if (unique.length > 0) text += "\n\nНашел тут: " + unique.join(" • ");
-        }
-        return text;
-    };
-
-    try { return await this.executeWithRetry(requestLogic, 'gemini'); } catch (e) { throw e; }
+  if (currentMessage.replyText) replyContext = `!!! ПОЛЬЗОВАТЕЛЬ ОТВЕТИЛ НА СООБЩЕНИЕ:\n"${currentMessage.replyText}"`;
+  if (userInstruction) personalInfo += `\n!!! СПЕЦ-ИНСТРУКЦИЯ !!!\n${userInstruction}\n`;
+  if (userProfile) {
+      const score = userProfile.relationship || 50;
+      let relationText = "";
+      if (score <= 20) relationText = `СТАТУС: ВРАГ (${score}/100). Отвечай грубо, с сарказмом.`;
+      else if (score <= 40) relationText = `СТАТУС: ХОЛОД (${score}/100). Язви, не доверяй.`;
+      else if (score >= 80) relationText = `СТАТУС: БРАТАН (${score}/100). Поддерживай, шути по-доброму.`;
+      personalInfo += `\n--- ДОСЬЕ ---\nФакты: ${userProfile.facts || "Нет"}\n${relationText}\n-----------------\n`;
   }
+
+  const fullPromptText = prompts.mainChat({
+      time: this.getCurrentTime(),
+      isSpontaneous: isSpontaneous,
+      userMessage: currentMessage.text,
+      replyContext: replyContext,
+      history: contextStr,
+      personalInfo: personalInfo,
+      senderName: currentMessage.sender
+  });
+
+  // === ОПРЕДЕЛЯЕМ НУЖЕН ЛИ ПОИСК ===
+  const searchTriggers = /(курс|погода|новости|цена|стоимость|сколько стоит|найди|погугли|информация о|события|счет матча|кто такой|что такое|где купить|дата выхода)/i;
+  const needsSearch = searchTriggers.test(currentMessage.text);
+
+  // 2. ПОПЫТКА OPENROUTER
+  if (this.openai) {
+      try {
+          const messages = [{ role: "system", content: prompts.system() }, { role: "user", content: [] }];
+          
+          messages[1].content.push({ type: "text", text: fullPromptText });
+          if (imageBuffer) {
+              messages[1].content.push({
+                  type: "image_url",
+                  image_url: { url: `data:${mimeType};base64,${imageBuffer.toString('base64')}` }
+              });
+          }
+
+          // Базовые настройки
+          const requestOptions = {
+              model: config.openRouterModel,
+              messages: messages,
+              max_tokens: 2500,
+              temperature: 0.9,
+          };
+
+          // Если нужен поиск — подключаем плагин Exa
+          if (needsSearch) {
+              console.log("[OPENROUTER] Запрос требует инфы. Подключаю Web Search (Exa)...");
+              requestOptions.extraBody = {
+                  plugins: [
+                      {
+                          id: "web",
+                          engine: "exa",       // Явно указываем движок Exa (для Gemini это обязательно)
+                          max_results: 3,      // Экономим: берем 3 результата вместо 5
+                          search_prompt: "Найди актуальную информацию на 2026 год: " // Помогаем модели понять контекст
+                      }
+                  ]
+              };
+          }
+
+          const completion = await this.openai.chat.completions.create(requestOptions);
+          
+          this.countRequest('openrouter-creative'); 
+          
+          let text = completion.choices[0].message.content;
+          return text.replace(/^thought[\s\S]*?\n\n/i, ''); 
+      } catch (e) {
+          console.error(`[OPENROUTER FAIL] Creative Error: ${e.message}. Fallback to Google...`);
+      }
+  }
+
+  // 3. GOOGLE NATIVE (FALLBACK)
+  // Сюда попадем только если OpenRouter вернет ошибку (например, кончились деньги)
+  const requestLogic = async () => {
+      this.countRequest('gemini');
+      let promptParts = [];
+      if (imageBuffer) {
+        promptParts.push({ inlineData: { mimeType: mimeType, data: imageBuffer.toString("base64") } });
+        promptParts.push({ text: "Проанализируй этот файл. Опиши, что там, или ответь на вопрос по нему." });
+      }
+      promptParts.push({ text: fullPromptText });
+
+      const result = await this.creativeModel.generateContent({
+          contents: [{ role: 'user', parts: promptParts }],
+          generationConfig: { maxOutputTokens: 2500, temperature: 0.9 }
+      });
+      
+      let text = result.response.text();
+      if (result.response.candidates && result.response.candidates[0].content && result.response.candidates[0].content.parts) {
+           const parts = result.response.candidates[0].content.parts;
+           if (parts.length > 0) text = parts[parts.length - 1].text;
+      }
+      
+      text = text.replace(/^toolcode[\s\S]*?print\(.*?\)\s*/i, '').replace(/^thought[\s\S]*?\n\n/i, '').replace(/```json/g, '').replace(/```/g, '').trim();
+      
+      if (result.response.candidates[0].groundingMetadata?.groundingChunks) {
+          const links = result.response.candidates[0].groundingMetadata.groundingChunks
+              .filter(c => c.web?.uri).map(c => `[${c.web.title || "Источник"}](${c.web.uri})`);
+          const unique = [...new Set(links)].slice(0, 3);
+          if (unique.length > 0) text += "\n\nНашел тут: " + unique.join(" • ");
+      }
+      return text;
+  };
+
+  try { return await this.executeWithRetry(requestLogic, 'gemini'); } catch (e) { throw e; }
+}
 
 // === РЕАКЦИЯ ===
 async determineReaction(contextText) {
