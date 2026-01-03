@@ -45,7 +45,8 @@ module.exports = {
 
   // === GEMINI NATIVE (FALLBACK / SEARCH) ===
   geminiKeys: geminiKeys,
-  fallbackModelName: 'gemini-2.5-flash-lite', // Для подстраховки
+  googleNativeModel: 'gemini-2.5-flash-lite', 
+  fallbackModelName: 'gemini-2.5-flash-lite', 
   contextSize: 30,
   triggerRegex: /(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i,
 };

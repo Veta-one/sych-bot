@@ -88,7 +88,7 @@ class AiService {
     ];
 
     // Используем Fallback модель или стандартную Flash (она доступна в нативе)
-    const modelName = this.usingFallback ? config.fallbackModelName : 'gemini-2.0-flash';
+    const modelName = this.usingFallback ? config.fallbackModelName : config.googleNativeModel;
     console.log(`[AI INIT] Native Key #${this.keyIndex + 1} | Model: ${modelName}`);
 
     this.nativeModel = genAI.getGenerativeModel({ 
