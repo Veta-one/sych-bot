@@ -59,6 +59,7 @@ src/
 ### Data Storage (`/data` directory)
 - `db.json` - Chats, reminders, banned users
 - `profiles.json` - User profiles (reputation, traits, interests)
+- `chatProfiles.json` - Chat profiles (topic, facts, style)
 - `instructions.json` - User-specific instructions
 
 ### Message Processing Flow
@@ -117,6 +118,23 @@ See `.env.example` for full configuration template.
 - Конфликты с другими пользователями НЕ влияют на репутацию
 - Валидация в коде: `storage.js` → `_applyProfileUpdates()`
 
+## Chat Profile System (Chat Context)
+
+Бот запоминает информацию о чатах в `chatProfiles.json`.
+
+**Поля профиля чата:** `topic`, `facts`, `style`, `lastUpdated`
+
+**Механизмы обновления:**
+- **Batch**: каждые 50 сообщений анализирует тему и факты чата
+- **Инициализация**: при пустом профиле и наличии 10+ сообщений в истории
+- **Ручная команда**: `Сыч, этот чат про [описание]`
+
+**Лимиты:**
+- `topic`: до 200 символов (1-2 предложения)
+- `facts`: до 500 символов (накопленные факты)
+
+**Использование:** контекст чата передаётся в каждый запрос AI (~100 токенов).
+
 ## Design Decisions
 
 - **Admin-only groups**: Bot auto-leaves groups where admin isn't a member
@@ -135,3 +153,4 @@ See `.env.example` for full configuration template.
 - `Сыч напомни [текст]` - Set reminder
 - `Сыч кто я?` - Show user profile
 - `Сыч стата` - Show token usage statistics
+- `Сыч, этот чат про [тема]` - Set chat topic manually

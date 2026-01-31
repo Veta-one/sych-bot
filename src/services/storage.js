@@ -4,6 +4,7 @@ const path = require('path');
 const DB_PATH = path.join(__dirname, '../../data/db.json');
 const INSTRUCTIONS_PATH = path.join(__dirname, '../../data/instructions.json');
 const PROFILES_PATH = path.join(__dirname, '../../data/profiles.json');
+const CHAT_PROFILES_PATH = path.join(__dirname, '../../data/chatProfiles.json');
 const debounce = require('lodash.debounce');
 
 class StorageService {
@@ -11,8 +12,10 @@ class StorageService {
     // Создаем отложенные функции сохранения (ждут 5 секунд тишины перед записью)
     this.saveDebounced = debounce(this._saveToFile.bind(this), 5000);
     this.saveProfilesDebounced = debounce(this._saveProfilesToFile.bind(this), 5000);
+    this.saveChatProfilesDebounced = debounce(this._saveChatProfilesToFile.bind(this), 5000);
     this.data = { chats: {} };
     this.profiles = {};
+    this.chatProfiles = {};
     // Очередь обновлений профилей для предотвращения race condition
     this.profileUpdateQueue = Promise.resolve();
 
@@ -20,7 +23,8 @@ class StorageService {
     this.ensureFile(DB_PATH, '{"chats": {}}');
     this.ensureFile(INSTRUCTIONS_PATH, '{}');
     this.ensureFile(PROFILES_PATH, '{}');
-    
+    this.ensureFile(CHAT_PROFILES_PATH, '{}');
+
     // 2. Загружаем данные в память
     this.load();
   }
@@ -43,9 +47,16 @@ class StorageService {
     // Грузим профили
     try {
       this.profiles = JSON.parse(fs.readFileSync(PROFILES_PATH, 'utf-8'));
-    } catch (e) { 
+    } catch (e) {
       console.error("Ошибка чтения Profiles, сброс.");
-      this.profiles = {}; 
+      this.profiles = {};
+    }
+    // Грузим профили чатов
+    try {
+      this.chatProfiles = JSON.parse(fs.readFileSync(CHAT_PROFILES_PATH, 'utf-8'));
+    } catch (e) {
+      console.error("Ошибка чтения ChatProfiles, сброс.");
+      this.chatProfiles = {};
     }
   }
 
@@ -110,10 +121,21 @@ class StorageService {
     } catch (e) { console.error("Ошибка записи Profiles:", e); }
   }
 
+  _saveChatProfilesToFile() {
+    try {
+      fs.writeFileSync(CHAT_PROFILES_PATH, JSON.stringify(this.chatProfiles, null, 2));
+    } catch (e) { console.error("Ошибка записи ChatProfiles:", e); }
+  }
+
+  saveChatProfiles() {
+    this.saveChatProfilesDebounced();
+  }
+
   // Принудительное сохранение (для выхода из процесса)
   forceSave() {
     this.saveDebounced.flush();
     this.saveProfilesDebounced.flush();
+    this.saveChatProfilesDebounced.flush();
   }
 
   // Проверка существования без создания (для уведомлений)
@@ -348,7 +370,7 @@ class StorageService {
     // Поиск ID по никнейму (сканируем все чаты)
     findUserIdByUsername(username) {
       const target = username.replace('@', '').toLowerCase();
-      
+
       for (const chat of Object.values(this.data.chats)) {
           for (const [uid, uName] of Object.entries(chat.users)) {
               if (String(uName).toLowerCase().includes(target)) {
@@ -358,6 +380,66 @@ class StorageService {
       }
       return null;
     }
+
+  // === ПРОФИЛИ ЧАТОВ ===
+
+  // Получить профиль чата (или пустой объект)
+  getChatProfile(chatId) {
+    if (!this.chatProfiles[chatId]) {
+      return { topic: null, facts: null, style: null, lastUpdated: null };
+    }
+    return this.chatProfiles[chatId];
+  }
+
+  // Проверить, есть ли у чата профиль с темой
+  hasChatProfile(chatId) {
+    return !!(this.chatProfiles[chatId] && this.chatProfiles[chatId].topic);
+  }
+
+  // Обновить профиль чата (после AI-анализа)
+  updateChatProfile(chatId, updates) {
+    if (!this.chatProfiles[chatId]) {
+      this.chatProfiles[chatId] = { topic: null, facts: null, style: null, lastUpdated: null };
+    }
+
+    const current = this.chatProfiles[chatId];
+
+    // Обновляем тему, если AI её определил
+    if (updates.topic) {
+      // Ограничиваем длину темы до 200 символов
+      current.topic = updates.topic.substring(0, 200);
+    }
+
+    // Обновляем факты
+    if (updates.facts) {
+      // Ограничиваем длину фактов до 500 символов
+      current.facts = updates.facts.substring(0, 500);
+    }
+
+    // Обновляем стиль
+    if (updates.style) {
+      current.style = updates.style;
+    }
+
+    current.lastUpdated = new Date().toISOString();
+    this.chatProfiles[chatId] = current;
+    this.saveChatProfiles();
+
+    console.log(`[CHAT PROFILE] Обновлен профиль чата ${chatId}: "${current.topic}"`);
+  }
+
+  // Установить тему вручную (команда "Сыч, этот чат про...")
+  setChatTopic(chatId, topic) {
+    if (!this.chatProfiles[chatId]) {
+      this.chatProfiles[chatId] = { topic: null, facts: null, style: null, lastUpdated: null };
+    }
+
+    this.chatProfiles[chatId].topic = topic.substring(0, 200);
+    this.chatProfiles[chatId].lastUpdated = new Date().toISOString();
+    this.saveChatProfiles();
+
+    console.log(`[CHAT PROFILE] Тема установлена вручную для ${chatId}: "${topic}"`);
+  }
 }
 
 module.exports = new StorageService();

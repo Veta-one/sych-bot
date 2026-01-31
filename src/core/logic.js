@@ -4,9 +4,11 @@ const ai = require('../services/ai');
 const config = require('../config');
 const axios = require('axios');
 const { exec } = require('child_process');
-const chatHistory = {}; 
-const analysisBuffers = {}; 
-const BUFFER_SIZE = 20; 
+const chatHistory = {};
+const analysisBuffers = {};
+const chatAnalysisBuffers = {}; // Буфер для анализа профиля чата
+const BUFFER_SIZE = 20;
+const CHAT_BUFFER_SIZE = 50; // Анализируем чат каждые 50 сообщений
 // Храним 10 последних активных юзеров для удобного бана
 const recentActiveUsers = []; 
 
@@ -96,16 +98,56 @@ function escapeHtml(text) {
 async function processBuffer(chatId) {
     const buffer = analysisBuffers[chatId];
     if (!buffer || buffer.length === 0) return;
-    
+
     const userIds = [...new Set(buffer.map(m => m.userId))];
     const currentProfiles = storage.getProfilesForUsers(chatId, userIds);
     const updates = await ai.analyzeBatch(buffer, currentProfiles);
-    
+
     if (updates) {
         storage.bulkUpdateProfiles(chatId, updates);
         console.log(`[OBSERVER] Обновлено профилей: ${Object.keys(updates).length}`);
     }
     analysisBuffers[chatId] = [];
+}
+
+// Анализ профиля чата (каждые 50 сообщений)
+async function processChatBuffer(chatId) {
+    const buffer = chatAnalysisBuffers[chatId];
+    if (!buffer || buffer.length === 0) return;
+
+    const currentProfile = storage.getChatProfile(chatId);
+    const updates = await ai.analyzeChatProfile(buffer, currentProfile);
+
+    if (updates) {
+        storage.updateChatProfile(chatId, updates);
+        console.log(`[CHAT PROFILE] Обновлен профиль чата ${chatId}`);
+    }
+    chatAnalysisBuffers[chatId] = [];
+}
+
+// Инициализация профиля чата (для новых чатов или при пустом профиле)
+async function initChatProfile(bot, chatId) {
+    try {
+        // Пытаемся получить последние 50 сообщений из истории
+        // (используем chatHistory если есть, или начинаем с нуля)
+        const history = chatHistory[chatId] || [];
+
+        if (history.length >= 10) {
+            // Если есть хотя бы 10 сообщений — анализируем
+            const messages = history.slice(-50).map(m => ({ name: m.role, text: m.text }));
+            const currentProfile = storage.getChatProfile(chatId);
+            const updates = await ai.analyzeChatProfile(messages, currentProfile);
+
+            if (updates) {
+                storage.updateChatProfile(chatId, updates);
+                console.log(`[CHAT PROFILE INIT] Инициализирован профиль чата ${chatId}: "${updates.topic}"`);
+            }
+        } else {
+            console.log(`[CHAT PROFILE INIT] Недостаточно сообщений для анализа чата ${chatId}, ждём накопления`);
+        }
+    } catch (e) {
+        console.error(`[CHAT PROFILE INIT ERROR] ${e.message}`);
+    }
 }
 
 async function processMessage(bot, msg) {
@@ -331,11 +373,19 @@ async function processMessage(bot, msg) {
   const displayName = senderUsername ? `${senderName} (${senderUsername})` : senderName;
 
   if (!text.startsWith('/')) {
-      // Пишем в буфер более понятное имя
+      // Пишем в буфер для анализа профилей юзеров
       analysisBuffers[chatId].push({ userId, name: displayName, text });
+
+      // Пишем в буфер для анализа профиля чата
+      if (!chatAnalysisBuffers[chatId]) chatAnalysisBuffers[chatId] = [];
+      chatAnalysisBuffers[chatId].push({ name: displayName, text });
   }
   if (analysisBuffers[chatId].length >= BUFFER_SIZE) {
-      processBuffer(chatId); 
+      processBuffer(chatId);
+  }
+  // Анализ профиля чата каждые 50 сообщений
+  if (chatAnalysisBuffers[chatId] && chatAnalysisBuffers[chatId].length >= CHAT_BUFFER_SIZE) {
+      processChatBuffer(chatId);
   }
 
   const isMuted = storage.isTopicMuted(chatId, threadId);
@@ -416,6 +466,7 @@ async function processMessage(bot, msg) {
 **🕵️ Досье и Память:**
 • "Сыч кто я?" — Мое честное мнение о тебе.
 • "Сыч расскажи про @юзера" — Выдам базу про участника.
+• "Сыч, этот чат про [тема]" — Объясни мне, о чём этот чат.
 
 **⚙️ Настройки:**
 • /mute — Режим тишины (перестану встревать в разговор сам).
@@ -496,6 +547,16 @@ _ver: ${config.version}_
 
   // === ФИЧИ ===
   if (hasTriggerWord) {
+      // Команда "Сыч, этот чат про..."
+      const chatTopicMatch = cleanText.match(/(?:этот чат про|чат про|мы тут|здесь мы)\s+(.+)/);
+      if (chatTopicMatch) {
+          const newTopic = chatTopicMatch[1].replace(/[.!?]+$/, '').trim();
+          if (newTopic.length > 3) {
+              storage.setChatTopic(chatId, newTopic);
+              try { return await bot.sendMessage(chatId, `Понял, запомнил. Теперь я знаю, что этот чат про: "${newTopic}"`, getReplyOptions(msg)); } catch(e){}
+          }
+      }
+
       const aboutMatch = cleanText.match(/(?:расскажи про|кто так(?:ой|ая)|мнение о|поясни за)\s+(.+)/);
       if (aboutMatch) {
         const targetName = aboutMatch[1].replace('?', '').trim();
@@ -503,7 +564,7 @@ _ver: ${config.version}_
         if (targetProfile) {
             startTyping();
             const description = await ai.generateProfileDescription(targetProfile, targetName);
-            stopTyping(); 
+            stopTyping();
             try { return await bot.sendMessage(chatId, description, getReplyOptions(msg)); } catch(e){}
         }
     }
@@ -681,20 +742,29 @@ _ver: ${config.version}_
     }
 
     let aiResponse = "";
-    
+
+    // Получаем профиль чата для контекста
+    let chatProfile = storage.getChatProfile(chatId);
+
+    // Если профиль чата пустой и есть достаточно истории — пробуем инициализировать
+    if (!chatProfile.topic && chatHistory[chatId] && chatHistory[chatId].length >= 10) {
+        console.log(`[CHAT PROFILE] Профиль пуст, запускаю инициализацию для ${chatId}`);
+        initChatProfile(bot, chatId); // Асинхронно, не блокируем ответ
+    }
+
     try {
     // Вытаскиваем текст реплая для контекста
     const replyText = msg.reply_to_message ? (msg.reply_to_message.text || msg.reply_to_message.caption || "") : "";
 
     aiResponse = await ai.getResponse(
-        chatHistory[chatId], 
-        
-        { sender: senderName, text: text, replyText: replyText }, // <--- Добавили replyText
-        imageBuffer, 
+        chatHistory[chatId],
+        { sender: senderName, text: text, replyText: replyText },
+        imageBuffer,
         mimeType,
         instruction,
         userProfile,
-        !isDirectlyCalled 
+        !isDirectlyCalled,
+        chatProfile // <--- Передаём профиль чата
     );
 
     console.log(`[DEBUG] 2. Ответ от AI получен! Длина: ${aiResponse ? aiResponse.length : "PUSTO"}`);

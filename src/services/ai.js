@@ -199,7 +199,7 @@ async performSearch(query) {
 }
   
 // === ОСНОВНОЙ ОТВЕТ ===
-async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false) {
+async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false, chatProfile = null) {
   this.resetStatsIfNeeded();
   console.log(`[DEBUG AI] getResponse вызван.`);
 
@@ -222,13 +222,13 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
     // -> То идем в Google Native
     if (needsSearch && !searchResultText && this.keys.length > 0) {
         console.log(`[ROUTER] Tavily/Perplexity недоступен или выключен. Переключаюсь на Google Native Search.`);
-        return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous);
+        return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile);
     }
-    
+
     // 3. ПРЯМОЙ ВЫБОР GOOGLE
     // Если в конфиге явно стоит 'google', мы попадем сюда (так как step 1 пропущен)
     if (needsSearch && config.searchProvider === 'google' && this.keys.length > 0) {
-         return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous);
+         return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile);
     }
 
   // 2. СБОРКА ПРОМПТА
@@ -259,7 +259,8 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       replyContext: replyContext,
       history: contextStr,
       personalInfo: personalInfo,
-      senderName: currentMessage.sender
+      senderName: currentMessage.sender,
+      chatContext: chatProfile
   });
 
   // 3. ЗАПРОС К SMART МОДЕЛИ (API)
@@ -289,19 +290,19 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   }
 
   // 4. FALLBACK (Если API упал или ключа нет)
-  return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous);
+  return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile);
 }
 
 // Helper для Native вызова (чтобы не дублировать код)
-async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous) {
+async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile = null) {
     // Собираем промпт заново, но без RAG поиска (Google сам найдет)
     // Для простоты здесь можно собрать минимальный промпт или дублировать логику сборки
     // Я сделаю упрощенную сборку на основе переданных параметров
-    const relevantHistory = history.slice(-20); 
+    const relevantHistory = history.slice(-20);
     const contextStr = relevantHistory.map(m => `${m.role}: ${m.text}`).join('\n');
     let personalInfo = "";
     if (userProfile) personalInfo += `\nФакты: ${userProfile.facts || ""}\n`;
-    
+
     const fullPromptText = prompts.mainChat({
       time: this.getCurrentTime(),
       isSpontaneous: isSpontaneous,
@@ -309,7 +310,8 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
       replyContext: currentMessage.replyText ? `Reply to: ${currentMessage.replyText}` : "",
       history: contextStr,
       personalInfo: personalInfo,
-      senderName: currentMessage.sender
+      senderName: currentMessage.sender,
+      chatContext: chatProfile
   });
 
     return this.executeNativeWithRetry(async () => {
@@ -384,6 +386,12 @@ async analyzeBatch(messagesBatch, currentProfiles) {
     const chatLog = messagesBatch.map(m => `[ID:${m.userId}] ${m.name}: ${m.text}`).join('\n');
     const knownInfo = Object.entries(currentProfiles).map(([uid, p]) => `ID:${uid} -> ${p.realName}, ${p.facts}, ${p.attitude}`).join('\n');
     return this.runLogicModel(prompts.analyzeBatch(knownInfo, chatLog));
+}
+
+// Анализ профиля чата (каждые 50 сообщений)
+async analyzeChatProfile(messagesBatch, currentProfile) {
+    const messagesText = messagesBatch.map(m => `${m.name}: ${m.text}`).join('\n');
+    return this.runLogicModel(prompts.analyzeChatProfile(currentProfile, messagesText));
 }
 
 async determineReaction(contextText) {
