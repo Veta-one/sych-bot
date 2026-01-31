@@ -536,17 +536,8 @@ _ver: ${config.version}_
   }
 
   // === РЕШЕНИЕ ОБ ОТВЕТЕ ===
-  let shouldAnswer = false;
-
-  if (isDirectlyCalled) {
-    shouldAnswer = true;
-  } else {
-    // Увеличили контекст до 5 сообщений и добавили имена (m.role), чтобы бот понимал диалог
-    if (text.length > 10 && Math.random() < 0.005) {
-        const historyBlock = chatHistory[chatId].slice(-15).map(m => `${m.role}: ${m.text}`).join('\n');
-        shouldAnswer = await ai.shouldAnswer(historyBlock);
-    }
-  }
+  // Бот отвечает ТОЛЬКО когда его явно вызвали (тег "сыч/sych") или ответили на его сообщение
+  const shouldAnswer = isDirectlyCalled;
 
   // === ЛОГИКА РЕАКЦИЙ (15%) ===
   if (!shouldAnswer && text.length > 10 && !isReplyToBot && Math.random() < 0.015) {

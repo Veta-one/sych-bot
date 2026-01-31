@@ -394,11 +394,6 @@ async determineReaction(contextText) {
   return (match && allowed.includes(match[0])) ? match[0] : null;
 }
 
-async shouldAnswer(lastMessages) {
-    const text = await this.runLogicText(prompts.shouldAnswer(lastMessages));
-    return text && text.toUpperCase().includes('YES');
-}
-
 async generateProfileDescription(profileData, targetName) {
     if (this.openai) {
       try {
