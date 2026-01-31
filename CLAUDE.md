@@ -29,13 +29,14 @@ Auto-deployment triggers on push to `main` via GitHub Actions (`.github/workflow
 
 При любых изменениях:
 1. Обновить версию в `package.json` (поле `"version"`)
-2. Закоммитить и запушить в `main`:
+2. **При важных изменениях** — обновить `README.md` и `CLAUDE.md` если затронута документируемая функциональность
+3. Закоммитить и запушить в `main`:
    ```bash
    git add .
    git commit -m "описание изменений"
    git push origin main
    ```
-3. GitHub Actions автоматически деплоит на сервер — бот пересобирается для тестирования
+4. GitHub Actions автоматически деплоит на сервер — бот пересобирается для тестирования
 
 ## Architecture
 
@@ -100,12 +101,29 @@ GOOGLE_GEMINI_API_KEY_2 # Optional additional keys for rotation
 
 See `.env.example` for full configuration template.
 
+## Profile System (User Memory)
+
+Бот запоминает информацию о пользователях в `profiles.json` (изолировано по чатам).
+
+**Поля профиля:** `realName`, `facts`, `attitude`, `relationship` (0-100), `location`
+
+**Два механизма обновления:**
+- **Batch (Наблюдатель)**: каждые 20 сообщений анализирует всех участников
+- **Immediate (Рефлекс)**: после каждого ответа бота анализирует собеседника
+
+**Правила репутации:**
+- Позитив к боту: +1..+3 (копить сложно)
+- Негатив к боту: -5..-10 (терять легко)
+- Конфликты с другими пользователями НЕ влияют на репутацию
+- Валидация в коде: `storage.js` → `_applyProfileUpdates()`
+
 ## Design Decisions
 
 - **Admin-only groups**: Bot auto-leaves groups where admin isn't a member
 - **No database**: JSON file persistence with 5-second debounced saves
 - **Graceful shutdown**: SIGINT handler saves all data before exit
 - **History limit**: Keeps last 30 messages per chat
+- **Profile updates queue**: Prevents race condition between Batch and Immediate
 - **Bot trigger pattern**: `/(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i`
 - **Timezone**: Yekaterinburg UTC+5 for time-aware responses
 
