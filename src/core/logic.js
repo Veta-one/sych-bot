@@ -83,10 +83,14 @@ function getReplyOptions(msg) {
 }
 
 function getActionOptions(threadId) {
-    // [FIX] Если топика нет, возвращаем undefined. 
+    // [FIX] Если топика нет, возвращаем undefined.
     // Это важно: библиотека node-telegram-bot-api не любит пустой объект {} в обычных группах.
     if (!threadId) return undefined;
     return { message_thread_id: threadId };
+}
+
+function escapeHtml(text) {
+    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 async function processBuffer(chatId) {
@@ -288,14 +292,14 @@ async function processMessage(bot, msg) {
             const isTldrUseful = tldrLen < (fullLen * 0.65);
 
             if (isTldrUseful) {
-                replyText = `📝 **Суть:**\n${transcription.summary}\n\n🎤 **Текст:**\n${transcription.text}`;
+                replyText = `• <b>Краткая суть:</b>\n${escapeHtml(transcription.summary)}\n\n• <b>Полный текст:</b>\n<blockquote expandable>${escapeHtml(transcription.text)}</blockquote>`;
             } else {
                 // Если TLDR бесполезен, просто пишем кто сказал
-                replyText = `**${userName} сказал:**\n${transcription.text}`;
+                replyText = `<b>${escapeHtml(userName)} сказал:</b>\n<blockquote expandable>${escapeHtml(transcription.text)}</blockquote>`;
             }
 
             // Останавливаем "печатает"
-            try { await bot.sendMessage(chatId, replyText, getReplyOptions(msg)); } catch(e) {}
+            try { await bot.sendMessage(chatId, replyText, { reply_to_message_id: msg.message_id, parse_mode: 'HTML' }); } catch(e) {}
             
             // !!! ВАЖНО: Если чат в муте — на этом всё. Не отвечаем на содержимое.
             if (storage.isTopicMuted(chatId, threadId)) return;

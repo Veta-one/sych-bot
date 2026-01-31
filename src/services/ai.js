@@ -207,7 +207,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   const searchTriggers = /(курс|погода|новости|цена|стоимость|сколько стоит|найди|погугли|информация о|события|счет матча|кто такой|что такое|где купить|дата выхода|когда)/i;
   const needsSearch = searchTriggers.test(currentMessage.text);
   
-// 1. ПОПЫТКА RAG (TAVILY / PERPLEXITY)
+  // 1. ПОПЫТКА RAG (TAVILY / PERPLEXITY)
     // Пробуем искать, если провайдер НЕ google
     let searchResultText = "";
     if (needsSearch && config.searchProvider !== 'google') {
