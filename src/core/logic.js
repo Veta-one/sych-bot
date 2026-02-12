@@ -506,6 +506,11 @@ _ver: ${config.version}_
     return; // Полный игнор
   }
 
+  // === АВТООТВЕТ НА ПРИВЕТСТВИЯ ===
+  if (/^(привет|прив|здарова|здорова|хай|хэй|hi|hello|hey)[\s!.,?]*$/i.test(cleanText)) {
+    return bot.sendMessage(chatId, "Привет", getReplyOptions(msg));
+  }
+
   // === ТЕПЕРЬ, КОГДА МЫ ТОЧНО НЕ В МУТЕ ===
   if (isDirectlyCalled) {
     startTyping(); 
