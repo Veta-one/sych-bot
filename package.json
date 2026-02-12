@@ -1,6 +1,6 @@
 {
   "name": "sych-bot",
-  "version": "1.6.2",
+  "version": "1.6.1",
   "main": "bot.js",
   "scripts": {
     "start": "node src/index.js",
