@@ -175,7 +175,7 @@ async function processMessage(bot, msg) {
     const replyUserId = msg.reply_to_message?.from?.id;
     const isReplyToBot = replyUserId && String(replyUserId) === String(config.botId);
     const hasTriggerWord = config.triggerRegex.test(cleanText); 
-    const isDirectlyCalled = isBusinessMessage || hasTriggerWord || isReplyToBot; 
+    const isDirectlyCalled = hasTriggerWord || isReplyToBot; 
 
     // === ЕДИНЫЙ КОНТРОЛЛЕР СТАТУСА "ПЕЧАТАЕТ" ===
     let typingTimer = null;
@@ -864,6 +864,11 @@ _ver: ${config.version}_
     } catch (error) {
         stopTyping(); // <-- Если ошибка, ОБЯЗАТЕЛЬНО выключаем
         console.error(`[SEND ERROR]: ${error.message}`);
+
+        if (isBusinessMessage && /BUSINESS[_ ]?PEER[_ ]?INVALID|BUSINESSPEERINVALID/i.test(error.message)) {
+            console.log(`[BUSINESS SEND] Telegram отклонил отправку в chat=${chatId}. Обычно это значит, что peer недоступен для business-ответа или нет входящего окна 24ч.`);
+            return;
+        }
 
         // Отчет админу
         bot.sendMessage(config.adminId, `⚠️ **Ошибка отправки:** ${error.message}\n📂 **Чат:** ${chatTitle}\n🆔 **ID:** ${chatId}`, { parse_mode: 'Markdown' }).catch(() => {});

@@ -113,12 +113,12 @@ async function shouldProcessBusinessMessage(msg) {
   console.log(`[BUSINESS] msg chat=${chatTitle} from=${sender} owner=${ownerId || 'unknown'} can_reply=${Boolean(rights.can_reply)}`);
 
   if (!connection || connection.is_enabled === false) return false;
-  if (connection.rights && !connection.rights.can_reply) {
-    console.log(`[BUSINESS] Нет права can_reply для ${connectionId}`);
+  if (ownerId && Number(ownerId) !== Number(config.adminId)) {
+    console.log(`[BUSINESS] Игнорирую connection ${connectionId}: владелец ${ownerId} не админ ${config.adminId}`);
     return false;
   }
-  if (ownerId && msg.from?.id === ownerId) {
-    console.log(`[BUSINESS] Игнорирую исходящее сообщение владельца connection ${connectionId}`);
+  if (connection.rights && !connection.rights.can_reply) {
+    console.log(`[BUSINESS] Нет права can_reply для ${connectionId}`);
     return false;
   }
 
