@@ -99,29 +99,50 @@ async function shouldProcessBusinessMessage(msg) {
   const connectionId = msg.business_connection_id;
   const chatTitle = msg.chat?.title || msg.chat?.username || msg.chat?.first_name || msg.chat?.id;
   const sender = msg.from?.username ? `@${msg.from.username}` : msg.from?.first_name || msg.from?.id;
+  const text = msg.text || msg.caption || '';
+  const hasTrigger = config.triggerRegex.test(text.toLowerCase());
+  const debugPrefix = `[BUSINESS DEBUG]\nchat=${chatTitle}\nfrom=${sender}\ntext="${text.slice(0, 120)}"\nconnection=${connectionId}`;
 
   let connection;
   try {
     connection = await getBusinessConnection(connectionId);
   } catch (error) {
     console.error(`[BUSINESS] Не смог получить connection ${connectionId}: ${error.message}`);
+    if (hasTrigger) {
+      bot.sendMessage(config.adminId, `${debugPrefix}\nstatus=connection_error\nerror=${error.message}`).catch(() => {});
+    }
     return false;
   }
 
   const ownerId = connection?.user?.id;
   const rights = connection?.rights || {};
-  console.log(`[BUSINESS] msg chat=${chatTitle} from=${sender} owner=${ownerId || 'unknown'} can_reply=${Boolean(rights.can_reply)}`);
+  const canReply = Boolean(rights.can_reply || connection?.can_reply);
+  console.log(`[BUSINESS] msg chat=${chatTitle} from=${sender} owner=${ownerId || 'unknown'} can_reply=${canReply} trigger=${hasTrigger}`);
 
-  if (!connection || connection.is_enabled === false) return false;
+  if (!connection || connection.is_enabled === false) {
+    if (hasTrigger) {
+      bot.sendMessage(config.adminId, `${debugPrefix}\nstatus=disabled\nowner=${ownerId || 'unknown'}\ncan_reply=${canReply}`).catch(() => {});
+    }
+    return false;
+  }
   if (ownerId && Number(ownerId) !== Number(config.adminId)) {
     console.log(`[BUSINESS] Игнорирую connection ${connectionId}: владелец ${ownerId} не админ ${config.adminId}`);
+    if (hasTrigger) {
+      bot.sendMessage(config.adminId, `${debugPrefix}\nstatus=wrong_owner\nowner=${ownerId}\nadmin=${config.adminId}`).catch(() => {});
+    }
     return false;
   }
-  if (connection.rights && !connection.rights.can_reply) {
+  if ((connection.rights || Object.prototype.hasOwnProperty.call(connection, 'can_reply')) && !canReply) {
     console.log(`[BUSINESS] Нет права can_reply для ${connectionId}`);
+    if (hasTrigger) {
+      bot.sendMessage(config.adminId, `${debugPrefix}\nstatus=no_can_reply\nowner=${ownerId || 'unknown'}`).catch(() => {});
+    }
     return false;
   }
 
+  if (hasTrigger) {
+    bot.sendMessage(config.adminId, `${debugPrefix}\nstatus=accepted\nowner=${ownerId || 'unknown'}\ncan_reply=${canReply}`).catch(() => {});
+  }
   return true;
 }
 

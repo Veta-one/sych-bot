@@ -867,6 +867,7 @@ _ver: ${config.version}_
 
         if (isBusinessMessage && /BUSINESS[_ ]?PEER[_ ]?INVALID|BUSINESSPEERINVALID/i.test(error.message)) {
             console.log(`[BUSINESS SEND] Telegram отклонил отправку в chat=${chatId}. Обычно это значит, что peer недоступен для business-ответа или нет входящего окна 24ч.`);
+            bot.sendMessage(config.adminId, `⚠️ Business отправка отклонена Telegram\n\nЧат: ${chatTitle}\nID: ${chatId}\nОшибка: ${error.message}`, { parse_mode: 'Markdown' }).catch(() => {});
             return;
         }
 
