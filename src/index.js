@@ -2,6 +2,7 @@ const TelegramBot = require('node-telegram-bot-api');
 const config = require('./config');
 const logic = require('./core/logic');
 const storage = require('./services/storage');
+const axios = require('axios');
 
 
 const originalLog = console.log;
@@ -74,6 +75,64 @@ function isFreshMessage(msg) {
   return !msg.date || msg.date >= now - 120;
 }
 
+async function getBusinessConnection(connectionId) {
+  if (businessConnections.has(connectionId)) {
+    return businessConnections.get(connectionId);
+  }
+
+  let connection;
+  if (typeof bot.getBusinessConnection === 'function') {
+    connection = await bot.getBusinessConnection(connectionId);
+  } else {
+    const url = `https://api.telegram.org/bot${config.telegramToken}/getBusinessConnection`;
+    const response = await axios.post(url, { business_connection_id: connectionId });
+    connection = response.data?.result;
+  }
+
+  if (connection?.id) {
+    businessConnections.set(connection.id, connection);
+  }
+  return connection;
+}
+
+async function shouldProcessBusinessMessage(msg) {
+  const connectionId = msg.business_connection_id;
+  const chatTitle = msg.chat?.title || msg.chat?.username || msg.chat?.first_name || msg.chat?.id;
+  const sender = msg.from?.username ? `@${msg.from.username}` : msg.from?.first_name || msg.from?.id;
+
+  let connection;
+  try {
+    connection = await getBusinessConnection(connectionId);
+  } catch (error) {
+    console.error(`[BUSINESS] Не смог получить connection ${connectionId}: ${error.message}`);
+    return false;
+  }
+
+  const ownerId = connection?.user?.id;
+  const rights = connection?.rights || {};
+  console.log(`[BUSINESS] msg chat=${chatTitle} from=${sender} owner=${ownerId || 'unknown'} can_reply=${Boolean(rights.can_reply)}`);
+
+  if (!connection || connection.is_enabled === false) return false;
+  if (connection.rights && !connection.rights.can_reply) {
+    console.log(`[BUSINESS] Нет права can_reply для ${connectionId}`);
+    return false;
+  }
+  if (ownerId && msg.from?.id === ownerId) {
+    console.log(`[BUSINESS] Игнорирую исходящее сообщение владельца connection ${connectionId}`);
+    return false;
+  }
+
+  return true;
+}
+
+async function handleBusinessMessage(msg) {
+  if (!isFreshMessage(msg)) return;
+  if (!(await shouldProcessBusinessMessage(msg))) return;
+
+  const scopedBot = withBusinessConnection(bot, msg);
+  await logic.processMessage(scopedBot, msg);
+}
+
 // Передаем бота в AI-сервис для уведомлений
 const ai = require('./services/ai');
 ai.setBot(bot);
@@ -134,24 +193,11 @@ bot.on('deleted_business_messages', (update) => {
 });
 
 bot.on('business_message', async (msg) => {
-  if (!isFreshMessage(msg)) return;
-
-  const connection = businessConnections.get(msg.business_connection_id);
-  if (connection && connection.is_enabled === false) return;
-  if (connection?.rights && !connection.rights.can_reply) {
-    console.log(`[BUSINESS] Нет права can_reply для ${msg.business_connection_id}`);
-    return;
-  }
-
-  const scopedBot = withBusinessConnection(bot, msg);
-  await logic.processMessage(scopedBot, msg);
+  await handleBusinessMessage(msg);
 });
 
 bot.on('edited_business_message', async (msg) => {
-  if (!isFreshMessage(msg)) return;
-
-  const scopedBot = withBusinessConnection(bot, msg);
-  await logic.processMessage(scopedBot, msg);
+  await handleBusinessMessage(msg);
 });
 
 // Единый вход для всех сообщений
