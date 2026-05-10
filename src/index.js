@@ -117,9 +117,9 @@ async function shouldProcessBusinessMessage(msg) {
   const ownerId = connection?.user?.id;
   const rights = connection?.rights || {};
   const canReply = Boolean(rights.can_reply || connection?.can_reply);
-  console.log(`[BUSINESS] msg chat=${chatTitle} from=${sender} owner=${ownerId || 'unknown'} can_reply=${canReply} trigger=${hasTrigger}`);
 
   if (!connection || connection.is_enabled === false) {
+    console.log(`[BUSINESS] disabled chat=${chatTitle} owner=${ownerId || 'unknown'} trigger=${hasTrigger}`);
     if (hasTrigger) {
       bot.sendMessage(config.adminId, `${debugPrefix}\nstatus=disabled\nowner=${ownerId || 'unknown'}\ncan_reply=${canReply}`).catch(() => {});
     }
@@ -133,16 +133,13 @@ async function shouldProcessBusinessMessage(msg) {
     return false;
   }
   if ((connection.rights || Object.prototype.hasOwnProperty.call(connection, 'can_reply')) && !canReply) {
-    console.log(`[BUSINESS] Нет права can_reply для ${connectionId}`);
+    console.log(`[BUSINESS] no can_reply chat=${chatTitle} owner=${ownerId || 'unknown'} trigger=${hasTrigger}`);
     if (hasTrigger) {
       bot.sendMessage(config.adminId, `${debugPrefix}\nstatus=no_can_reply\nowner=${ownerId || 'unknown'}`).catch(() => {});
     }
     return false;
   }
 
-  if (hasTrigger) {
-    bot.sendMessage(config.adminId, `${debugPrefix}\nstatus=accepted\nowner=${ownerId || 'unknown'}\ncan_reply=${canReply}`).catch(() => {});
-  }
   return true;
 }
 

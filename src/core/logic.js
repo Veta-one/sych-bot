@@ -91,6 +91,17 @@ function getActionOptions(threadId) {
     return { message_thread_id: threadId };
 }
 
+function isTelegramEntityParseError(error) {
+    const message = error?.message || "";
+    return /can'?t parse entities|can't find end of the entity|parse entities/i.test(message);
+}
+
+function withoutParseMode(options = {}) {
+    const clean = { ...options };
+    delete clean.parse_mode;
+    return clean;
+}
+
 function escapeHtml(text) {
     return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
@@ -854,7 +865,13 @@ _ver: ${config.version}_
         }
         
         for (const chunk of chunks) {
-            await bot.sendMessage(chatId, chunk, getReplyOptions(msg));
+            try {
+                await bot.sendMessage(chatId, chunk, getReplyOptions(msg));
+            } catch (sendError) {
+                if (!isTelegramEntityParseError(sendError)) throw sendError;
+                console.log(`[SEND FALLBACK] Markdown parse failed in chat=${chatId}, sending plain text.`);
+                await bot.sendMessage(chatId, chunk, withoutParseMode(getReplyOptions(msg)));
+            }
         }
 
         stopTyping(); // <-- Всё, сообщение ушло, выключаем статус
@@ -871,8 +888,10 @@ _ver: ${config.version}_
             return;
         }
 
-        // Отчет админу
-        bot.sendMessage(config.adminId, `⚠️ **Ошибка отправки:** ${error.message}\n📂 **Чат:** ${chatTitle}\n🆔 **ID:** ${chatId}`, { parse_mode: 'Markdown' }).catch(() => {});
+        if (!isTelegramEntityParseError(error)) {
+            // Отчет админу
+            bot.sendMessage(config.adminId, `⚠️ **Ошибка отправки:** ${error.message}\n📂 **Чат:** ${chatTitle}\n🆔 **ID:** ${chatId}`, { parse_mode: 'Markdown' }).catch(() => {});
+        }
 
         // АВАРИЙНАЯ ОТПРАВКА (Если Markdown сломался или что-то еще)
         // Шлем чистый текст без всякого форматирования
