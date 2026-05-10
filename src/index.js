@@ -21,7 +21,58 @@ console.error = (...args) => originalError(getTimestamp(), ...args);
 
 
 // Создаем бота
-const bot = new TelegramBot(config.telegramToken, { polling: true });
+const allowedUpdates = [
+  'message',
+  'edited_message',
+  'callback_query',
+  'business_connection',
+  'business_message',
+  'edited_business_message',
+  'deleted_business_messages',
+];
+
+const bot = new TelegramBot(config.telegramToken, {
+  polling: {
+    params: {
+      allowed_updates: allowedUpdates,
+    },
+  },
+});
+
+const businessConnections = new Map();
+
+function withBusinessConnection(baseBot, msg) {
+  const businessConnectionId = msg.business_connection_id;
+  if (!businessConnectionId) return baseBot;
+
+  const businessChatId = String(msg.chat.id);
+  const addBusinessOption = (chatId, options = {}) => {
+    if (String(chatId) !== businessChatId) return options;
+    return { ...options, business_connection_id: businessConnectionId };
+  };
+
+  return new Proxy(baseBot, {
+    get(target, prop) {
+      if (prop === 'sendMessage') {
+        return (chatId, text, options = {}) => target.sendMessage(chatId, text, addBusinessOption(chatId, options));
+      }
+      if (prop === 'sendChatAction') {
+        return (chatId, action, options = {}) => target.sendChatAction(chatId, action, addBusinessOption(chatId, options));
+      }
+      if (prop === 'setMessageReaction') {
+        return (chatId, messageId, options = {}) => target.setMessageReaction(chatId, messageId, addBusinessOption(chatId, options));
+      }
+
+      const value = target[prop];
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
+
+function isFreshMessage(msg) {
+  const now = Math.floor(Date.now() / 1000);
+  return !msg.date || msg.date >= now - 120;
+}
 
 // Передаем бота в AI-сервис для уведомлений
 const ai = require('./services/ai');
@@ -29,6 +80,12 @@ ai.setBot(bot);
 
 console.log("Сыч запущен и готов пояснять за жизнь.");
 console.log(`Admin ID: ${config.adminId}`);
+
+bot.getMe().then((me) => {
+  console.log(`[BOT] @${me.username || 'unknown'} business=${Boolean(me.can_connect_to_business)}`);
+}).catch((err) => {
+  console.error(`[BOT] Не смог получить getMe: ${err.message}`);
+});
 
 // === ТИКЕР НАПОМИНАЛОК (Проверка каждую минуту) ===
 setInterval(() => {
@@ -65,11 +122,42 @@ bot.on('polling_error', (error) => {
     // Если ошибка "Conflict: terminated by other getUpdates", значит запущен второй экземпляр
   });
 
+bot.on('business_connection', (connection) => {
+  businessConnections.set(connection.id, connection);
+  const rights = connection.rights || {};
+  const user = connection.user?.username ? `@${connection.user.username}` : connection.user?.first_name || connection.user?.id;
+  console.log(`[BUSINESS] ${connection.is_enabled ? 'Подключен' : 'Отключен'}: ${user}, can_reply=${Boolean(rights.can_reply)}, id=${connection.id}`);
+});
+
+bot.on('deleted_business_messages', (update) => {
+  console.log(`[BUSINESS] Удалены сообщения: chat=${update.chat?.id}, ids=${update.message_ids?.join(',')}`);
+});
+
+bot.on('business_message', async (msg) => {
+  if (!isFreshMessage(msg)) return;
+
+  const connection = businessConnections.get(msg.business_connection_id);
+  if (connection && connection.is_enabled === false) return;
+  if (connection?.rights && !connection.rights.can_reply) {
+    console.log(`[BUSINESS] Нет права can_reply для ${msg.business_connection_id}`);
+    return;
+  }
+
+  const scopedBot = withBusinessConnection(bot, msg);
+  await logic.processMessage(scopedBot, msg);
+});
+
+bot.on('edited_business_message', async (msg) => {
+  if (!isFreshMessage(msg)) return;
+
+  const scopedBot = withBusinessConnection(bot, msg);
+  await logic.processMessage(scopedBot, msg);
+});
+
 // Единый вход для всех сообщений
 bot.on('message', async (msg) => {
   // Игнорируем сообщения, старше 2 минут (чтобы не отвечать на старое при рестарте)
-  const now = Math.floor(Date.now() / 1000);
-  if (msg.date < now - 120) return;
+  if (!isFreshMessage(msg)) return;
 
   const chatId = msg.chat.id;
   const chatTitle = msg.chat.title || "Личка";

@@ -152,7 +152,11 @@ async function initChatProfile(bot, chatId) {
 
 async function processMessage(bot, msg) {
     const chatId = msg.chat.id;
-    const userId = msg.from.id;
+    const userId = msg.from?.id;
+    if (!userId) return;
+
+    const isBusinessMessage = Boolean(msg.business_connection_id);
+
     // === ⛔ ГЛОБАЛЬНЫЙ БАН ===
     if (storage.isBanned(userId) && userId !== config.adminId) {
         return; // Полный игнор
@@ -171,7 +175,7 @@ async function processMessage(bot, msg) {
     const replyUserId = msg.reply_to_message?.from?.id;
     const isReplyToBot = replyUserId && String(replyUserId) === String(config.botId);
     const hasTriggerWord = config.triggerRegex.test(cleanText); 
-    const isDirectlyCalled = hasTriggerWord || isReplyToBot; 
+    const isDirectlyCalled = isBusinessMessage || hasTriggerWord || isReplyToBot; 
 
     // === ЕДИНЫЙ КОНТРОЛЛЕР СТАТУСА "ПЕЧАТАЕТ" ===
     let typingTimer = null;
@@ -257,7 +261,7 @@ async function processMessage(bot, msg) {
         storage.updateChatName(chatId, chatTitle);
 
         // === ЛИЧКА: ПЕРЕСЫЛКА АДМИНУ И ОТВОРОТ-ПОВОРОТ ===
-    if (msg.chat.type === 'private' && userId !== config.adminId) {
+    if (!isBusinessMessage && msg.chat.type === 'private' && userId !== config.adminId) {
         // 1. Стучим админу о КАЖДОМ сообщении
         const senderInfo = `@${msg.from.username || "нет"} (${msg.from.first_name})`;
         
@@ -358,7 +362,7 @@ async function processMessage(bot, msg) {
   
     if (!text && !msg.photo && !msg.sticker && !msg.voice && !msg.audio) return;
 
-  if (msg.chat.type === 'private') {
+  if (msg.chat.type === 'private' && !isBusinessMessage) {
     if (userId !== config.adminId) return;
   } else {
     storage.trackUser(chatId, msg.from);
