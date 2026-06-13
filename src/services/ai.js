@@ -177,15 +177,20 @@ async performSearch(query) {
           const response = await this.tavilyClient.search(query, {
               search_depth: "advanced",
               max_results: 3,
-              include_answer: true 
+              include_answer: true,
+              include_images: true
           });
           storage.incrementStat('search');
-          
+
           let resultText = "";
           if (response.answer) resultText += `Краткий ответ Tavily: ${response.answer}\n\n`;
           response.results.forEach((res, i) => {
               resultText += `[${i+1}] ${res.title} (${res.url}):\n${res.content}\n\n`;
           });
+          const images = (response.images || []).map(im => (typeof im === 'string' ? im : im?.url)).filter(Boolean).slice(0, 4);
+          if (images.length) {
+              resultText += `\nДОСТУПНЫЕ КАРТИНКИ (реальные URL из поиска):\n${images.join('\n')}\n`;
+          }
           return resultText;
       } catch (e) {
           console.error(`[TAVILY FAIL] ${e.message}`);
@@ -255,7 +260,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   if (userInstruction) personalInfo += `\n!!! СПЕЦ-ИНСТРУКЦИЯ !!!\n${userInstruction}\n`;
   
   if (searchResultText) {
-      personalInfo += `\n!!! ДАННЫЕ ИЗ ПОИСКА (${config.searchProvider.toUpperCase()}) !!!\n${searchResultText}\nИНСТРУКЦИЯ: Ответь, используя эти факты. УКАЖИ ССЫЛКИ.\n`;
+      personalInfo += `\n!!! ДАННЫЕ ИЗ ПОИСКА (${config.searchProvider.toUpperCase()}) !!!\n${searchResultText}\nИНСТРУКЦИЯ: Ответь, используя эти факты. УКАЖИ ССЫЛКИ. Если есть блок «ДОСТУПНЫЕ КАРТИНКИ» и картинка действительно уместна (просят показать / «как выглядит») — вставь ОДНУ подходящую через ![](URL), URL бери ТОЛЬКО из этого списка.\n`;
   }
 
   if (userProfile) {

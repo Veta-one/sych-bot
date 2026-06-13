@@ -9,9 +9,6 @@
 
 const axios = require('axios');
 const config = require('../config');
-const { marked } = require('marked');
-
-marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });
 
 const API = `https://api.telegram.org/bot${config.telegramToken}`;
 
@@ -40,15 +37,23 @@ function htmlToPlain(html = '') {
     .trim();
 }
 
-// Markdown (как его пишет ИИ) -> HTML, который Telegram rich точно рисует:
-// таблицы, заголовки, списки, цитаты, код. Теги подгоняем под Telegram.
-function mdToHtml(md = '') {
-  return marked.parse(String(md))
-    .replace(/<\/?(thead|tbody)>/gi, '')
-    .replace(/<(\/?)strong>/gi, '<$1b>')
-    .replace(/<(\/?)em>/gi, '<$1i>')
-    .replace(/<(\/?)del>/gi, '<$1s>')
-    .trim();
+// Markdown ИИ шлём как есть — Telegram rich рисует его красиво (в т.ч. таблицы).
+// Единственное: гарантируем пустую строку ПЕРЕД таблицей, иначе парсер иногда
+// не распознаёт её как таблицу, если прямо над ней идёт текст.
+function normalizeMd(md = '') {
+  const lines = String(md).split('\n');
+  const out = [];
+  const isRow = (s) => /^\s*\|.*\|\s*$/.test(s);
+  const isSep = (s) => s.includes('|') && s.includes('-') && /^\s*\|?[\s:|-]*-[\s:|-]*\|?\s*$/.test(s);
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const prev = out.length ? out[out.length - 1] : '';
+    if (isRow(line) && isSep(lines[i + 1] || '') && prev.trim() !== '' && !isRow(prev)) {
+      out.push(''); // вставляем пустую строку перед таблицей
+    }
+    out.push(line);
+  }
+  return out.join('\n');
 }
 
 function splitChunks(text, size = 4000) {
@@ -85,6 +90,22 @@ async function sendRich(bot, chatId, content, opts = {}) {
     return { ok: true, mode: 'rich' };
   } catch (e) {
     const desc = e.response?.data?.description || e.message;
+
+    // Если rich упал из-за медиа (битый URL картинки) — пробуем ещё раз БЕЗ картинок,
+    // чтобы сохранить форматирование (таблицы/списки), а не падать в плоский текст.
+    // Картинки Telegram качает сам со своей стороны, поэтому доверяем именно его вердикту.
+    const hasImg = /!\[/.test(content.markdown || '') || /<img/i.test(content.html || '');
+    if (hasImg && /media|no_media|RICH_MESSAGE/i.test(desc)) {
+      const noImg = {};
+      if (content.markdown != null) noImg.markdown = content.markdown.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\n{3,}/g, '\n\n').trim();
+      if (content.html != null) noImg.html = content.html.replace(/<img[^>]*>/gi, '');
+      try {
+        await axios.post(`${API}/sendRichMessage`, { chat_id: chatId, rich_message: noImg, ...extra }, { proxy: false });
+        console.error(`[RICH] медиа не прошло, отправил без картинок: ${desc}`);
+        return { ok: true, mode: 'rich-noimg' };
+      } catch (_) { /* падаем в общий фоллбэк ниже */ }
+    }
+
     console.error(`[RICH] sendRichMessage упал, фоллбэк в текст: ${desc}`);
 
     // 2) Фоллбэк — обычный sendMessage
@@ -117,4 +138,4 @@ async function sendRich(bot, chatId, content, opts = {}) {
   }
 }
 
-module.exports = { sendRich, htmlToPlain, escapeHtml, mdToHtml };
+module.exports = { sendRich, htmlToPlain, escapeHtml, normalizeMd };
