@@ -174,19 +174,24 @@ ${googleRows}
   }
 
 // === УНИВЕРСАЛЬНЫЙ ПОИСК ===
-async performSearch(query) {
+async performSearch(query, opts = {}) {
   this.resetStatsIfNeeded();
 
   // 1. TAVILY
   if (config.searchProvider === 'tavily' && this.tavilyClient) {
       try {
-          console.log(`[SEARCH] Tavily ищет: ${query}`);
-          const response = await this.tavilyClient.search(query, {
-              search_depth: "advanced",
-              max_results: 3,
-              include_answer: true,
-              include_images: true
-          });
+          const topic = (opts.topic === 'news' || opts.topic === 'finance') ? opts.topic : 'general';
+          console.log(`[SEARCH] Tavily ищет: ${query}${topic !== 'general' ? ` [${topic}]` : ''}${opts.timeRange ? ` (${opts.timeRange})` : ''}`);
+          const searchOpts = {
+              searchDepth: "advanced",
+              topic,
+              maxResults: 5,
+              chunksPerSource: 3,
+              includeAnswer: "advanced",
+              includeImages: true,
+          };
+          if (opts.timeRange) searchOpts.timeRange = opts.timeRange;
+          const response = await this.tavilyClient.search(query, searchOpts);
           storage.incrementStat('search');
 
           let resultText = "";
@@ -228,10 +233,39 @@ async performSearch(query) {
   return null;
 }
   
+// === ЧТЕНИЕ СТРАНИЦЫ ПО ССЫЛКЕ (Tavily Extract) ===
+async extractUrl(url) {
+  if (config.searchProvider !== 'tavily' || !this.tavilyClient) return null;
+  try {
+    console.log(`[EXTRACT] Tavily читает: ${url}`);
+    const res = await this.tavilyClient.extract([url], { extractDepth: "basic" });
+    const r = res && res.results && res.results[0];
+    if (r && r.rawContent) {
+      storage.incrementStat('search');
+      return String(r.rawContent).slice(0, 6000);
+    }
+  } catch (e) {
+    console.error(`[EXTRACT FAIL] ${e.message}`);
+  }
+  return null;
+}
+
 // === ОСНОВНОЙ ОТВЕТ ===
 async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false, chatProfile = null) {
   this.resetStatsIfNeeded();
   console.log(`[DEBUG AI] getResponse вызван.`);
+
+  // 0. ЧТЕНИЕ СТРАНИЦЫ ПО ССЫЛКЕ (если в сообщении есть не-картиночный URL и видно намерение «прочитать»)
+  let extractedText = "";
+  const urlM = (currentMessage.text || '').match(/https?:\/\/[^\s)]+/);
+  if (urlM && !/\.(jpg|jpeg|png|webp|gif|bmp)(\?|$)/i.test(urlM[0])) {
+      const rest = currentMessage.text.replace(urlM[0], '').trim();
+      const wantsRead = rest.length < 80 || /перескаж|статья|статью|ссылк|прочит|разбер|что (там|тут|пишут|по этой)|открой|резюм|tl;?dr|о чём|кратко|суть/i.test(currentMessage.text.toLowerCase());
+      if (wantsRead) {
+          const page = await this.extractUrl(urlM[0]);
+          if (page) extractedText = `\n!!! СОДЕРЖИМОЕ СТРАНИЦЫ ПО ССЫЛКЕ (${urlM[0]}) !!!\n${page}\nИНСТРУКЦИЯ: ответь, опираясь на эту страницу (перескажи / разбери / ответь по ней).\n`;
+      }
+  }
 
   // 1. AI ОПРЕДЕЛЯЕТ НУЖЕН ЛИ ПОИСК
   const recentHistory = history.slice(-5).map(m => `${m.role}: ${m.text}`).join('\n');
@@ -246,14 +280,14 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   if (searchDecision.needsSearch && searchDecision.searchQuery) {
       // 2. ПОИСК ЧЕРЕЗ TAVILY / PERPLEXITY
       if (config.searchProvider !== 'google') {
-          searchResultText = await this.performSearch(searchDecision.searchQuery);
+          searchResultText = await this.performSearch(searchDecision.searchQuery, { topic: searchDecision.topic, timeRange: searchDecision.timeRange });
       }
 
       // 3. FALLBACK НА GOOGLE NATIVE SEARCH
       // Если Tavily/Perplexity недоступен или провайдер = google
       if (!searchResultText && this.keys.length > 0) {
           console.log(`[ROUTER] Переключаюсь на Google Native Search.`);
-          return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile);
+          return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile, extractedText);
       }
   }
 
@@ -272,6 +306,8 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
         + `ИСТОЧНИКИ (СТРОГО): ссылки вставляй ПРЯМО в подходящие слова текста через [слова](URL) — НЕ используй номера-сноски вида [1], [2]. В САМОМ КОНЦЕ ответа добавь сворачиваемый список источников РОВНО в таком формате (с пустыми строками внутри, заголовок именно "Источники", без эмодзи):\n<details><summary>Источники</summary>\n\n1. [Название](URL)\n2. [Название](URL)\n\n</details>\nURL и названия бери ТОЛЬКО из данных выше, не выдумывай.\n`
         + `КАРТИНКИ: если есть блок «ДОСТУПНЫЕ КАРТИНКИ» и это уместно (просят показать / «как выглядит») — вставь картинку через ![](URL). Если уместно НЕСКОЛЬКО картинок — оберни их в <tg-collage> и </tg-collage> (каждая ![](URL) с новой строки, с пустыми строками внутри блока). URL бери ТОЛЬКО из этого списка, не выдумывай.\n`;
   }
+
+  if (extractedText) personalInfo += extractedText;
 
   if (userProfile) {
       const score = userProfile.relationship || 50;
@@ -319,11 +355,11 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   }
 
   // 4. FALLBACK (Если API упал или ключа нет)
-  return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile);
+  return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile, extractedText);
 }
 
 // Helper для Native вызова (чтобы не дублировать код)
-async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile = null) {
+async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile = null, extractedText = "") {
     const relevantHistory = history.slice(-20);
     const contextStr = relevantHistory.map(m => `${m.role}: ${m.text}`).join('\n');
 
@@ -338,6 +374,8 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
     if (userInstruction) {
         personalInfo += `\n!!! СПЕЦ-ИНСТРУКЦИЯ !!!\n${userInstruction}\n`;
     }
+
+    if (extractedText) personalInfo += extractedText;
 
     if (userProfile) {
         const score = userProfile.relationship || 50;

@@ -89,6 +89,8 @@ src/
 - Perplexity (via OpenRouter)
 - Google (via Gemini Tools)
 
+**Tavily usage** (`@tavily/core`, **camelCase** options!): `search()` with `searchDepth:"advanced"`, `maxResults:5`, `chunksPerSource:3`, `includeAnswer:"advanced"`, plus `topic` (news/finance/general) + `timeRange` chosen per-query by the `shouldSearch` logic model for freshness. `ai.extractUrl()` reads a shared article URL via Tavily Extract (auto-triggered on a non-image link with read-intent).
+
 ## Key Environment Variables
 
 ```
