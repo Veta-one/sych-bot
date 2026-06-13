@@ -5,6 +5,7 @@ const axios = require('axios');
 const OpenAI = require('openai');
 const { tavily } = require('@tavily/core'); // Клиент Tavily
 const storage = require('./storage');
+const { sendRich } = require('../utils/rich');
 
 class AiService {
   constructor() {
@@ -40,7 +41,7 @@ class AiService {
 
   notifyAdmin(message) {
     if (this.bot && config.adminId) {
-        this.bot.sendMessage(config.adminId, message, { parse_mode: 'Markdown' }).catch(() => {});
+        sendRich(this.bot, config.adminId, { markdown: message }).catch(() => {});
     }
   }
 
@@ -55,40 +56,35 @@ class AiService {
     }
   }
 
+  // Возвращает HTML для rich-сообщения (sendRichMessage)
   getStatsReport() {
     this.resetStatsIfNeeded();
     const { today, week, month, allTime } = storage.getFullStats();
     const mode = this.usingFallback ? "⚠️ FALLBACK" : "⚡️ API";
-
-    // Форматирование даты (31.01)
     const dateStr = today.date ? today.date.split('-').reverse().slice(0, 2).join('.') : '--';
 
-    // Сегодня — подробно
     const googleRows = (today.google || []).map((s, i) =>
-      `${i + 1}: ${s.status ? "🟢" : "🔴"} ${s.count}`
-    ).join('\n');
-
-    const todaySection = [
-      `Сегодня ${dateStr}:`,
-      `Режим: ${mode}`,
-      ``,
-      `• API`,
-      `Smart: ${today.smart}`,
-      `Logic: ${today.logic}`,
-      `Search: ${today.search}`,
-      ``,
-      `• Google Native:`,
-      googleRows
-    ].join('\n');
-
-    // Неделя, месяц, всё время — кратко
-    const weekSection = `Неделя: API ${week.smart + week.logic} | Google ${week.google} | Поиск ${week.search}`;
-    const monthSection = `Месяц: API ${month.smart + month.logic} | Google ${month.google} | Поиск ${month.search}`;
+      `<tr><td>Ключ ${i + 1}</td><td>${s.status ? "🟢" : "🔴"}</td><td align="right">${s.count}</td></tr>`
+    ).join('') || `<tr><td>—</td><td>—</td><td align="right">0</td></tr>`;
 
     const allTimeTotal = allTime.smart + allTime.logic + allTime.google;
-    const allTimeSection = `Всего: ${this._formatNumber(allTimeTotal)} запросов`;
 
-    return `${todaySection}\n\n${weekSection}\n${monthSection}\n${allTimeSection}`;
+    return `<h3>📊 Статистика Сыча</h3>
+<p>Сегодня <b>${dateStr}</b> · режим <b>${mode}</b></p>
+<table>
+<tr><th>Канал</th><th align="right">Сегодня</th></tr>
+<tr><td>Smart (ответы)</td><td align="right">${today.smart}</td></tr>
+<tr><td>Logic (анализ)</td><td align="right">${today.logic}</td></tr>
+<tr><td>Search (поиск)</td><td align="right">${today.search}</td></tr>
+</table>
+<b>Google Native (ключи)</b>
+<table>
+<tr><th>Ключ</th><th>Статус</th><th align="right">Запросов</th></tr>
+${googleRows}
+</table>
+<details><summary>За периоды</summary>
+<p>Неделя: API ${week.smart + week.logic} · Google ${week.google} · Поиск ${week.search}<br/>Месяц: API ${month.smart + month.logic} · Google ${month.google} · Поиск ${month.search}<br/>Всего: ${this._formatNumber(allTimeTotal)} запросов</p>
+</details>`;
   }
 
   _formatNumber(num) {

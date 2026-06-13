@@ -3,6 +3,7 @@ const config = require('./config');
 const logic = require('./core/logic');
 const storage = require('./services/storage');
 const axios = require('axios');
+const { sendRich, escapeHtml } = require('./utils/rich');
 
 
 const originalLog = console.log;
@@ -175,10 +176,12 @@ setInterval(() => {
 
       pending.forEach(task => {
           // Формируем сообщение
-          const message = `⏰ ${task.username}, напоминаю!\n\n${task.text}`;
+          const message = task.text
+              ? `⏰ <b>${escapeHtml(task.username)}</b>, напоминаю!<blockquote>${escapeHtml(task.text)}</blockquote>`
+              : `⏰ <b>${escapeHtml(task.username)}</b>, напоминаю!`;
           
           // Отправляем
-          bot.sendMessage(task.chatId, message).then(() => {
+          sendRich(bot, task.chatId, { html: message }).then(() => {
               console.log(`[REMINDER] Успешно отправлено: ${task.text}`);
           }).catch(err => {
               console.error(`[REMINDER ERROR] Не смог отправить в ${task.chatId}: ${err.message}`);
@@ -248,7 +251,7 @@ bot.on('message', async (msg) => {
             ];
             const randomPhrase = phrases[Math.floor(Math.random() * phrases.length)];
 
-            await bot.sendMessage(chatId, randomPhrase).catch(() => {});
+            await sendRich(bot, chatId, { markdown: randomPhrase }).catch(() => {});
             await bot.leaveChat(chatId).catch(() => {});
             return; 
         }
@@ -268,7 +271,7 @@ bot.on('message', async (msg) => {
   // === ЛОГИКА ВЫХОДА ВСЛЕД ЗА АДМИНОМ (ХАТИКО) ===
   if (msg.left_chat_member && msg.left_chat_member.id === config.adminId) {
     console.log(`[SECURITY] Админ вышел из чата "${chatTitle}". Ухожу следом.`);
-    await bot.sendMessage(chatId, "Батя ушел, и я сваливаю.");
+    await sendRich(bot, chatId, { markdown: "Батя ушел, и я сваливаю." });
     await bot.leaveChat(chatId);
     return;
   }

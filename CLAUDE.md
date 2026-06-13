@@ -54,7 +54,8 @@ src/
 │   ├── ai.js          # Multi-provider AI service with fallback chain
 │   └── storage.js     # JSON file-based persistence (debounced saves)
 └── utils/
-    └── helpers.js     # Utility functions
+    ├── helpers.js     # Utility functions
+    └── rich.js        # sendRichMessage helper (Bot API 10.1) + авто-фоллбэк
 ```
 
 ### Data Storage (`/data` directory)
@@ -138,6 +139,7 @@ See `.env.example` for full configuration template.
 
 ## Design Decisions
 
+- **Rich Messages**: All outgoing messages go through `sendRich()` (`src/utils/rich.js`) → Telegram `sendRichMessage` (Bot API 10.1), with auto-fallback to plain `sendMessage`. Convention: short replies = plain markdown; long AI answers = markdown field (model formats freely); showcase/system/admin = handcrafted HTML (escape dynamic parts with `escapeHtml`). `sendRichMessage` is called via raw HTTP (axios `proxy:false`), as `node-telegram-bot-api` doesn't support it yet.
 - **Admin-only groups**: Bot auto-leaves groups where admin isn't a member
 - **No database**: JSON file persistence with 5-second debounced saves
 - **Graceful shutdown**: SIGINT handler saves all data before exit

@@ -4,6 +4,7 @@ const ai = require('../services/ai');
 const config = require('../config');
 const axios = require('axios');
 const { exec } = require('child_process');
+const { sendRich, escapeHtml } = require('../utils/rich');
 const chatHistory = {};
 const analysisBuffers = {};
 const chatAnalysisBuffers = {}; // Буфер для анализа профиля чата
@@ -74,14 +75,12 @@ function addToHistory(chatId, sender, text) {
   }
 }
 
-function getBaseOptions(threadId) {
-    const opts = { parse_mode: 'Markdown', disable_web_page_preview: true };
-    if (threadId) opts.message_thread_id = threadId;
-    return opts;
+function replyOpts(msg, threadId) {
+    return { replyTo: msg.message_id, threadId: threadId || null, businessId: msg.business_connection_id || null };
 }
 
-function getReplyOptions(msg) {
-    return { reply_to_message_id: msg.message_id, parse_mode: 'Markdown', disable_web_page_preview: true };
+function baseOpts(msg, threadId) {
+    return { threadId: threadId || null, businessId: (msg && msg.business_connection_id) || null };
 }
 
 function getActionOptions(threadId) {
@@ -91,20 +90,7 @@ function getActionOptions(threadId) {
     return { message_thread_id: threadId };
 }
 
-function isTelegramEntityParseError(error) {
-    const message = error?.message || "";
-    return /can'?t parse entities|can't find end of the entity|parse entities/i.test(message);
-}
-
-function withoutParseMode(options = {}) {
-    const clean = { ...options };
-    delete clean.parse_mode;
-    return clean;
-}
-
-function escapeHtml(text) {
-    return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
+// escapeHtml импортируется из ../utils/rich (фоллбэк/парсинг разметки теперь внутри sendRich)
 
 async function processBuffer(chatId) {
     const buffer = analysisBuffers[chatId];
@@ -248,24 +234,24 @@ async function processMessage(bot, msg) {
       // === УВЕДОМЛЕНИЕ О НОВОМ ЧАТЕ ===
   // Если чата нет в базе И это не сам админ пишет себе в личку
   if (!storage.hasChat(chatId) && chatId !== config.adminId) {
-    let alertText = `🔔 **НОВЫЙ КОНТАКТ!**\n\n📂 **Чат:** ${chatTitle}\n🆔 **ID:** \`${chatId}\`\n`;
+    let alertText = `<h4>🔔 Новый контакт</h4><p>📂 Чат: <b>${escapeHtml(chatTitle)}</b><br/>🆔 <code>${chatId}</code></p>`;
     
-    const inviter = `@${msg.from.username || "нет"} (${msg.from.first_name})`;
+    const inviter = `@${escapeHtml(msg.from.username || "нет")} (${escapeHtml(msg.from.first_name || "")})`;
 
     if (msg.chat.type === 'private') {
-        alertText += `👤 **Написал:** ${inviter}\n💬 **Текст:** ${text}`;
+        alertText += `<p>👤 Написал: ${inviter}</p><blockquote>${escapeHtml(text)}</blockquote>`;
     } else {
         // Если добавили в группу
         if (msg.new_chat_members && msg.new_chat_members.some(u => u.id === config.botId)) {
-           alertText += `👋 **Меня добавил:** ${inviter}\n👥 **Тип:** Группа/Канал`;
+           alertText += `<p>👋 Меня добавил: ${inviter}<br/>👥 Тип: Группа/Канал</p>`;
         } else {
            // Просто первое сообщение из новой группы, где я уже был (или админ чистил базу)
-           alertText += `👤 **Активация:** ${inviter}\n💬 **Сообщение:** ${text}`;
+           alertText += `<p>👤 Активация: ${inviter}</p><blockquote>${escapeHtml(text)}</blockquote>`;
         }
     }
     
         // Шлем админу тихонько
-        bot.sendMessage(config.adminId, alertText, { parse_mode: 'Markdown' }).catch(() => {});
+        sendRich(bot, config.adminId, { html: alertText }).catch(() => {});
         }
 
         // Сохраняем в базу, чтобы в файлах было видно
@@ -274,39 +260,30 @@ async function processMessage(bot, msg) {
         // === ЛИЧКА: ПЕРЕСЫЛКА АДМИНУ И ОТВОРОТ-ПОВОРОТ ===
     if (!isBusinessMessage && msg.chat.type === 'private' && userId !== config.adminId) {
         // 1. Стучим админу о КАЖДОМ сообщении
-        const senderInfo = `@${msg.from.username || "нет"} (${msg.from.first_name})`;
-        
+        const senderInfo = `@${escapeHtml(msg.from.username || "нет")} (${escapeHtml(msg.from.first_name || "")})`;
+
         // Формируем отчет: текст или пометка о файле
-        let contentReport = text ? `💬 ${text}` : "📎 [Прислал файл или стикер]";
-        
+        let contentReport = text ? `<blockquote>${escapeHtml(text)}</blockquote>` : "<p>📎 [Прислал файл или стикер]</p>";
+
         // Шлем тебе
-        bot.sendMessage(config.adminId, `📩 ЛС от ${senderInfo}:\n${contentReport}`).catch(e => console.error("Ошибка пересылки ЛС:", e.message));
+        sendRich(bot, config.adminId, { html: `<p>📩 <b>ЛС от ${senderInfo}</b></p>${contentReport}` }).catch(e => console.error("Ошибка пересылки ЛС:", e.message));
 
         // 2. Если это не команда /start — отшиваем вежливо, но с инфой
         if (command !== '/start') {
             bot.sendChatAction(chatId, 'typing', getActionOptions(threadId)).catch(() => {});
             await new Promise(r => setTimeout(r, 1500)); // Пауза для реализма
 
-            const infoText = `В личке я общаюсь только с Админом.**
+            const infoText = `<p>В личке я общаюсь только с Админом.</p>
+<b>Почему так?</b>
+<p>Бот работает на моих API-ключах Google, и я отвечаю за всё, что он генерирует. Поэтому он работает только там, где есть я (в чатах) или в моей личке.</p>
+<b>Где меня потестить?</b>
+<p>Залетай в комментарии к <a href="https://t.me/VETA14/13">этому посту</a> или любому другому в канале — там я отвечаю всем.<br/><i>(Просто напиши «Сыч» или ответь реплаем на любое моё сообщение)</i></p>
+<b>Хочешь себе такого же бота?</b>
+<p>Весь мой код открыт! Скачай, вставь свои ключи и запусти у себя: <a href="https://github.com/Veta-one/sych-bot">GitHub</a></p>
+<b>Инструкция по установке</b>
+<p>Подробный гайд (10 минут): <a href="https://t.me/VETA14/13">читать</a></p>`;
 
-**Почему так?**
-Бот работает на моих API-ключах Google, и я отвечаю за всё, что он генерирует. Поэтому он работает только там, где есть я (в чатах) или в моей личке.
-
-**Где меня потестить?**
-Залетай в комментарии к [этому посту](https://t.me/VETA14/13) или любому другому в канале, там я отвечаю всем.
-*(Просто напиши там «Сыч» или ответь реплаем на любое мое сообщение)*
-
-**Хочешь себе такого же бота?**
-Весь мой код открыт! Ты можешь скачать меня, вставить свои ключи и запустить на своем компе или сервере.
-[Скачать с GitHub](https://github.com/Veta-one/sych-bot)
-
-**Инструкция по установке**
-Подробный гайд (займет 10 минут) лежит вот тут:
-[Читать инструкцию](https://t.me/VETA14/13)`;
-
-            // Отправляем с Markdown.
-            // disable_web_page_preview: true — чтобы не забивать чат картинками ссылок
-            await bot.sendMessage(chatId, infoText, { parse_mode: 'Markdown', disable_web_page_preview: true });
+            await sendRich(bot, chatId, { html: infoText }, baseOpts(msg, threadId));
             
             return; // Дальше не пускаем
         }
@@ -314,7 +291,7 @@ async function processMessage(bot, msg) {
 
   
   if (msg.left_chat_member && msg.left_chat_member.id === config.adminId) {
-    await bot.sendMessage(chatId, "Батя ушел, и я сваливаю.");
+    await sendRich(bot, chatId, { markdown: "Батя ушел, и я сваливаю." });
     await bot.leaveChat(chatId);
     return;
   }
@@ -349,14 +326,14 @@ async function processMessage(bot, msg) {
             const isTldrUseful = tldrLen < (fullLen * 0.65);
 
             if (isTldrUseful) {
-                replyText = `• <b>Краткая суть:</b>\n${escapeHtml(transcription.summary)}\n\n• <b>Полный текст:</b>\n<blockquote expandable>${escapeHtml(transcription.text)}</blockquote>`;
+                replyText = `<p>🎙 <b>Краткая суть:</b><br/>${escapeHtml(transcription.summary)}</p><details><summary>Полный текст</summary><blockquote>${escapeHtml(transcription.text)}</blockquote></details>`;
             } else {
                 // Если TLDR бесполезен, просто пишем кто сказал
-                replyText = `<b>${escapeHtml(userName)} сказал:</b>\n<blockquote expandable>${escapeHtml(transcription.text)}</blockquote>`;
+                replyText = `<p>🎙 <b>${escapeHtml(userName)} сказал:</b></p><blockquote>${escapeHtml(transcription.text)}</blockquote>`;
             }
 
             // Останавливаем "печатает"
-            try { await bot.sendMessage(chatId, replyText, { reply_to_message_id: msg.message_id, parse_mode: 'HTML' }); } catch(e) {}
+            try { await sendRich(bot, chatId, { html: replyText }, replyOpts(msg, threadId)); } catch(e) {}
             
             // !!! ВАЖНО: Если чат в муте — на этом всё. Не отвечаем на содержимое.
             if (storage.isTopicMuted(chatId, threadId)) return;
@@ -407,7 +384,7 @@ async function processMessage(bot, msg) {
 
   // === КОМАНДЫ ===
   if (command === '/version') {
-    return bot.sendMessage(chatId, `🦉 **Sych Bot**\nВерсия: \`v${config.version}\``, getBaseOptions(threadId));
+    return sendRich(bot, chatId, { html: `<h4>🦉 Sych Bot</h4><p>Версия: <code>v${config.version}</code></p>` }, baseOpts(msg, threadId));
 }
 
   // === АДМИН-ПАНЕЛЬ (БАНЫ) ===
@@ -416,17 +393,18 @@ async function processMessage(bot, msg) {
     // 1. СПИСОК ЗАБАНЕННЫХ
     if (command === '/banlist') {
         const banned = storage.getBannedList();
-        const list = Object.entries(banned).map(([uid, name]) => `⛔ \`${uid}\` — ${name}`).join('\n');
-        return bot.sendMessage(chatId, list.length ? `**Черный список:**\n${list}` : "Список пуст.", getBaseOptions(threadId));
+        const items = Object.entries(banned).map(([uid, name]) => `<li><code>${uid}</code> — ${escapeHtml(String(name))}</li>`).join('');
+        const html = items.length ? `<h4>⛔ Чёрный список</h4><ul>${items}</ul>` : "<p>Список пуст.</p>";
+        return sendRich(bot, chatId, { html }, baseOpts(msg, threadId));
     }
 
     // 2. РАЗБАН
     if (command === '/unban') {
         const targetId = text.split(' ')[1];
-        if (!targetId) return bot.sendMessage(chatId, "⚠️ Введи ID: `/unban 123456`", getBaseOptions(threadId));
+        if (!targetId) return sendRich(bot, chatId, { html: "⚠️ Введи ID: <code>/unban 123456</code>" }, baseOpts(msg, threadId));
         
         storage.unbanUser(targetId);
-        return bot.sendMessage(chatId, `✅ Юзер \`${targetId}\` разбанен.`, getBaseOptions(threadId));
+        return sendRich(bot, chatId, { html: `✅ Юзер <code>${escapeHtml(targetId)}</code> разбанен.` }, baseOpts(msg, threadId));
     }
 
     // 3. БАН (С интерфейсом)
@@ -436,13 +414,13 @@ async function processMessage(bot, msg) {
 
         // Вариант А: Просто /ban (показываем последних активных)
         if (!target) {
-            if (recentActiveUsers.length === 0) return bot.sendMessage(chatId, "Список активности пуст.", getBaseOptions(threadId));
-            
-            const list = recentActiveUsers.map((u, i) => {
-                return `${i+1}. **${u.name}**\n🆔 \`${u.id}\`\n💬 "${u.text}..."\n📂 ${u.chat}`;
-            }).join('\n\n');
-            
-            return bot.sendMessage(chatId, `**Последние активные:**\n\n${list}\n\nЧтобы забанить: \`/ban ID\``, getBaseOptions(threadId));
+            if (recentActiveUsers.length === 0) return sendRich(bot, chatId, { markdown: "Список активности пуст." }, baseOpts(msg, threadId));
+
+            const list = recentActiveUsers.map((u) => {
+                return `<li><b>${escapeHtml(u.name)}</b> — <code>${u.id}</code><br/>💬 "${escapeHtml(u.text)}..."<br/>📂 ${escapeHtml(String(u.chat))}</li>`;
+            }).join('');
+
+            return sendRich(bot, chatId, { html: `<h4>Последние активные</h4><ol>${list}</ol><p>Забанить: <code>/ban ID</code></p>` }, baseOpts(msg, threadId));
         }
 
         // Вариант Б: /ban @username или /ban 123456
@@ -452,64 +430,68 @@ async function processMessage(bot, msg) {
         // Если ввели username (начинается с @ или буквы)
         if (isNaN(target)) {
            const foundId = storage.findUserIdByUsername(target);
-           if (!foundId) return bot.sendMessage(chatId, `❌ Не нашел юзера с ником ${target} в своей базе. Нужен точный ID.`, getBaseOptions(threadId));
+           if (!foundId) return sendRich(bot, chatId, { html: `❌ Не нашёл юзера с ником ${escapeHtml(target)} в базе. Нужен точный ID.` }, baseOpts(msg, threadId));
            targetId = foundId;
         }
 
-        if (parseInt(targetId) === config.adminId) return bot.sendMessage(chatId, "🤡 Себя банить плохая примета.", getBaseOptions(threadId));
+        if (parseInt(targetId) === config.adminId) return sendRich(bot, chatId, { markdown: "🤡 Себя банить плохая примета." }, baseOpts(msg, threadId));
 
         storage.banUser(targetId, targetName);
-        return bot.sendMessage(chatId, `🚫 **BANNED**\nПользователь: ${targetName}\nID: \`${targetId}\`\n\nТеперь я буду его игнорить везде.`, getBaseOptions(threadId));
+        return sendRich(bot, chatId, { html: `<h4>🚫 BANNED</h4><p>Пользователь: <b>${escapeHtml(String(targetName))}</b><br/>ID: <code>${escapeHtml(String(targetId))}</code></p><p>Теперь игнорю его везде.</p>` }, baseOpts(msg, threadId));
     }
 }
 
   if (command === '/help' || command === '/start') {
-    const helpText = `
-*Вот тебе гайд*
-
-**🦉 Вижу и Слышу:**
-• Кидай войс — расшифрую текст и напишу краткую суть.
-• Кидай фото или видео — пойму, что там, и прокомментирую.
-• Кидай PDF, TXT или код — прочитаю и отвечу на вопросы.
-• Кидай ссылку на картинку (.jpg, .png, .webp) — скачаю и посмотрю.
-• Умею гуглить актуальную инфу (курсы, новости, погода).
-• «Сыч напомни завтра в 10» — поставлю напоминание. Можно реплаем на сообщение с датой.
-
-**🎲 Развлекуха:**
-• "Сыч кинь монетку" — Орёл/Решка.
-• "Сыч число 1-100" — Рандомное число в диапазоне.
-• "Сыч кто из нас [вопрос]" — Выберу случайного из чата.
-
-**🕵️ Досье и Память:**
-• "Сыч кто я?" — Моё честное мнение о тебе.
-• "Сыч расскажи про @юзера" — Выдам досье на участника.
-• "Сыч стата" — Статистика токенов за сутки.
-• "Сыч, этот чат про [тема]" — Задать тему чата вручную.
-
-**⚙️ Настройки:**
-• /mute — Режим тишины (перестану отвечать в этом чате).
-• /reset — Сброс памяти (если начал тупить или забыл контекст).
-• /version — Узнать текущую версию бота.
-
-_ver: ${config.version}_
-        `;
-    try { return await bot.sendMessage(chatId, helpText, getBaseOptions(threadId)); } catch (e) {}
+    const helpText = `<h3>🦉 Что я умею</h3>
+<b>Вижу и слышу</b>
+<ul>
+<li>Кидай <b>войс</b> — расшифрую и сделаю краткую суть</li>
+<li>Кидай <b>фото/видео</b> — пойму, что там, и прокомментирую</li>
+<li>Кидай <b>PDF/TXT/код</b> — прочитаю и отвечу на вопросы</li>
+<li>Кидай ссылку на картинку — скачаю и посмотрю</li>
+<li>Гуглю актуальное: курсы, новости, погода</li>
+<li>«Сыч напомни завтра в 10» — поставлю напоминание (можно реплаем)</li>
+</ul>
+<details><summary>🎲 Развлекуха</summary>
+<ul>
+<li>«Сыч кинь монетку» — орёл/решка</li>
+<li>«Сыч число 1-100» — рандом в диапазоне</li>
+<li>«Сыч кто из нас [вопрос]» — выберу случайного</li>
+</ul>
+</details>
+<details><summary>🕵️ Досье и память</summary>
+<ul>
+<li>«Сыч кто я?» — моё честное мнение о тебе</li>
+<li>«Сыч расскажи про @юзера» — досье на участника</li>
+<li>«Сыч стата» — статистика токенов</li>
+<li>«Сыч, этот чат про [тема]» — задать тему чата</li>
+</ul>
+</details>
+<details><summary>⚙️ Настройки</summary>
+<ul>
+<li><code>/mute</code> — режим тишины</li>
+<li><code>/reset</code> — сброс памяти</li>
+<li><code>/version</code> — версия бота</li>
+</ul>
+</details>
+<blockquote>ver: ${config.version}</blockquote>`;
+    try { return await sendRich(bot, chatId, { html: helpText }, baseOpts(msg, threadId)); } catch (e) {}
 }
 
   if (command === '/mute') {
     const nowMuted = storage.toggleMute(chatId, threadId);
-    return bot.sendMessage(chatId, nowMuted ? "🦉 Окей молчу" : "🦉 Я тут", getBaseOptions(threadId));
+    return sendRich(bot, chatId, { markdown: nowMuted ? "🦉 Окей молчу" : "🦉 Я тут" }, baseOpts(msg, threadId));
   }
   if (command === '/reset') {
     chatHistory[chatId] = [];
     analysisBuffers[chatId] = [];
-    return bot.sendMessage(chatId, "🦉 Окей, всё забыл, ну было и было", getBaseOptions(threadId));
+    return sendRich(bot, chatId, { markdown: "🦉 Окей, всё забыл, ну было и было" }, baseOpts(msg, threadId));
   }
 
   if (command === '/restart' && userId === config.adminId) {
-    await bot.sendMessage(chatId, "🔄 Перезагружаюсь...", getBaseOptions(threadId));
+    await sendRich(bot, chatId, { markdown: "🔄 Перезагружаюсь..." }, baseOpts(msg, threadId));
     exec('pm2 restart sych-bot', (err) => {
-        if (err) bot.sendMessage(config.adminId, `❌ Ошибка рестарта: ${err.message}`);
+        if (err) sendRich(bot, config.adminId, { html: `❌ Ошибка рестарта: <code>${escapeHtml(err.message)}</code>` });
     });
     return;
   }
@@ -531,7 +513,7 @@ _ver: ${config.version}_
   // === СТАТИСТИКА ===
   if (cleanText === 'сыч стата' || cleanText === 'сыч статистика') {
     const report = ai.getStatsReport();
-    return bot.sendMessage(chatId, report, getReplyOptions(msg));
+    return sendRich(bot, chatId, { html: report }, replyOpts(msg, threadId));
   }
 
   // === НАПОМИНАЛКИ ===
@@ -554,7 +536,7 @@ _ver: ${config.version}_
         storage.addReminder(chatId, userId, username, parsed.targetTime, parsed.reminderText);
         
         console.log(`[REMINDER SET] Установлено на: ${parsed.targetTime}`);
-        return bot.sendMessage(chatId, parsed.confirmation, getReplyOptions(msg));
+        return sendRich(bot, chatId, { markdown: parsed.confirmation }, replyOpts(msg, threadId));
     } else {
         console.log(`[REMINDER ERROR] AI не смог распарсить время.`);
     }
@@ -575,12 +557,12 @@ _ver: ${config.version}_
 
               if (updates && updates.topic) {
                   storage.updateChatProfile(chatId, updates);
-                  const factsInfo = updates.facts ? `\n📝 Факты: ${updates.facts.substring(0, 100)}${updates.facts.length > 100 ? '...' : ''}` : '';
-                  try { return await bot.sendMessage(chatId, `Понял, запомнил.\n🎯 Тема: ${updates.topic}${factsInfo}`, getReplyOptions(msg)); } catch(e){}
+                  const factsInfo = updates.facts ? `<br/>📝 Факты: ${escapeHtml(updates.facts.substring(0, 100))}${updates.facts.length > 100 ? '...' : ''}` : '';
+                  try { return await sendRich(bot, chatId, { html: `<p>Понял, запомнил.<br/>🎯 <b>Тема:</b> ${escapeHtml(updates.topic)}${factsInfo}</p>` }, replyOpts(msg, threadId)); } catch(e){}
               } else {
                   // Fallback если AI не ответил
                   storage.setChatTopic(chatId, description.substring(0, 200));
-                  try { return await bot.sendMessage(chatId, `Понял, запомнил. Тема: "${description.substring(0, 100)}..."`, getReplyOptions(msg)); } catch(e){}
+                  try { return await sendRich(bot, chatId, { html: `<p>Понял, запомнил. Тема: "${escapeHtml(description.substring(0, 100))}..."</p>` }, replyOpts(msg, threadId)); } catch(e){}
               }
           }
       }
@@ -593,7 +575,7 @@ _ver: ${config.version}_
             startTyping();
             const description = await ai.generateProfileDescription(targetProfile, targetName);
             stopTyping();
-            try { return await bot.sendMessage(chatId, description, getReplyOptions(msg)); } catch(e){}
+            try { return await sendRich(bot, chatId, { markdown: description }, replyOpts(msg, threadId)); } catch(e){}
         }
     }
       
@@ -601,7 +583,7 @@ _ver: ${config.version}_
           try { await bot.sendChatAction(chatId, 'typing', getActionOptions(threadId)); } catch(e){}
           const result = Math.random() > 0.5 ? "ОРЁЛ" : "РЕШКА";
           const flavor = await ai.generateFlavorText("подбросить монетку", result);
-          try { return await bot.sendMessage(chatId, flavor, getReplyOptions(msg)); } catch(e){}
+          try { return await sendRich(bot, chatId, { markdown: flavor }, replyOpts(msg, threadId)); } catch(e){}
       }
 
       const rangeMatch = cleanText.match(/(\d+)-(\d+)/);
@@ -611,16 +593,16 @@ _ver: ${config.version}_
           const max = parseInt(rangeMatch[2]);
           const rand = Math.floor(Math.random() * (max - min + 1)) + min;
           const flavor = await ai.generateFlavorText(`выбрать число ${min}-${max}`, String(rand));
-          try { return await bot.sendMessage(chatId, flavor, getReplyOptions(msg)); } catch(e){}
+          try { return await sendRich(bot, chatId, { markdown: flavor }, replyOpts(msg, threadId)); } catch(e){}
       }
       
       const isWhoGame = cleanText.match(/(?:кто|кого)\s+(?:из нас|тут|здесь|в чате|сегодня)/) || cleanText.match(/сыч\W+кто\??$/) || cleanText.trim() === "сыч кто";
       if (isWhoGame) {
           try { await bot.sendChatAction(chatId, 'typing', getActionOptions(threadId)); } catch(e){}
           const randomUser = storage.getRandomUser(chatId);
-          if (!randomUser) return bot.sendMessage(chatId, "Никого не знаю пока.", getBaseOptions(threadId));
+          if (!randomUser) return sendRich(bot, chatId, { markdown: "Никого не знаю пока." }, baseOpts(msg, threadId));
           const flavor = await ai.generateFlavorText(`выбрать случайного человека из чата на вопрос "${text}"`, randomUser);
-          try { return await bot.sendMessage(chatId, flavor, getReplyOptions(msg)); } catch(e){}
+          try { return await sendRich(bot, chatId, { markdown: flavor }, replyOpts(msg, threadId)); } catch(e){}
       }
   }
 
@@ -683,7 +665,7 @@ _ver: ${config.version}_
         const vid = msg.video || msg.reply_to_message.video;
         // Лимит 20 МБ (Telegram API limit for getFile)
         if (vid.file_size > 20 * 1024 * 1024) {
-            return bot.sendMessage(chatId, "🐢 Братан, видос жирный пиздец (больше 20мб). Я не грузчик, таскать такое. Сожми или обрежь.", getReplyOptions(msg));
+            return sendRich(bot, chatId, { markdown: "🐢 Братан, видос жирный пиздец (больше 20мб). Я не грузчик, таскать такое. Сожми или обрежь." }, replyOpts(msg, threadId));
         }
         try {
             await bot.sendChatAction(chatId, 'upload_video', getActionOptions(threadId));
@@ -707,12 +689,12 @@ _ver: ${config.version}_
         ];
 
         if (doc.file_size > 20 * 1024 * 1024) {
-            return bot.sendMessage(chatId, "🐘 Не, файл тяжелый (больше 20мб). Я пас.", getReplyOptions(msg));
+            return sendRich(bot, chatId, { markdown: "🐘 Не, файл тяжелый (больше 20мб). Я пас." }, replyOpts(msg, threadId));
         }
 
         if (!allowedMimes.includes(doc.mime_type) && !doc.mime_type.startsWith('image/')) {
              // Если формат странный, но юзер прямо просит - можно попробовать рискнуть, но лучше предупредить
-             return bot.sendMessage(chatId, "🗿 Эт че за формат? Я такое не читаю. Давай PDF или текст.", getReplyOptions(msg));
+             return sendRich(bot, chatId, { markdown: "🗿 Эт че за формат? Я такое не читаю. Давай PDF или текст." }, replyOpts(msg, threadId));
         }
 
         try {
@@ -799,7 +781,7 @@ _ver: ${config.version}_
     
     if (!aiResponse) {
         console.log(`[DEBUG] 🚨 ОШИБКА: AI вернул пустоту!`);
-        bot.sendMessage(config.adminId, `⚠️ **ALARM:** Gemini вернула пустую строку!\n📂 **Чат:** ${chatTitle}`, { parse_mode: 'Markdown' }).catch(() => {});
+        sendRich(bot, config.adminId, { html: `<p>⚠️ <b>ALARM:</b> Gemini вернула пустую строку!</p><p>📂 Чат: <b>${escapeHtml(chatTitle)}</b></p>` }).catch(() => {});
         aiResponse = getSychErrorReply("503 overloaded");
 
     }
@@ -808,8 +790,7 @@ _ver: ${config.version}_
         console.error("[CRITICAL AI ERROR]:", err.message);
         
         // 1. ШЛЕМ ТЕХНИЧЕСКИЙ РЕПОРТ АДМИНУ (В личку)
-        const errorMsg = `🔥 **Gemini упала!**\n\nЧат: ${chatTitle}\nОшибка: \`${err.message}\``;
-        bot.sendMessage(config.adminId, errorMsg, { parse_mode: 'Markdown' }).catch(() => {});
+        sendRich(bot, config.adminId, { html: `<h4>🔥 Gemini упала!</h4><p>Чат: <b>${escapeHtml(chatTitle)}</b></p><pre><code>${escapeHtml(err.message)}</code></pre>` }).catch(() => {});
 
         // 2. ГЕНЕРИРУЕМ СМЕШНОЙ ОТВЕТ ДЛЯ ЧАТА
         // Передаем текст ошибки в нашу новую функцию
@@ -817,65 +798,22 @@ _ver: ${config.version}_
     }
 
     
-    // === ФОРМАТИРОВАНИЕ И ОТПРАВКА ===
-    
-    // Создаем копию текста для обработки
+    // === ОТПРАВКА (rich markdown + авто-фоллбэк) ===
+    // Раньше тут "упрощали" разметку под legacy Markdown. Теперь наоборот — отдаём
+    // богатый Markdown как есть, Telegram сам красиво его рисует (sendRichMessage).
     let formattedResponse = aiResponse;
 
-    try {
-        // --- 1. ФОРМАТИРОВАНИЕ ---
-        
-        // Заголовки (### Текст -> *ТЕКСТ*)
-        formattedResponse = formattedResponse.replace(/^#{1,6}\s+(.*?)$/gm, (match, title) => {
-            return `\n*${title.toUpperCase()}*`;
-        });
-
-        // Жирный шрифт (**текст** -> *текст*)
-        formattedResponse = formattedResponse.replace(/\*\*([\s\S]+?)\*\*/g, '*$1*');
-        formattedResponse = formattedResponse.replace(/__([\s\S]+?)__/g, '*$1*');
-
-        // Списки (* пункт -> • пункт)
-        formattedResponse = formattedResponse.replace(/^(\s*)[\*\-]\s+/gm, '$1• ');
-
-        // Убираем лишние переносы
-        formattedResponse = formattedResponse.replace(/\n{3,}/g, '\n\n');
-
-    } catch (fmtErr) {
-        console.error("[FORMAT ERROR] Ошибка форматирования, шлю сырой текст:", fmtErr.message);
-        formattedResponse = aiResponse; // Если формат сломался, шлем оригинал
-    }
-
 
     try {
-        // --- 2. ОТПРАВКА ---
-
         // Защита от спама (обрезаем, если больше 8500)
         if (formattedResponse.length > 8500) {
             formattedResponse = formattedResponse.substring(0, 8500) + "\n\n...[обсуждение слишком длинное, я устал]...";
         }
 
-        // Разбиваем на куски по 4000 символов
-        let chunks = formattedResponse.match(/[\s\S]{1,4000}/g) || [];
-
-        // !!! ГЛАВНОЕ ИСПРАВЛЕНИЕ !!!
-        // Если match вернул пустоту (глюк), но текст ЕСТЬ — создаем кусок вручную
-        if (chunks.length === 0 && formattedResponse.length > 0) {
-            console.log("[DEBUG] Регулярка вернула 0 кусков! Форсирую отправку.");
-            chunks = [formattedResponse];
-        }
-        
-        for (const chunk of chunks) {
-            try {
-                await bot.sendMessage(chatId, chunk, getReplyOptions(msg));
-            } catch (sendError) {
-                if (!isTelegramEntityParseError(sendError)) throw sendError;
-                console.log(`[SEND FALLBACK] Markdown parse failed in chat=${chatId}, sending plain text.`);
-                await bot.sendMessage(chatId, chunk, withoutParseMode(getReplyOptions(msg)));
-            }
-        }
+        // Шлём богатым markdown. sendRich сам падает в обычный текст при ошибке парсинга.
+        await sendRich(bot, chatId, { markdown: formattedResponse }, replyOpts(msg, threadId));
 
         stopTyping(); // <-- Всё, сообщение ушло, выключаем статус
-        
         addToHistory(chatId, "Сыч", aiResponse);
 
     } catch (error) {
@@ -884,14 +822,12 @@ _ver: ${config.version}_
 
         if (isBusinessMessage && /BUSINESS[_ ]?PEER[_ ]?INVALID|BUSINESSPEERINVALID/i.test(error.message)) {
             console.log(`[BUSINESS SEND] Telegram отклонил отправку в chat=${chatId}. Обычно это значит, что peer недоступен для business-ответа или нет входящего окна 24ч.`);
-            bot.sendMessage(config.adminId, `⚠️ Business отправка отклонена Telegram\n\nЧат: ${chatTitle}\nID: ${chatId}\nОшибка: ${error.message}`, { parse_mode: 'Markdown' }).catch(() => {});
+            sendRich(bot, config.adminId, { html: `<p>⚠️ <b>Business отправка отклонена Telegram</b></p><p>Чат: <b>${escapeHtml(chatTitle)}</b><br/>ID: <code>${chatId}</code></p><pre><code>${escapeHtml(error.message)}</code></pre>` }).catch(() => {});
             return;
         }
 
-        if (!isTelegramEntityParseError(error)) {
-            // Отчет админу
-            bot.sendMessage(config.adminId, `⚠️ **Ошибка отправки:** ${error.message}\n📂 **Чат:** ${chatTitle}\n🆔 **ID:** ${chatId}`, { parse_mode: 'Markdown' }).catch(() => {});
-        }
+        // Отчет админу
+        sendRich(bot, config.adminId, { html: `<p>⚠️ <b>Ошибка отправки:</b></p><pre><code>${escapeHtml(error.message)}</code></pre><p>📂 Чат: <b>${escapeHtml(chatTitle)}</b> · 🆔 <code>${chatId}</code></p>` }).catch(() => {});
 
         // АВАРИЙНАЯ ОТПРАВКА (Если Markdown сломался или что-то еще)
         // Шлем чистый текст без всякого форматирования
