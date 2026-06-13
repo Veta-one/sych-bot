@@ -4,7 +4,7 @@ const ai = require('../services/ai');
 const config = require('../config');
 const axios = require('axios');
 const { exec } = require('child_process');
-const { sendRich, escapeHtml } = require('../utils/rich');
+const { sendRich, escapeHtml, mdToHtml } = require('../utils/rich');
 const chatHistory = {};
 const analysisBuffers = {};
 const chatAnalysisBuffers = {}; // Буфер для анализа профиля чата
@@ -575,7 +575,7 @@ async function processMessage(bot, msg) {
             startTyping();
             const description = await ai.generateProfileDescription(targetProfile, targetName);
             stopTyping();
-            try { return await sendRich(bot, chatId, { markdown: description }, replyOpts(msg, threadId)); } catch(e){}
+            try { return await sendRich(bot, chatId, { html: mdToHtml(description), fallback: description }, replyOpts(msg, threadId)); } catch(e){}
         }
     }
       
@@ -810,8 +810,9 @@ async function processMessage(bot, msg) {
             formattedResponse = formattedResponse.substring(0, 8500) + "\n\n...[обсуждение слишком длинное, я устал]...";
         }
 
-        // Шлём богатым markdown. sendRich сам падает в обычный текст при ошибке парсинга.
-        await sendRich(bot, chatId, { markdown: formattedResponse }, replyOpts(msg, threadId));
+        // markdown ИИ -> HTML (таблицы/списки/заголовки рисуются только так).
+        // fallback — исходный текст; sendRich сам падает в plain при ошибке.
+        await sendRich(bot, chatId, { html: mdToHtml(formattedResponse), fallback: formattedResponse }, replyOpts(msg, threadId));
 
         stopTyping(); // <-- Всё, сообщение ушло, выключаем статус
         addToHistory(chatId, "Сыч", aiResponse);

@@ -9,6 +9,9 @@
 
 const axios = require('axios');
 const config = require('../config');
+const { marked } = require('marked');
+
+marked.setOptions({ gfm: true, breaks: true, headerIds: false, mangle: false });
 
 const API = `https://api.telegram.org/bot${config.telegramToken}`;
 
@@ -34,6 +37,17 @@ function htmlToPlain(html = '') {
     .replace(/&amp;/g, '&')
     .replace(/[ \t]+\n/g, '\n')
     .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+// Markdown (как его пишет ИИ) -> HTML, который Telegram rich точно рисует:
+// таблицы, заголовки, списки, цитаты, код. Теги подгоняем под Telegram.
+function mdToHtml(md = '') {
+  return marked.parse(String(md))
+    .replace(/<\/?(thead|tbody)>/gi, '')
+    .replace(/<(\/?)strong>/gi, '<$1b>')
+    .replace(/<(\/?)em>/gi, '<$1i>')
+    .replace(/<(\/?)del>/gi, '<$1s>')
     .trim();
 }
 
@@ -103,4 +117,4 @@ async function sendRich(bot, chatId, content, opts = {}) {
   }
 }
 
-module.exports = { sendRich, htmlToPlain, escapeHtml };
+module.exports = { sendRich, htmlToPlain, escapeHtml, mdToHtml };
