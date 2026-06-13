@@ -260,7 +260,10 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   if (userInstruction) personalInfo += `\n!!! СПЕЦ-ИНСТРУКЦИЯ !!!\n${userInstruction}\n`;
   
   if (searchResultText) {
-      personalInfo += `\n!!! ДАННЫЕ ИЗ ПОИСКА (${config.searchProvider.toUpperCase()}) !!!\n${searchResultText}\nИНСТРУКЦИЯ: Ответь, используя эти факты. УКАЖИ ССЫЛКИ. Если есть блок «ДОСТУПНЫЕ КАРТИНКИ» и картинка действительно уместна (просят показать / «как выглядит») — вставь ОДНУ подходящую через ![](URL), URL бери ТОЛЬКО из этого списка.\n`;
+      personalInfo += `\n!!! ДАННЫЕ ИЗ ПОИСКА (${config.searchProvider.toUpperCase()}) !!!\n${searchResultText}\n`
+        + `ИНСТРУКЦИЯ: Ответь, опираясь на эти факты.\n`
+        + `ИСТОЧНИКИ (СТРОГО): ссылки вставляй ПРЯМО в подходящие слова текста через [слова](URL) — НЕ используй номера-сноски вида [1], [2]. В САМОМ КОНЦЕ ответа добавь сворачиваемый список источников РОВНО в таком формате (с пустыми строками внутри, заголовок именно "Источники", без эмодзи):\n<details><summary>Источники</summary>\n\n1. [Название](URL)\n2. [Название](URL)\n\n</details>\nURL и названия бери ТОЛЬКО из данных выше, не выдумывай.\n`
+        + `КАРТИНКИ: если есть блок «ДОСТУПНЫЕ КАРТИНКИ» и картинка реально уместна (просят показать / «как выглядит») — вставь ОДНУ через ![](URL), URL только из этого списка.\n`;
   }
 
   if (userProfile) {
@@ -363,7 +366,9 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
            const links = result.response.candidates[0].groundingMetadata.groundingChunks
               .filter(c => c.web?.uri).map(c => `[${c.web.title || "Источник"}](${c.web.uri})`);
            const unique = [...new Set(links)].slice(0, 3);
-           if (unique.length > 0) text += "\n\nНашел тут: " + unique.join(" • ");
+           if (unique.length > 0) {
+               text += `\n\n<details><summary>Источники</summary>\n\n` + unique.map((l, i) => `${i + 1}. ${l}`).join('\n') + `\n\n</details>`;
+           }
       }
       return text;
     });
