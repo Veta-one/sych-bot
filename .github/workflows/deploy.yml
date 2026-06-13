@@ -18,20 +18,25 @@ jobs:
           key: ${{ secrets.SSH_KEY }}
           port: 22
           script: |
-            # 1. Загружаем переменные окружения (чтобы работали npm и pm2)
-            # Это нужно, потому что SSH сессия GitHub "слепая" и не видит пути
-            export NVM_DIR="$HOME/.nvm"
-            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"
-            source ~/.bashrc
+            set -e
 
-            # 2. Переходим в папку (ИСПРАВИЛ ОПЕЧАТКУ sych-bot -> sych_bot)
+            # 1. Загружаем окружение (SSH-сессия GitHub "слепая" и не видит пути nvm/pm2)
+            export NVM_DIR="$HOME/.nvm"
+            [ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh" || true
+            source ~/.bashrc || true
+
+            # 2. Переходим в папку
             cd /home/your_user/sych_bot
-            
-            # 3. Скачиваем обновления
+
+            # 3. Сбрасываем локальные правки lock-файла.
+            # npm install --production плодит изменения в package-lock.json, из-за чего
+            # git pull залипает ("local changes would be overwritten"). Чистим перед pull.
+            git checkout -- package-lock.json || true
+
+            # 4. Скачиваем обновления (set -e => при ошибке pull деплой ПАДАЕТ,
+            # а не рестартует молча старый код)
             git pull origin main
-            
-            # 4. Обновляем библиотеки
+
+            # 5. Обновляем библиотеки и перезапускаем
             npm install --production
-            
-            # 5. Перезапускаем бота
             pm2 restart sych-bot
