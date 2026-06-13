@@ -94,11 +94,11 @@ async function sendRich(bot, chatId, content, opts = {}) {
     // Если rich упал из-за медиа (битый URL картинки) — пробуем ещё раз БЕЗ картинок,
     // чтобы сохранить форматирование (таблицы/списки), а не падать в плоский текст.
     // Картинки Telegram качает сам со своей стороны, поэтому доверяем именно его вердикту.
-    const hasImg = /!\[/.test(content.markdown || '') || /<img/i.test(content.html || '');
+    const hasImg = /!\[|<tg-(collage|slideshow)/i.test(content.markdown || '') || /<img|<tg-(collage|slideshow)/i.test(content.html || '');
     if (hasImg && /media|no_media|RICH_MESSAGE/i.test(desc)) {
       const noImg = {};
-      if (content.markdown != null) noImg.markdown = content.markdown.replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\n{3,}/g, '\n\n').trim();
-      if (content.html != null) noImg.html = content.html.replace(/<img[^>]*>/gi, '');
+      if (content.markdown != null) noImg.markdown = content.markdown.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\n{3,}/g, '\n\n').trim();
+      if (content.html != null) noImg.html = content.html.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/<img[^>]*>/gi, '');
       try {
         await axios.post(`${API}/sendRichMessage`, { chat_id: chatId, rich_message: noImg, ...extra }, { proxy: false });
         console.error(`[RICH] медиа не прошло, отправил без картинок: ${desc}`);

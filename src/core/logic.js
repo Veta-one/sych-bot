@@ -524,7 +524,7 @@ async function processMessage(bot, msg) {
   // === СТАТИСТИКА ===
   if (cleanText === 'сыч стата' || cleanText === 'сыч статистика') {
     const report = ai.getStatsReport();
-    return sendRich(bot, chatId, { html: report }, replyOpts(msg, threadId));
+    return sendRich(bot, chatId, { markdown: report }, replyOpts(msg, threadId));
   }
 
   // === НАПОМИНАЛКИ ===
@@ -816,9 +816,9 @@ async function processMessage(bot, msg) {
 
 
     try {
-        // Защита от спама (обрезаем, если больше 8500)
-        if (formattedResponse.length > 8500) {
-            formattedResponse = formattedResponse.substring(0, 8500) + "\n\n...[обсуждение слишком длинное, я устал]...";
+        // Защита от спама (обрезаем, если больше 16000; rich держит до 32768)
+        if (formattedResponse.length > 16000) {
+            formattedResponse = formattedResponse.substring(0, 16000) + "\n\n...[обсуждение слишком длинное, я устал]...";
         }
 
         // Шлём markdown ИИ напрямую — Telegram rich рисует его красивее (в т.ч. таблицы).

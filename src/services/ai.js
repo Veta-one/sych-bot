@@ -64,26 +64,33 @@ class AiService {
     const dateStr = today.date ? today.date.split('-').reverse().slice(0, 2).join('.') : '--';
 
     const googleRows = (today.google || []).map((s, i) =>
-      `<tr><td>Ключ ${i + 1}</td><td>${s.status ? "🟢" : "🔴"}</td><td align="right">${s.count}</td></tr>`
-    ).join('') || `<tr><td>—</td><td>—</td><td align="right">0</td></tr>`;
+      `| Ключ ${i + 1} | ${s.status ? "🟢" : "🔴"} | ${s.count} |`
+    ).join('\n') || `| — | — | 0 |`;
 
     const allTimeTotal = allTime.smart + allTime.logic + allTime.google;
 
-    return `<h3>📊 Статистика Сыча</h3>
-<p>Сегодня <b>${dateStr}</b> · режим <b>${mode}</b></p>
-<table>
-<tr><th>Канал</th><th align="right">Сегодня</th></tr>
-<tr><td>Smart (ответы)</td><td align="right">${today.smart}</td></tr>
-<tr><td>Logic (анализ)</td><td align="right">${today.logic}</td></tr>
-<tr><td>Search (поиск)</td><td align="right">${today.search}</td></tr>
-</table>
-<b>Google Native (ключи)</b>
-<table>
-<tr><th>Ключ</th><th>Статус</th><th align="right">Запросов</th></tr>
+    return `## 📊 Статистика Сыча
+
+Сегодня **${dateStr}** · режим **${mode}**
+
+| Канал | Сегодня |
+|:------|--------:|
+| Smart (ответы) | ${today.smart} |
+| Logic (анализ) | ${today.logic} |
+| Search (поиск) | ${today.search} |
+
+**Google Native (ключи)**
+
+| Ключ | Статус | Запросов |
+|:-----|:------:|---------:|
 ${googleRows}
-</table>
+
 <details><summary>За периоды</summary>
-<p>Неделя: API ${week.smart + week.logic} · Google ${week.google} · Поиск ${week.search}<br/>Месяц: API ${month.smart + month.logic} · Google ${month.google} · Поиск ${month.search}<br/>Всего: ${this._formatNumber(allTimeTotal)} запросов</p>
+
+Неделя: API ${week.smart + week.logic} · Google ${week.google} · Поиск ${week.search}
+Месяц: API ${month.smart + month.logic} · Google ${month.google} · Поиск ${month.search}
+Всего: ${this._formatNumber(allTimeTotal)} запросов
+
 </details>`;
   }
 
@@ -263,7 +270,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       personalInfo += `\n!!! ДАННЫЕ ИЗ ПОИСКА (${config.searchProvider.toUpperCase()}) !!!\n${searchResultText}\n`
         + `ИНСТРУКЦИЯ: Ответь, опираясь на эти факты.\n`
         + `ИСТОЧНИКИ (СТРОГО): ссылки вставляй ПРЯМО в подходящие слова текста через [слова](URL) — НЕ используй номера-сноски вида [1], [2]. В САМОМ КОНЦЕ ответа добавь сворачиваемый список источников РОВНО в таком формате (с пустыми строками внутри, заголовок именно "Источники", без эмодзи):\n<details><summary>Источники</summary>\n\n1. [Название](URL)\n2. [Название](URL)\n\n</details>\nURL и названия бери ТОЛЬКО из данных выше, не выдумывай.\n`
-        + `КАРТИНКИ: если есть блок «ДОСТУПНЫЕ КАРТИНКИ» и картинка реально уместна (просят показать / «как выглядит») — вставь ОДНУ через ![](URL), URL только из этого списка.\n`;
+        + `КАРТИНКИ: если есть блок «ДОСТУПНЫЕ КАРТИНКИ» и это уместно (просят показать / «как выглядит») — вставь картинку через ![](URL). Если уместно НЕСКОЛЬКО картинок — оберни их в <tg-collage> и </tg-collage> (каждая ![](URL) с новой строки, с пустыми строками внутри блока). URL бери ТОЛЬКО из этого списка, не выдумывай.\n`;
   }
 
   if (userProfile) {
@@ -300,7 +307,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
           const completion = await this.openai.chat.completions.create({
               model: config.mainModel,
               messages: messages,
-              max_tokens: 2500,
+              max_tokens: 3500,
               temperature: 0.9,
           });
           
@@ -358,7 +365,7 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
 
       const result = await this.nativeModel.generateContent({
           contents: [{ role: 'user', parts: promptParts }],
-          generationConfig: { maxOutputTokens: 2500, temperature: 0.9 }
+          generationConfig: { maxOutputTokens: 3500, temperature: 0.9 }
       });
       
       let text = result.response.text();
