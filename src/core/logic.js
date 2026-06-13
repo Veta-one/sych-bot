@@ -325,11 +325,22 @@ async function processMessage(bot, msg) {
             // Если TLDR почти такой же длины или длиннее — в нем нет смысла.
             const isTldrUseful = tldrLen < (fullLen * 0.65);
 
+            // Длительность голосового (0:47), если доступна
+            const durSec = media.duration;
+            const durStr = (typeof durSec === 'number' && durSec > 0)
+                ? `${Math.floor(durSec / 60)}:${String(durSec % 60).padStart(2, '0')}`
+                : '';
+            const durTag = durStr ? ` · <code>${durStr}</code>` : '';
+            const safeName = escapeHtml(userName);
+
             if (isTldrUseful) {
-                replyText = `<p>🎙 <b>Краткая суть:</b><br/>${escapeHtml(transcription.summary)}</p><details><summary>Полный текст</summary><blockquote>${escapeHtml(transcription.text)}</blockquote></details>`;
+                // Карточка: шапка (имя + длительность) + суть + кат «Расшифровка»
+                replyText = `<p>🎙 <b>Голосовое</b> · ${safeName}${durTag}</p>`
+                    + `<p><b>Суть:</b> ${escapeHtml(transcription.summary)}</p>`
+                    + `<details><summary>Расшифровка</summary><blockquote>${escapeHtml(transcription.text)}</blockquote></details>`;
             } else {
-                // Если TLDR бесполезен, просто пишем кто сказал
-                replyText = `<p>🎙 <b>${escapeHtml(userName)} сказал:</b></p><blockquote>${escapeHtml(transcription.text)}</blockquote>`;
+                // Короткое голосовое: имя + длительность + цитата (без TL;DR)
+                replyText = `<p>🎙 <b>${safeName}</b>${durTag}</p><blockquote>${escapeHtml(transcription.text)}</blockquote>`;
             }
 
             // Останавливаем "печатает"
