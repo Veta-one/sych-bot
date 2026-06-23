@@ -343,12 +343,16 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
           const completion = await this.openai.chat.completions.create({
               model: config.mainModel,
               messages: messages,
-              max_tokens: 3500,
+              max_tokens: config.maxOutputTokens,
               temperature: 0.9,
           });
-          
-          storage.incrementStat('smart'); 
-          return completion.choices[0].message.content.replace(/^thought[\s\S]*?\n\n/i, ''); 
+
+          const choice = completion.choices[0];
+          if (choice.finish_reason === 'length') {
+              console.warn(`[AI TRUNCATED] Ответ обрезан лимитом токенов (finish_reason=length, max_tokens=${config.maxOutputTokens}). Подними config.maxOutputTokens.`);
+          }
+          storage.incrementStat('smart');
+          return choice.message.content.replace(/^thought[\s\S]*?\n\n/i, '');
       } catch (e) {
           console.error(`[API SMART FAIL] ${e.message}. Fallback to Native...`);
       }
@@ -403,9 +407,12 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
 
       const result = await this.nativeModel.generateContent({
           contents: [{ role: 'user', parts: promptParts }],
-          generationConfig: { maxOutputTokens: 3500, temperature: 0.9 }
+          generationConfig: { maxOutputTokens: config.maxOutputTokens, temperature: 0.9 }
       });
-      
+
+      if (result.response.candidates?.[0]?.finishReason === 'MAX_TOKENS') {
+          console.warn(`[AI TRUNCATED] Native ответ обрезан лимитом токенов (finishReason=MAX_TOKENS, maxOutputTokens=${config.maxOutputTokens}).`);
+      }
       let text = result.response.text();
       if (result.response.candidates[0].groundingMetadata?.groundingChunks) {
            const links = result.response.candidates[0].groundingMetadata.groundingChunks

@@ -816,9 +816,10 @@ async function processMessage(bot, msg) {
 
 
     try {
-        // Защита от спама (обрезаем, если больше 16000; rich держит до 32768)
-        if (formattedResponse.length > 16000) {
-            formattedResponse = formattedResponse.substring(0, 16000) + "\n\n...[обсуждение слишком длинное, я устал]...";
+        // Защита от спама. Telegram rich (sendRichMessage) держит ~32768 символов —
+        // режем по 30000, оставляя запас под маркер ниже. Раньше тут стояло 16000.
+        if (formattedResponse.length > 30000) {
+            formattedResponse = formattedResponse.substring(0, 30000) + "\n\n...[обсуждение слишком длинное, я устал]...";
         }
 
         // Шлём markdown ИИ напрямую — Telegram rich рисует его красивее (в т.ч. таблицы).

@@ -15,4 +15,10 @@ instructions.json
 .DS_Store
 
 # Локальные заметки
-todo.txt.claude/
+todo.txt
+
+# Claude Code (локальные настройки и сессии)
+.claude/
+
+# Временные скрипты-черновики
+scripts/indent-test.js

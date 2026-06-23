@@ -47,7 +47,15 @@ module.exports = {
   // === GEMINI NATIVE (FALLBACK / SEARCH) ===
   geminiKeys: geminiKeys,
   googleNativeModel: 'gemini-2.5-flash-lite', 
-  fallbackModelName: 'gemini-2.5-flash-lite', 
+  fallbackModelName: 'gemini-2.5-flash-lite',
   contextSize: 30,
+
+  // === ПОТОЛОК ВЫВОДА МОДЕЛИ ===
+  // Раньше было 3500 — длинные ответы рвало на полуслове (особенно с блоком «Источники»).
+  // Telegram rich (sendRichMessage) держит ~32k символов, а модели — до 64k токенов,
+  // так что даём простор, чтобы большие сообщения доходили целиком. Это лишь ПОТОЛОК:
+  // платим только за реально сгенерированные токены, модель сама останавливается раньше.
+  maxOutputTokens: 16000,
+
   triggerRegex: /(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i,
 };
