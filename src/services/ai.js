@@ -116,12 +116,19 @@ ${googleRows}
     const modelName = this.usingFallback ? config.fallbackModelName : config.googleNativeModel;
     console.log(`[AI INIT] Native Key #${this.keyIndex + 1} | Model: ${modelName}`);
 
-    this.nativeModel = genAI.getGenerativeModel({ 
+    this.nativeModel = genAI.getGenerativeModel({
         model: modelName,
         systemInstruction: prompts.system(),
         safetySettings: safetySettings,
         // Включаем нативный поиск Google (Tools)
-        tools: [{ googleSearch: {} }] 
+        tools: [{ googleSearch: {} }]
+    });
+
+    // Отдельная «чистая» модель-описатель картинок: без характера Сыча и без поиска,
+    // всегда на дешёвой flash-lite. Её нейтральные описания оседают в памяти чата.
+    this.describeModel = genAI.getGenerativeModel({
+        model: config.googleNativeModel,
+        safetySettings: safetySettings,
     });
   }
 
@@ -558,9 +565,31 @@ async generateFlavorText(task, result) {
           if (first !== -1 && last !== -1) text = text.substring(first, last + 1);
           return JSON.parse(text);
         });
-    } catch (e) { 
+    } catch (e) {
         console.error(`[TRANSCRIPTION FAIL] ${e.message}`);
-        return null; 
+        return null;
+    }
+  }
+
+  // === ОПИСАНИЕ КАРТИНКИ ДЛЯ ПАМЯТИ ЧАТА (дешёвый нативный vision-вызов) ===
+  // Возвращает короткое фактическое описание изображения (или null). Вызывается
+  // асинхронно после того, как бот посмотрел на картинку, и оседает в истории чата —
+  // чтобы по картинке можно было отвечать потом, не отправляя её в нейронку заново.
+  async describeImage(imageBuffer, mimeType = "image/jpeg") {
+    if (!imageBuffer || !this.keys || this.keys.length === 0) return null;
+    try {
+        return await this.executeNativeWithRetry(async () => {
+          const parts = [
+            { inlineData: { mimeType: mimeType, data: imageBuffer.toString("base64") } },
+            { text: prompts.describeImage() }
+          ];
+          const result = await this.describeModel.generateContent(parts);
+          const text = (result.response.text() || "").trim();
+          return text ? text.slice(0, 1000) : null;
+        });
+    } catch (e) {
+        console.error(`[DESCRIBE FAIL] ${e.message}`);
+        return null;
     }
   }
 

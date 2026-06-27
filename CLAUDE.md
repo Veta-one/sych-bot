@@ -139,6 +139,17 @@ See `.env.example` for full configuration template.
 
 **Использование:** контекст чата передаётся в каждый запрос AI (~100 токенов).
 
+## Image Memory (Vision Context)
+
+Когда бот реально смотрит на изображение (его позвали по фото/стикеру/картинке-ссылке или реплаем на них), после ответа он **асинхронно** получает нейтральное фактическое описание картинки дешёвой нативной моделью (`describeModel` на `gemini-2.5-flash-lite`, без характера Сыча и без поиска) и **вшивает его прямо в запись истории этого сообщения** (`[🖼 на картинке: ...]`).
+
+- **Зачем:** описание едет в окне контекста (последние 30 сообщений), поэтому по картинке можно спрашивать дальше (цвет, что на фоне, текст со скрина) — модель отвечает из текста, **не отправляя картинку в нейронку повторно**.
+- **Экономия (lazy, Tier 1):** описывается только та картинка, которую бот реально трогал; игнорируемые мемы не стоят ничего. Вызов идёт в фоне на бесплатных ротируемых Google-ключах — на скорость ответа не влияет.
+- **Фоллбэк на пиксели:** если описание упустило деталь или бот ошибся — реплай прямо на саму картинку заставляет пересмотреть пиксели заново (`reply_to_message.photo` → новый vision-вызов) и обновляет память.
+- **Затухание:** память живёт, пока картинка в окне из 30 сообщений, дальше забывается сама.
+
+Код: `ai.describeImage()` + `describeModel` (`src/services/ai.js`), `prompts.describeImage()`, вызов в `processMessage` (`src/core/logic.js`); `addToHistory()` теперь возвращает запись, чтобы её дообогатить описанием.
+
 ## Design Decisions
 
 - **Rich Messages**: All outgoing messages go through `sendRich()` (`src/utils/rich.js`) → Telegram `sendRichMessage` (Bot API 10.1), with auto-fallback to plain `sendMessage`. Convention: short replies = plain markdown; long AI answers = markdown field (model formats freely); showcase/system/admin = handcrafted HTML (escape dynamic parts with `escapeHtml`). `sendRichMessage` is called via raw HTTP (axios `proxy:false`), as `node-telegram-bot-api` doesn't support it yet. AI replies use the markdown field directly (native tables/lists — prettier than HTML); `normalizeMd` guarantees a blank line before tables. The AI may embed images via `![](url)` using real URLs from Tavily search (`include_images`), and multiple images as a `<tg-collage>`; `sendRich` retries without images/collage if Telegram rejects the media (then falls back to plain text). Stats = markdown table; sources = inline links + collapsible `<details>Источники</details>`; AI palette also includes `==highlight==`, `||spoiler||` and checklists. NB: time entities `tg://time` do NOT render — don't use them.

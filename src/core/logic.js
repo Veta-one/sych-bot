@@ -69,10 +69,12 @@ function getSychErrorReply(errText) {
 
 function addToHistory(chatId, sender, text) {
   if (!chatHistory[chatId]) chatHistory[chatId] = [];
-  chatHistory[chatId].push({ role: sender, text: text });
+  const entry = { role: sender, text: text };
+  chatHistory[chatId].push(entry);
   if (chatHistory[chatId].length > config.contextSize) {
     chatHistory[chatId].shift();
   }
+  return entry; // возвращаем запись, чтобы её можно было дообогатить (напр. описанием картинки)
 }
 
 function replyOpts(msg, threadId) {
@@ -457,7 +459,7 @@ async function processMessage(bot, msg) {
 <b>Вижу и слышу</b>
 <ul>
 <li>Кидай <b>войс</b> — расшифрую и сделаю краткую суть</li>
-<li>Кидай <b>фото/видео</b> — пойму, что там, и прокомментирую</li>
+<li>Кидай <b>фото/видео</b> — пойму, что там, прокомментирую и запомню для вопросов потом</li>
 <li>Кидай <b>PDF/TXT/код</b> — прочитаю и отвечу на вопросы</li>
 <li>Кидай ссылку на картинку — скачаю и посмотрю</li>
 <li>Гуглю актуальное: курсы, новости, погода</li>
@@ -519,7 +521,7 @@ async function processMessage(bot, msg) {
     startTyping(); 
   }
 
-  addToHistory(chatId, senderName, text);
+  const currentMsgEntry = addToHistory(chatId, senderName, text);
 
   // === СТАТИСТИКА ===
   if (cleanText === 'сыч стата' || cleanText === 'сыч статистика') {
@@ -852,6 +854,20 @@ async function processMessage(bot, msg) {
              }
              addToHistory(chatId, "Сыч", aiResponse);
         } catch (e2) { console.error("FATAL SEND ERROR (Даже аварийная не ушла):", e2.message); }
+    }
+
+    // === ПАМЯТЬ О КАРТИНКЕ (variant B) ===
+    // Если бот реально посмотрел на изображение — асинхронно получаем его фактическое
+    // описание дешёвой нативной моделью и вшиваем прямо в запись истории этого сообщения.
+    // Так по картинке можно спрашивать дальше (пока она в окне контекста), не отправляя
+    // её в нейронку повторно. Точечный пересмотр пикселей — по реплаю на саму картинку.
+    if (imageBuffer && typeof mimeType === 'string' && mimeType.startsWith('image/') && currentMsgEntry) {
+        ai.describeImage(imageBuffer, mimeType).then(desc => {
+            if (desc) {
+                currentMsgEntry.text = `${currentMsgEntry.text ? currentMsgEntry.text + ' ' : ''}[🖼 на картинке: ${desc}]`;
+                console.log(`[IMG MEMORY] Описание картинки сохранено в контекст (${desc.length} симв.)`);
+            }
+        }).catch(e => console.error(`[IMG MEMORY] ${e.message}`));
     }
 
     // Рефлекс (Анализ стиля общения и репутации)
