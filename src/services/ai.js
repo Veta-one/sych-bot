@@ -585,7 +585,7 @@ async generateFlavorText(task, result) {
           ];
           const result = await this.describeModel.generateContent(parts);
           const text = (result.response.text() || "").trim();
-          return text ? text.slice(0, 1000) : null;
+          return text ? text.slice(0, config.imageDescMaxChars) : null;
         });
     } catch (e) {
         console.error(`[DESCRIBE FAIL] ${e.message}`);

@@ -865,7 +865,8 @@ async function processMessage(bot, msg) {
         ai.describeImage(imageBuffer, mimeType).then(desc => {
             if (desc) {
                 currentMsgEntry.text = `${currentMsgEntry.text ? currentMsgEntry.text + ' ' : ''}[🖼 на картинке: ${desc}]`;
-                console.log(`[IMG MEMORY] Описание картинки сохранено в контекст (${desc.length} симв.)`);
+                const preview = desc.slice(0, 200).replace(/\s+/g, ' ').trim();
+                console.log(`[IMG MEMORY] Описание сохранено (${desc.length} симв.): ${preview}${desc.length > 200 ? '…' : ''}`);
             }
         }).catch(e => console.error(`[IMG MEMORY] ${e.message}`));
     }
