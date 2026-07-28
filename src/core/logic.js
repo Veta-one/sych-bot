@@ -1,4 +1,3 @@
-const telegram = require('node-telegram-bot-api');
 const storage = require('../services/storage');
 const ai = require('../services/ai');
 const config = require('../config');
@@ -475,7 +474,7 @@ async function processMessage(bot, msg) {
 <details><summary>🕵️ Досье и память</summary>
 <ul>
 <li>«Сыч кто я?» — моё честное мнение о тебе</li>
-<li>«Сыч расскажи про @юзера» — досье на участника</li>
+<li>«Сыч расскажи про @юзера» или «Сыч расскажи про TGID» — досье на участника</li>
 <li>«Сыч стата» — статистика токенов</li>
 <li>«Сыч, этот чат про [тема]» — задать тему чата</li>
 </ul>
@@ -582,14 +581,24 @@ async function processMessage(bot, msg) {
 
       const aboutMatch = cleanText.match(/(?:расскажи про|кто так(?:ой|ая)|мнение о|поясни за)\s+(.+)/);
       if (aboutMatch) {
-        const targetName = aboutMatch[1].replace('?', '').trim();
+        const targetName = aboutMatch[1].replace(/\?+$/, '').trim();
         const targetProfile = storage.findProfileByQuery(chatId, targetName);
         if (targetProfile) {
             startTyping();
-            const description = await ai.generateProfileDescription(targetProfile, targetName);
+            const isTgIdQuery = /^\d+$/.test(targetName);
+            const targetLabel = isTgIdQuery
+                ? (targetProfile.username
+                    ? `${targetProfile.username} (TGID ${targetProfile.userId})`
+                    : `TGID ${targetProfile.userId}`)
+                : targetName;
+            const description = await ai.generateProfileDescription(targetProfile, targetLabel);
             stopTyping();
             try { return await sendRich(bot, chatId, { markdown: normalizeMd(description) }, replyOpts(msg, threadId)); } catch(e){}
         }
+        stopTyping();
+        return sendRich(bot, chatId, {
+            markdown: `Не нашёл такого участника в памяти этого чата. Укажи @username или точный TGID.`
+        }, replyOpts(msg, threadId));
     }
       
       if (cleanText.match(/(монетк|кинь|брось|подбрось|подкинь)/)) {
@@ -850,7 +859,12 @@ async function processMessage(bot, msg) {
         try { 
              const rawChunks = aiResponse.match(/[\s\S]{1,4000}/g) || [aiResponse];
              for (const chunk of rawChunks) {
-                await bot.sendMessage(chatId, chunk, { reply_to_message_id: msg.message_id });
+                await bot.sendMessage(chatId, chunk, {
+                    reply_parameters: {
+                        message_id: msg.message_id,
+                        allow_sending_without_reply: true,
+                    },
+                });
              }
              addToHistory(chatId, "Сыч", aiResponse);
         } catch (e2) { console.error("FATAL SEND ERROR (Даже аварийная не ушла):", e2.message); }

@@ -6,7 +6,7 @@
 // Нужен .env с TELEGRAM_BOT_TOKEN, ADMIN_USER_ID и хотя бы одним AI-ключом.
 
 require('dotenv').config({ path: require('path').join(__dirname, '..', '.env') });
-const TelegramBot = require('node-telegram-bot-api');
+const { TelegramBot } = require('node-telegram-bot-api');
 const config = require('../src/config');
 const ai = require('../src/services/ai');
 const { sendRich } = require('../src/utils/rich');

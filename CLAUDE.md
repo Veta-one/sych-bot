@@ -168,5 +168,6 @@ See `.env.example` for full configuration template.
 - `/unban [ID]` - Restore user (admin only)
 - `Сыч напомни [текст]` - Set reminder
 - `Сыч кто я?` - Show user profile
+- `Сыч расскажи про @username` / `Сыч расскажи про TGID` - Show a participant profile by username or exact Telegram user ID within the current chat
 - `Сыч стата` - Show token usage statistics
 - `Сыч, этот чат про [тема]` - Set chat topic manually

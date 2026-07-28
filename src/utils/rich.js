@@ -109,8 +109,13 @@ async function sendRich(bot, chatId, content, opts = {}) {
     console.error(`[RICH] sendRichMessage упал, фоллбэк в текст: ${desc}`);
 
     // 2) Фоллбэк — обычный sendMessage
-    const legacy = { disable_web_page_preview: true };
-    if (opts.replyTo) legacy.reply_to_message_id = opts.replyTo;
+    const legacy = { link_preview_options: { is_disabled: true } };
+    if (opts.replyTo) {
+      legacy.reply_parameters = {
+        message_id: opts.replyTo,
+        allow_sending_without_reply: true,
+      };
+    }
     if (opts.threadId) legacy.message_thread_id = opts.threadId;
     if (opts.businessId) legacy.business_connection_id = opts.businessId;
     if (opts.replyMarkup) legacy.reply_markup = opts.replyMarkup;

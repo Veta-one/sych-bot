@@ -496,26 +496,44 @@ class StorageService {
     this.saveProfiles();
   }
 
-  // Поиск профиля по тексту ("расскажи про @vetaone" или "про Виталия")
+  // Поиск профиля по TGID, username или realName внутри конкретного чата.
   findProfileByQuery(chatId, query) {
-    if (!this.profiles[chatId]) return null;
     const chat = this.getChat(chatId);
-    const q = query.toLowerCase().replace('@', ''); // убираем собаку для поиска
+    const profiles = this.profiles[chatId] || {};
+    const rawQuery = String(query || '').trim();
+    if (!rawQuery) return null;
+
+    const q = rawQuery.toLowerCase().replace(/^@/, '');
+
+    // 1. Числовой запрос — это точный Telegram user ID, без частичных совпадений.
+    if (/^\d+$/.test(q)) {
+        const profile = profiles[q];
+        const usernameRaw = chat.users[q];
+
+        // Не раскрываем и не создаём профиль для ID, которого бот не видел в этом чате.
+        if (!profile && !usernameRaw) return null;
+
+        const p = profile || this.getProfile(chatId, q);
+        return {
+            ...p,
+            userId: q,
+            username: usernameRaw || null,
+        };
+    }
     
-    // 1. Пробуем найти по ID, перебирая users из db.json
+    // 2. Ищем по сохранённому username/имени из db.json.
     for (const [uid, usernameRaw] of Object.entries(chat.users)) {
-        if (usernameRaw.toLowerCase().includes(q)) {
-            // Нашли ID по нику, возвращаем профиль (даже если он пустой, создадим на лету для ответа)
+        if (String(usernameRaw).toLowerCase().includes(q)) {
             const p = this.getProfile(chatId, uid);
-            return { ...p, username: usernameRaw };
+            return { ...p, userId: uid, username: usernameRaw };
         }
     }
 
-    // 2. Если по нику не нашли, ищем внутри профилей по realName
-    for (const [uid, profile] of Object.entries(this.profiles[chatId])) {
+    // 3. Если по нику не нашли, ищем внутри профилей по realName.
+    for (const [uid, profile] of Object.entries(profiles)) {
         if (profile.realName && profile.realName.toLowerCase().includes(q)) {
             const usernameRaw = chat.users[uid] || "Unknown";
-            return { ...profile, username: usernameRaw };
+            return { ...profile, userId: uid, username: usernameRaw };
         }
     }
 
