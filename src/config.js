@@ -73,6 +73,9 @@ module.exports = {
 
   // === ВНЕШНИЙ КОНТЕНТ ===
   youtubeTranscriptMaxChars: Math.floor(positiveNumber(process.env.YOUTUBE_TRANSCRIPT_MAX_CHARS, 100000)),
+  youtubeGeminiModel: process.env.YOUTUBE_GEMINI_MODEL || 'gemini-3.5-flash-lite',
+  youtubeGeminiTimeoutMs: positiveNumber(process.env.YOUTUBE_GEMINI_TIMEOUT_SECONDS, 45) * 1000,
+  youtubeGeminiCacheTtlMs: positiveNumber(process.env.YOUTUBE_GEMINI_CACHE_HOURS, 6) * 60 * 60 * 1000,
   officeTextMaxChars: Math.floor(positiveNumber(process.env.OFFICE_TEXT_MAX_CHARS, 100000)),
   officeExpandedMaxBytes: Math.floor(positiveNumber(process.env.OFFICE_EXPANDED_MAX_MB, 32) * 1024 * 1024),
 

@@ -1,10 +1,10 @@
 {
   "name": "sych-bot",
-  "version": "1.11.1",
+  "version": "1.12.0",
   "main": "bot.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test test/async-timeout.test.js test/storage-profile-query.test.js test/profile-query-routing.test.js test/storage-reliability.test.js test/privacy-command.test.js test/youtube.test.js test/documents.test.js test/content-policy.test.js test/telegram-api-compat.test.js"
+    "test": "node --test test/async-timeout.test.js test/storage-profile-query.test.js test/profile-query-routing.test.js test/storage-reliability.test.js test/privacy-command.test.js test/youtube.test.js test/youtube-gemini.test.js test/documents.test.js test/content-policy.test.js test/telegram-api-compat.test.js"
   },
   "keywords": [],
   "author": "",

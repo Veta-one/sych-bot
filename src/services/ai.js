@@ -13,6 +13,12 @@ const {
   isYouTubeUrl,
   selectYoutubeTranscriptMaxChars,
 } = require('./youtube');
+const {
+  buildYoutubeGeminiPlan,
+  buildYoutubeGeminiPromptContext,
+  getCachedYoutubeGeminiAnalysis,
+  requestYoutubeGeminiAnalysis,
+} = require('./youtube-gemini');
 const { shouldSkipSearchForPrimarySource } = require('../utils/content-policy');
 const { withTimeout } = require('../utils/async');
 
@@ -309,8 +315,39 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
                   console.log(`[YOUTUBE] Субтитры получены: ${video.title || video.videoId}, ${video.segmentCount} сегм., ${video.text.length}/${transcriptMaxChars} симв.`);
               } catch (error) {
                   console.error(`[YOUTUBE FAIL] ${error.message}`);
-                  const videoId = extractYouTubeVideoId(urlM[0]);
-                  youtubeFallbackQuery = `что за видео YouTube ${videoId || urlM[0]} содержание`;
+                  try {
+                      const plan = buildYoutubeGeminiPlan(urlM[0], currentMessage.text, {
+                          model: config.youtubeGeminiModel,
+                      });
+                      let analysis = getCachedYoutubeGeminiAnalysis(plan);
+                      const startedAt = Date.now();
+
+                      if (!analysis) {
+                          if (this.keys.length === 0) {
+                              throw new Error('нет настроенных ключей Google Gemini');
+                          }
+                          analysis = await this.executeNativeWithRetry(() =>
+                              requestYoutubeGeminiAnalysis(this.keys[this.keyIndex], plan, {
+                                  cacheTtlMs: config.youtubeGeminiCacheTtlMs,
+                                  timeoutMs: config.youtubeGeminiTimeoutMs,
+                              })
+                          );
+                      }
+
+                      extractedText += buildYoutubeGeminiPromptContext(analysis);
+                      const usage = analysis.usage || {};
+                      console.log(
+                          `[YOUTUBE GEMINI] ${analysis.videoId} | model=${analysis.model}`
+                          + ` | detail=${analysis.detailLevel} | cached=${analysis.cached}`
+                          + ` | ${Date.now() - startedAt}ms`
+                          + ` | tokens=${usage.promptTokens || 0}/${usage.outputTokens || 0}`
+                          + ` | google_cache=${usage.cachedTokens || 0}`
+                      );
+                  } catch (geminiError) {
+                      console.error(`[YOUTUBE GEMINI FAIL] ${geminiError.message}`);
+                      const videoId = extractYouTubeVideoId(urlM[0]);
+                      youtubeFallbackQuery = `что за видео YouTube ${videoId || urlM[0]} содержание`;
+                  }
               }
           }
 

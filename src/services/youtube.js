@@ -43,20 +43,35 @@ function isYouTubeUrl(value) {
   return Boolean(extractYouTubeVideoId(value));
 }
 
-function selectYoutubeTranscriptMaxChars(message, hardMax = 100000) {
+function getYoutubeDetailLevel(message) {
   const text = String(message || '').toLowerCase();
-  const safeHardMax = Math.max(1000, Number(hardMax) || 100000);
 
   const wantsExhaustive = /(?:полный|целиком|дослов|по минут|все (?:аргумент|тезис|факт)|максимально подроб|с цитат)/i.test(text);
-  if (wantsExhaustive) return safeHardMax;
+  if (wantsExhaustive) return 'exhaustive';
 
   const wantsAnalysis = /(?:подроб|разбер|анализ|аргумент|тезис|факт|таймкод|с этого (?:места|момента)|что (?:он|автор).{0,30}говор)/i.test(text);
-  if (wantsAnalysis) return Math.min(safeHardMax, 25000);
+  if (wantsAnalysis) return 'analysis';
 
   const wantsOverview = /(?:о ч[её]м|про что|в двух словах|кратк|основн(?:ая|ой) (?:мысль|суть)|суть (?:видео|ролика))/i.test(text);
-  if (wantsOverview) return Math.min(safeHardMax, 6000);
+  if (wantsOverview) return 'overview';
 
-  return Math.min(safeHardMax, 12000);
+  return 'standard';
+}
+
+function selectYoutubeTranscriptMaxChars(message, hardMax = 100000) {
+  const safeHardMax = Math.max(1000, Number(hardMax) || 100000);
+  const budgets = {
+    overview: 6000,
+    standard: 12000,
+    analysis: 25000,
+    exhaustive: safeHardMax,
+  };
+  return Math.min(safeHardMax, budgets[getYoutubeDetailLevel(message)]);
+}
+
+function shouldUseYoutubeStartOffset(message) {
+  return /(?:с этого (?:места|момента)|начиная с (?:этого|таймкода)|после (?:этого )?таймкода|отсюда и дальше)/i
+    .test(String(message || ''));
 }
 
 function extractYouTubeStartSeconds(value) {
@@ -274,7 +289,9 @@ module.exports = {
   extractYouTubeStartSeconds,
   fetchMetadata,
   formatTimestamp,
+  getYoutubeDetailLevel,
   getYoutubeContext,
   isYouTubeUrl,
   selectYoutubeTranscriptMaxChars,
+  shouldUseYoutubeStartOffset,
 };

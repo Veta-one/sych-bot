@@ -91,7 +91,7 @@ src/
 
 **Tavily usage** (`@tavily/core`, **camelCase** options!): `search()` with `searchDepth:"advanced"`, `maxResults:5`, `chunksPerSource:3`, `includeAnswer:"advanced"`, plus `topic` (news/finance/general) + `timeRange` chosen per-query by the `shouldSearch` logic model for freshness. `ai.extractUrl()` reads a shared article URL via Tavily Extract (auto-triggered on a non-image link with read-intent).
 
-YouTube-ссылки с явным запросом обрабатываются по субтитрам без Tavily. Бюджет расшифровки адаптивный: 6k символов для обзора, 12k для обычного пересказа, 25k для разбора и до `YOUTUBE_TRANSCRIPT_MAX_CHARS` только для явно полного запроса. Если YouTube требует от серверного IP входа для антибот-проверки, обработчик пропускает бесполезный Tavily Extract и сразу использует поисковый fallback; YouTube/Tavily-вызовы ограничены таймаутами.
+YouTube-ссылки с явным запросом сначала обрабатываются по субтитрам. Бюджет расшифровки адаптивный: 6k символов для обзора, 12k для обычного пересказа, 25k для разбора и до `YOUTUBE_TRANSCRIPT_MAX_CHARS` только для явно полного запроса. Если субтитры недоступны или YouTube блокирует серверный IP, `src/services/youtube-gemini.js` передаёт публичный URL напрямую `gemini-3.5-flash-lite`, кэширует одинаковый нейтральный конспект и использует его как первичный источник для основного ответа. Tavily Search остаётся последним fallback. Стартовый таймкод применяется только при явной просьбе «с этого места»; все внешние вызовы ограничены таймаутами.
 
 ## Key Environment Variables
 
@@ -104,6 +104,9 @@ SEARCH_PROVIDER        # tavily | perplexity | google
 TAVILY_API_KEY         # If using Tavily search
 GOOGLE_GEMINI_API_KEY  # Required for fallback
 GOOGLE_GEMINI_API_KEY_2 # Optional additional keys for rotation
+YOUTUBE_GEMINI_MODEL   # Direct public YouTube fallback, default gemini-3.5-flash-lite
+YOUTUBE_GEMINI_TIMEOUT_SECONDS # Per-attempt timeout, default 45
+YOUTUBE_GEMINI_CACHE_HOURS # In-memory analysis cache, default 6
 ```
 
 See `.env.example` for full configuration template.

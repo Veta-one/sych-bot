@@ -6,9 +6,11 @@ const {
   compactTranscript,
   extractYouTubeVideoId,
   extractYouTubeStartSeconds,
+  getYoutubeDetailLevel,
   getYoutubeContext,
   isYouTubeUrl,
   selectYoutubeTranscriptMaxChars,
+  shouldUseYoutubeStartOffset,
 } = require('../src/services/youtube');
 
 test('YouTube URL parser supports watch, short and youtu.be links without host spoofing', () => {
@@ -44,6 +46,11 @@ test('YouTube transcript budget follows the requested depth', () => {
   assert.equal(selectYoutubeTranscriptMaxChars('подробно разбери аргументы автора', 100000), 25000);
   assert.equal(selectYoutubeTranscriptMaxChars('дай полный пересказ со всеми фактами', 100000), 100000);
   assert.equal(selectYoutubeTranscriptMaxChars('дай полный пересказ', 18000), 18000);
+  assert.equal(getYoutubeDetailLevel('о чём ролик?'), 'overview');
+  assert.equal(getYoutubeDetailLevel('разбери аргументы подробно'), 'analysis');
+  assert.equal(getYoutubeDetailLevel('полный разбор по минутам'), 'exhaustive');
+  assert.equal(shouldUseYoutubeStartOffset('о чём весь ролик?'), false);
+  assert.equal(shouldUseYoutubeStartOffset('разбери с этого места'), true);
 });
 
 test('YouTube context uses injected transcript and metadata fetchers', async () => {
