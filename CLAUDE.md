@@ -91,7 +91,7 @@ src/
 
 **Tavily usage** (`@tavily/core`, **camelCase** options!): `search()` with `searchDepth:"advanced"`, `maxResults:5`, `chunksPerSource:3`, `includeAnswer:"advanced"`, plus `topic` (news/finance/general) + `timeRange` chosen per-query by the `shouldSearch` logic model for freshness. `ai.extractUrl()` reads a shared article URL via Tavily Extract (auto-triggered on a non-image link with read-intent).
 
-YouTube-ссылки с явным запросом обрабатываются по субтитрам без Tavily. Бюджет расшифровки адаптивный: 6k символов для обзора, 12k для обычного пересказа, 25k для разбора и до `YOUTUBE_TRANSCRIPT_MAX_CHARS` только для явно полного запроса.
+YouTube-ссылки с явным запросом обрабатываются по субтитрам без Tavily. Бюджет расшифровки адаптивный: 6k символов для обзора, 12k для обычного пересказа, 25k для разбора и до `YOUTUBE_TRANSCRIPT_MAX_CHARS` только для явно полного запроса. Если YouTube требует от серверного IP входа для антибот-проверки, обработчик пропускает бесполезный Tavily Extract и сразу использует поисковый fallback; YouTube/Tavily-вызовы ограничены таймаутами.
 
 ## Key Environment Variables
 
