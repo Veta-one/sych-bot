@@ -1,10 +1,10 @@
 {
   "name": "sych-bot",
-  "version": "1.10.0",
+  "version": "1.10.1",
   "main": "bot.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test test"
+    "test": "node --test test/storage-profile-query.test.js test/telegram-api-compat.test.js"
   },
   "keywords": [],
   "author": "",
