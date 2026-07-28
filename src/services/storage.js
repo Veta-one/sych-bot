@@ -1,15 +1,72 @@
 const fs = require('fs');
 const path = require('path');
 
-const DB_PATH = path.join(__dirname, '../../data/db.json');
-const INSTRUCTIONS_PATH = path.join(__dirname, '../../data/instructions.json');
-const PROFILES_PATH = path.join(__dirname, '../../data/profiles.json');
-const CHAT_PROFILES_PATH = path.join(__dirname, '../../data/chatProfiles.json');
-const STATS_PATH = path.join(__dirname, '../../data/stats.json');
+const DEFAULT_DATA_DIR = path.join(__dirname, '../../data');
 const debounce = require('lodash.debounce');
 
+function cloneDefault(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function atomicWriteFileSync(filePath, content) {
+  const dir = path.dirname(filePath);
+  fs.mkdirSync(dir, { recursive: true });
+
+  const tempPath = path.join(
+    dir,
+    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+  );
+
+  let fd;
+  try {
+    fd = fs.openSync(tempPath, 'wx', 0o600);
+    fs.writeFileSync(fd, content, 'utf8');
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+
+    // rename в пределах одного каталога атомарно заменяет целевой файл:
+    // читатель увидит либо старую, либо полностью записанную новую версию.
+    fs.renameSync(tempPath, filePath);
+
+    // На POSIX дополнительно фиксируем саму запись каталога. На Windows
+    // открытие каталога как файла не поддерживается — это нормально.
+    try {
+      const dirFd = fs.openSync(dir, 'r');
+      fs.fsyncSync(dirFd);
+      fs.closeSync(dirFd);
+    } catch (_) {}
+  } catch (error) {
+    if (fd !== undefined) {
+      try { fs.closeSync(fd); } catch (_) {}
+    }
+    try { fs.unlinkSync(tempPath); } catch (_) {}
+    throw error;
+  }
+}
+
+function atomicWriteJsonSync(filePath, data) {
+  atomicWriteFileSync(filePath, JSON.stringify(data, null, 2));
+}
+
 class StorageService {
-  constructor() {
+  constructor(options = {}) {
+    this.dataDir = path.resolve(options.dataDir || process.env.SYCH_DATA_DIR || DEFAULT_DATA_DIR);
+    this.paths = {
+      db: path.join(this.dataDir, 'db.json'),
+      instructions: path.join(this.dataDir, 'instructions.json'),
+      profiles: path.join(this.dataDir, 'profiles.json'),
+      chatProfiles: path.join(this.dataDir, 'chatProfiles.json'),
+      stats: path.join(this.dataDir, 'stats.json'),
+      backups: path.join(this.dataDir, 'backups'),
+    };
+    this.backupRetention = Math.max(1, Number(options.backupRetention) || 14);
+    this.clock = options.clock || (() => new Date());
+    this.backupTimer = null;
+    this.backupInProgress = false;
+    this.forgottenUntil = new Map();
+    this.chatProfilesBlockedUntil = new Map();
+
     // Создаем отложенные функции сохранения (ждут 5 секунд тишины перед записью)
     this.saveDebounced = debounce(this._saveToFile.bind(this), 5000);
     this.saveProfilesDebounced = debounce(this._saveProfilesToFile.bind(this), 5000);
@@ -23,11 +80,11 @@ class StorageService {
     this.profileUpdateQueue = Promise.resolve();
 
     // 1. Создаем структуру файлов, если их нет
-    this.ensureFile(DB_PATH, '{"chats": {}}');
-    this.ensureFile(INSTRUCTIONS_PATH, '{}');
-    this.ensureFile(PROFILES_PATH, '{}');
-    this.ensureFile(CHAT_PROFILES_PATH, '{}');
-    this.ensureFile(STATS_PATH, JSON.stringify(this._getDefaultStats()));
+    this.ensureFile(this.paths.db, '{"chats": {}}');
+    this.ensureFile(this.paths.instructions, '{}');
+    this.ensureFile(this.paths.profiles, '{}');
+    this.ensureFile(this.paths.chatProfiles, '{}');
+    this.ensureFile(this.paths.stats, JSON.stringify(this._getDefaultStats()));
 
     // 2. Загружаем данные в память
     this.load();
@@ -58,36 +115,75 @@ class StorageService {
 
   ensureFile(filePath, defaultContent) {
     if (!fs.existsSync(path.dirname(filePath))) fs.mkdirSync(path.dirname(filePath), { recursive: true });
-    if (!fs.existsSync(filePath)) fs.writeFileSync(filePath, defaultContent);
+    if (!fs.existsSync(filePath)) {
+      const recovered = this._recoverFromLatestBackup(path.basename(filePath));
+      if (recovered !== null) {
+        atomicWriteJsonSync(filePath, recovered);
+        console.warn(`[STORAGE] ${path.basename(filePath)} отсутствовал и восстановлен из резервной копии.`);
+      } else {
+        atomicWriteFileSync(filePath, defaultContent);
+      }
+    }
   }
 
+  _readJson(filePath, fallbackValue, label) {
+    try {
+      return JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    } catch (error) {
+      const recovered = this._recoverFromLatestBackup(path.basename(filePath));
+      if (recovered !== null) {
+        console.warn(`[STORAGE] ${label} повреждён, восстановлен из последней резервной копии.`);
+        atomicWriteJsonSync(filePath, recovered);
+        return recovered;
+      }
+
+      console.error(`[STORAGE] Не удалось прочитать ${label}, использую пустую структуру: ${error.message}`);
+      const fallback = cloneDefault(fallbackValue);
+      if (fs.existsSync(filePath)) {
+        const quarantinePath = `${filePath}.corrupt-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+        try {
+          fs.renameSync(filePath, quarantinePath);
+          console.error(`[STORAGE] Повреждённый файл сохранён для ручного разбора: ${path.basename(quarantinePath)}`);
+        } catch (quarantineError) {
+          console.error(`[STORAGE] Не удалось изолировать повреждённый файл: ${quarantineError.message}`);
+        }
+      }
+      atomicWriteJsonSync(filePath, fallback);
+      return fallback;
+    }
+  }
+
+  _recoverFromLatestBackup(fileName) {
+    if (!fs.existsSync(this.paths.backups)) return null;
+
+    const snapshots = fs.readdirSync(this.paths.backups, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && !entry.name.includes('.tmp-'))
+      .map(entry => entry.name)
+      .sort()
+      .reverse();
+
+    for (const snapshot of snapshots) {
+      const candidate = path.join(this.paths.backups, snapshot, fileName);
+      if (!fs.existsSync(candidate)) continue;
+      try {
+        return JSON.parse(fs.readFileSync(candidate, 'utf-8'));
+      } catch (_) {}
+    }
+    return null;
+  }
 
   load() {
-    try {
-      this.data = JSON.parse(fs.readFileSync(DB_PATH, 'utf-8'));
-      // Если базы напоминаний нет — создаем пустую
-      if (!this.data.bannedUsers) this.data.bannedUsers = {}; // { userId: "reason/name" }
-    } catch (e) { 
-      console.error("Ошибка чтения DB, сброс."); 
-      this.data = { chats: {}, reminders: [] };
-    }
-    // Грузим профили
-    try {
-      this.profiles = JSON.parse(fs.readFileSync(PROFILES_PATH, 'utf-8'));
-    } catch (e) {
-      console.error("Ошибка чтения Profiles, сброс.");
-      this.profiles = {};
-    }
-    // Грузим профили чатов
-    try {
-      this.chatProfiles = JSON.parse(fs.readFileSync(CHAT_PROFILES_PATH, 'utf-8'));
-    } catch (e) {
-      console.error("Ошибка чтения ChatProfiles, сброс.");
-      this.chatProfiles = {};
-    }
+    this.data = this._readJson(this.paths.db, { chats: {}, reminders: [] }, 'db.json');
+    if (!this.data.chats) this.data.chats = {};
+    if (!this.data.reminders) this.data.reminders = [];
+    if (!this.data.bannedUsers) this.data.bannedUsers = {}; // { userId: "reason/name" }
+
+    this.profiles = this._readJson(this.paths.profiles, {}, 'profiles.json');
+    this.chatProfiles = this._readJson(this.paths.chatProfiles, {}, 'chatProfiles.json');
+
     // Грузим статистику
     try {
-      const loaded = JSON.parse(fs.readFileSync(STATS_PATH, 'utf-8'));
+      const loaded = this._readJson(this.paths.stats, this._getDefaultStats(), 'stats.json');
       // Миграция со старого формата (если есть lastResetDate вместо today)
       if (loaded.lastResetDate !== undefined && !loaded.today) {
         console.log("[STATS] Миграция со старого формата...");
@@ -156,25 +252,25 @@ class StorageService {
   // Реальная физическая запись (синхронная, но редкая)
   _saveToFile() {
     try {
-      fs.writeFileSync(DB_PATH, JSON.stringify(this.data, null, 2));
+      atomicWriteJsonSync(this.paths.db, this.data);
     } catch (e) { console.error("Ошибка записи DB:", e); }
   }
 
   _saveProfilesToFile() {
     try {
-      fs.writeFileSync(PROFILES_PATH, JSON.stringify(this.profiles, null, 2));
+      atomicWriteJsonSync(this.paths.profiles, this.profiles);
     } catch (e) { console.error("Ошибка записи Profiles:", e); }
   }
 
   _saveChatProfilesToFile() {
     try {
-      fs.writeFileSync(CHAT_PROFILES_PATH, JSON.stringify(this.chatProfiles, null, 2));
+      atomicWriteJsonSync(this.paths.chatProfiles, this.chatProfiles);
     } catch (e) { console.error("Ошибка записи ChatProfiles:", e); }
   }
 
   _saveStatsToFile() {
     try {
-      fs.writeFileSync(STATS_PATH, JSON.stringify(this.stats, null, 2));
+      atomicWriteJsonSync(this.paths.stats, this.stats);
     } catch (e) { console.error("Ошибка записи Stats:", e); }
   }
 
@@ -192,6 +288,93 @@ class StorageService {
     this.saveProfilesDebounced.flush();
     this.saveChatProfilesDebounced.flush();
     this.saveStatsDebounced.flush();
+  }
+
+  backupNow({ flush = true } = {}) {
+    if (this.backupInProgress) return null;
+    this.backupInProgress = true;
+    let tempDir = null;
+
+    try {
+      if (flush) this.forceSave();
+      fs.mkdirSync(this.paths.backups, { recursive: true });
+
+      const stamp = this.clock().toISOString().replace(/[:.]/g, '-');
+      let snapshotName = stamp;
+      let suffix = 1;
+      while (fs.existsSync(path.join(this.paths.backups, snapshotName))) {
+        snapshotName = `${stamp}-${suffix++}`;
+      }
+
+      const finalDir = path.join(this.paths.backups, snapshotName);
+      tempDir = `${finalDir}.tmp-${process.pid}-${Math.random().toString(16).slice(2)}`;
+      fs.mkdirSync(tempDir, { recursive: true });
+
+      const sourceFiles = [
+        this.paths.db,
+        this.paths.instructions,
+        this.paths.profiles,
+        this.paths.chatProfiles,
+        this.paths.stats,
+      ];
+
+      for (const source of sourceFiles) {
+        if (fs.existsSync(source)) {
+          fs.copyFileSync(source, path.join(tempDir, path.basename(source)));
+        }
+      }
+
+      fs.writeFileSync(
+        path.join(tempDir, 'manifest.json'),
+        JSON.stringify({
+          createdAt: this.clock().toISOString(),
+          files: sourceFiles.map(source => path.basename(source)),
+        }, null, 2)
+      );
+      fs.renameSync(tempDir, finalDir);
+      tempDir = null;
+      this._pruneBackups();
+      console.log(`[BACKUP] Снимок данных создан: ${snapshotName}`);
+      return finalDir;
+    } catch (error) {
+      console.error(`[BACKUP ERROR] ${error.message}`);
+      return null;
+    } finally {
+      if (tempDir && fs.existsSync(tempDir)) {
+        try { fs.rmSync(tempDir, { recursive: true, force: true }); } catch (_) {}
+      }
+      this.backupInProgress = false;
+    }
+  }
+
+  _pruneBackups() {
+    if (!fs.existsSync(this.paths.backups)) return;
+    const snapshots = fs.readdirSync(this.paths.backups, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && !entry.name.includes('.tmp-'))
+      .map(entry => entry.name)
+      .sort()
+      .reverse();
+
+    for (const oldSnapshot of snapshots.slice(this.backupRetention)) {
+      fs.rmSync(path.join(this.paths.backups, oldSnapshot), { recursive: true, force: true });
+    }
+  }
+
+  startAutomaticBackups(intervalMs = 24 * 60 * 60 * 1000) {
+    if (this.backupTimer) return this.backupTimer;
+    const safeInterval = Math.max(60 * 1000, Number(intervalMs) || 24 * 60 * 60 * 1000);
+
+    // Первый снимок делается при старте, затем — по расписанию.
+    this.backupNow();
+    this.backupTimer = setInterval(() => this.backupNow(), safeInterval);
+    if (typeof this.backupTimer.unref === 'function') this.backupTimer.unref();
+    return this.backupTimer;
+  }
+
+  stopAutomaticBackups() {
+    if (!this.backupTimer) return;
+    clearInterval(this.backupTimer);
+    this.backupTimer = null;
   }
 
   // === СТАТИСТИКА ===
@@ -405,9 +588,9 @@ class StorageService {
   getUserInstruction(username) {
     if (!username) return "";
     try {
-        if (fs.existsSync(INSTRUCTIONS_PATH)) {
+        if (fs.existsSync(this.paths.instructions)) {
             // Читаем каждый раз заново для Hot Reload
-            const instructions = JSON.parse(fs.readFileSync(INSTRUCTIONS_PATH, 'utf-8'));
+            const instructions = this._readJson(this.paths.instructions, {}, 'instructions.json');
             return instructions[username.toLowerCase()] || "";
         }
     } catch (e) { console.error("Ошибка инструкций:", e); }
@@ -459,6 +642,12 @@ class StorageService {
     if (!this.profiles[chatId]) this.profiles[chatId] = {};
 
     for (const [userId, data] of Object.entries(updatesMap)) {
+        const forgottenUntil = this.forgottenUntil.get(String(userId)) || 0;
+        if (forgottenUntil > Date.now()) {
+          console.log(`[PRIVACY] Пропущено устаревшее обновление профиля ${userId} после удаления памяти.`);
+          continue;
+        }
+
         const current = this.profiles[chatId][userId] || { realName: null, facts: "", attitude: "Нейтральное", relationship: 50 };
 
         if (data.realName && data.realName !== "Неизвестно") current.realName = data.realName;
@@ -496,6 +685,234 @@ class StorageService {
     this.saveProfiles();
   }
 
+  async forgetUser(userId, username = '') {
+    const targetId = String(userId);
+    const normalizedUsername = String(username || '').replace(/^@/, '').toLowerCase();
+    const affectedChatIds = new Set();
+    const usernamesToRemove = new Set(normalizedUsername ? [normalizedUsername] : []);
+
+    for (const [chatId, chatProfiles] of Object.entries(this.profiles)) {
+      if (chatProfiles && Object.prototype.hasOwnProperty.call(chatProfiles, targetId)) {
+        affectedChatIds.add(String(chatId));
+      }
+    }
+    for (const [chatId, chat] of Object.entries(this.data.chats || {})) {
+      if (!chat?.users || !Object.prototype.hasOwnProperty.call(chat.users, targetId)) continue;
+      affectedChatIds.add(String(chatId));
+      const trackedName = String(chat.users[targetId] || '');
+      if (trackedName.startsWith('@')) usernamesToRemove.add(trackedName.slice(1).toLowerCase());
+    }
+
+    // Старые фоновые анализаторы могут закончить работу уже после команды удаления.
+    // На пять минут блокируем их запоздалые результаты; новые сообщения затем снова
+    // смогут сформировать профиль с чистого листа.
+    this.forgottenUntil.set(targetId, Date.now() + 5 * 60 * 1000);
+    for (const chatId of affectedChatIds) {
+      this.chatProfilesBlockedUntil.set(chatId, Date.now() + 5 * 60 * 1000);
+    }
+
+    this.profileUpdateQueue = this.profileUpdateQueue.then(() => {
+      let profilesRemoved = 0;
+      let chatReferencesRemoved = 0;
+      let remindersRemoved = 0;
+      let instructionsRemoved = 0;
+      let chatProfilesReset = 0;
+      let backupsScrubbed = 0;
+
+      for (const [chatId, chatProfiles] of Object.entries(this.profiles)) {
+        if (!chatProfiles || typeof chatProfiles !== 'object') continue;
+        if (String(chatId) === targetId) {
+          delete this.profiles[chatId];
+          profilesRemoved++;
+          affectedChatIds.add(String(chatId));
+          this.chatProfilesBlockedUntil.set(String(chatId), Date.now() + 5 * 60 * 1000);
+          continue;
+        }
+        if (Object.prototype.hasOwnProperty.call(chatProfiles, targetId)) {
+          delete chatProfiles[targetId];
+          profilesRemoved++;
+          affectedChatIds.add(String(chatId));
+          this.chatProfilesBlockedUntil.set(String(chatId), Date.now() + 5 * 60 * 1000);
+        }
+      }
+
+      for (const [chatId, chat] of Object.entries(this.data.chats || {})) {
+        if (String(chatId) === targetId) {
+          const trackedName = String(chat?.users?.[targetId] || '');
+          if (trackedName.startsWith('@')) usernamesToRemove.add(trackedName.slice(1).toLowerCase());
+          delete this.data.chats[chatId];
+          chatReferencesRemoved++;
+          affectedChatIds.add(String(chatId));
+          this.chatProfilesBlockedUntil.set(String(chatId), Date.now() + 5 * 60 * 1000);
+          continue;
+        }
+        if (!chat?.users) continue;
+        if (Object.prototype.hasOwnProperty.call(chat.users, targetId)) {
+          delete chat.users[targetId];
+          chatReferencesRemoved++;
+          affectedChatIds.add(String(chatId));
+          this.chatProfilesBlockedUntil.set(String(chatId), Date.now() + 5 * 60 * 1000);
+        }
+      }
+
+      const beforeReminders = (this.data.reminders || []).length;
+      this.data.reminders = (this.data.reminders || [])
+        .filter(reminder => String(reminder.userId) !== targetId);
+      remindersRemoved = beforeReminders - this.data.reminders.length;
+
+      if (usernamesToRemove.size > 0 && fs.existsSync(this.paths.instructions)) {
+        const instructions = this._readJson(this.paths.instructions, {}, 'instructions.json');
+        for (const knownUsername of usernamesToRemove) {
+          for (const key of [knownUsername, `@${knownUsername}`]) {
+            if (Object.prototype.hasOwnProperty.call(instructions, key)) {
+              delete instructions[key];
+              instructionsRemoved++;
+            }
+          }
+        }
+        if (instructionsRemoved > 0) {
+          atomicWriteJsonSync(this.paths.instructions, instructions);
+        }
+      }
+
+      // Профиль чата — агрегированный текст и может косвенно содержать сведения
+      // об удаляемом человеке. Точечно вырезать их без повторного AI-анализа нельзя,
+      // поэтому безопаснее сбросить агрегат затронутых чатов: он восстановится по
+      // новым сообщениям уже без старых данных пользователя.
+      for (const chatId of affectedChatIds) {
+        if (Object.prototype.hasOwnProperty.call(this.chatProfiles, chatId)) {
+          delete this.chatProfiles[chatId];
+          chatProfilesReset++;
+        }
+      }
+
+      // Для privacy-команды не ждём debounce: физически фиксируем удаление сразу.
+      this.saveDebounced.cancel();
+      this.saveProfilesDebounced.cancel();
+      this.saveChatProfilesDebounced.cancel();
+      this._saveToFile();
+      this._saveProfilesToFile();
+      this._saveChatProfilesToFile();
+      backupsScrubbed = this._scrubUserFromBackups(targetId, usernamesToRemove);
+
+      return {
+        profilesRemoved,
+        chatReferencesRemoved,
+        remindersRemoved,
+        instructionsRemoved,
+        chatProfilesReset,
+        backupsScrubbed,
+      };
+    });
+
+    return this.profileUpdateQueue;
+  }
+
+  _scrubUserFromBackups(targetId, usernamesToRemove) {
+    if (!fs.existsSync(this.paths.backups)) return 0;
+    let scrubbedSnapshots = 0;
+
+    const snapshots = fs.readdirSync(this.paths.backups, { withFileTypes: true })
+      .filter(entry => entry.isDirectory() && !entry.name.includes('.tmp-'));
+
+    for (const snapshot of snapshots) {
+      const snapshotDir = path.join(this.paths.backups, snapshot.name);
+      const dbPath = path.join(snapshotDir, 'db.json');
+      const profilesPath = path.join(snapshotDir, 'profiles.json');
+      const chatProfilesPath = path.join(snapshotDir, 'chatProfiles.json');
+      const instructionsPath = path.join(snapshotDir, 'instructions.json');
+      const snapshotAffectedChats = new Set();
+      const snapshotUsernames = new Set(usernamesToRemove);
+      let changed = false;
+
+      try {
+        if (fs.existsSync(profilesPath)) {
+          const profiles = JSON.parse(fs.readFileSync(profilesPath, 'utf8'));
+          for (const [chatId, chatProfiles] of Object.entries(profiles)) {
+            if (String(chatId) === targetId) {
+              delete profiles[chatId];
+              snapshotAffectedChats.add(String(chatId));
+              changed = true;
+              continue;
+            }
+            if (chatProfiles && Object.prototype.hasOwnProperty.call(chatProfiles, targetId)) {
+              delete chatProfiles[targetId];
+              snapshotAffectedChats.add(String(chatId));
+              changed = true;
+            }
+          }
+          if (changed) atomicWriteJsonSync(profilesPath, profiles);
+        }
+
+        let dbChanged = false;
+        if (fs.existsSync(dbPath)) {
+          const data = JSON.parse(fs.readFileSync(dbPath, 'utf8'));
+          for (const [chatId, chat] of Object.entries(data.chats || {})) {
+            if (String(chatId) === targetId) {
+              const trackedName = String(chat?.users?.[targetId] || '');
+              if (trackedName.startsWith('@')) snapshotUsernames.add(trackedName.slice(1).toLowerCase());
+              delete data.chats[chatId];
+              snapshotAffectedChats.add(String(chatId));
+              dbChanged = true;
+              continue;
+            }
+            if (!chat?.users || !Object.prototype.hasOwnProperty.call(chat.users, targetId)) continue;
+            const trackedName = String(chat.users[targetId] || '');
+            if (trackedName.startsWith('@')) snapshotUsernames.add(trackedName.slice(1).toLowerCase());
+            delete chat.users[targetId];
+            snapshotAffectedChats.add(String(chatId));
+            dbChanged = true;
+          }
+          const remindersBefore = (data.reminders || []).length;
+          data.reminders = (data.reminders || [])
+            .filter(reminder => String(reminder.userId) !== targetId);
+          if (data.reminders.length !== remindersBefore) dbChanged = true;
+          if (dbChanged) {
+            atomicWriteJsonSync(dbPath, data);
+            changed = true;
+          }
+        }
+
+        if (fs.existsSync(chatProfilesPath) && snapshotAffectedChats.size > 0) {
+          const chatProfiles = JSON.parse(fs.readFileSync(chatProfilesPath, 'utf8'));
+          let chatProfilesChanged = false;
+          for (const chatId of snapshotAffectedChats) {
+            if (Object.prototype.hasOwnProperty.call(chatProfiles, chatId)) {
+              delete chatProfiles[chatId];
+              chatProfilesChanged = true;
+            }
+          }
+          if (chatProfilesChanged) {
+            atomicWriteJsonSync(chatProfilesPath, chatProfiles);
+            changed = true;
+          }
+        }
+
+        if (fs.existsSync(instructionsPath) && snapshotUsernames.size > 0) {
+          const instructions = JSON.parse(fs.readFileSync(instructionsPath, 'utf8'));
+          let instructionsChanged = false;
+          for (const knownUsername of snapshotUsernames) {
+            for (const key of [knownUsername, `@${knownUsername}`]) {
+              if (Object.prototype.hasOwnProperty.call(instructions, key)) {
+                delete instructions[key];
+                instructionsChanged = true;
+              }
+            }
+          }
+          if (instructionsChanged) {
+            atomicWriteJsonSync(instructionsPath, instructions);
+            changed = true;
+          }
+        }
+
+        if (changed) scrubbedSnapshots++;
+      } catch (error) {
+        console.error(`[PRIVACY] Не удалось очистить backup ${snapshot.name}: ${error.message}`);
+      }
+    }
+    return scrubbedSnapshots;
+  }
+
   // Поиск профиля по TGID, username или realName внутри конкретного чата.
   findProfileByQuery(chatId, query) {
     const chat = this.getChat(chatId);
@@ -521,17 +938,20 @@ class StorageService {
         };
     }
     
-    // 2. Ищем по сохранённому username/имени из db.json.
+    // 2. Ищем по точному сохранённому username/имени из db.json.
+    // Частичное совпадение здесь опасно: обычная тема после «расскажи про»
+    // не должна случайно превращаться в запрос чужого профиля.
     for (const [uid, usernameRaw] of Object.entries(chat.users)) {
-        if (String(usernameRaw).toLowerCase().includes(q)) {
+        const normalizedUsername = String(usernameRaw).trim().toLowerCase().replace(/^@/, '');
+        if (normalizedUsername === q) {
             const p = this.getProfile(chatId, uid);
             return { ...p, userId: uid, username: usernameRaw };
         }
     }
 
-    // 3. Если по нику не нашли, ищем внутри профилей по realName.
+    // 3. Если по нику не нашли, ищем по точному realName.
     for (const [uid, profile] of Object.entries(profiles)) {
-        if (profile.realName && profile.realName.toLowerCase().includes(q)) {
+        if (profile.realName && profile.realName.trim().toLowerCase() === q) {
             const usernameRaw = chat.users[uid] || "Unknown";
             return { ...profile, userId: uid, username: usernameRaw };
         }
@@ -594,6 +1014,12 @@ class StorageService {
 
   // Обновить профиль чата (после AI-анализа)
   updateChatProfile(chatId, updates) {
+    const blockedUntil = this.chatProfilesBlockedUntil.get(String(chatId)) || 0;
+    if (blockedUntil > Date.now()) {
+      console.log(`[PRIVACY] Пропущено устаревшее обновление профиля чата ${chatId} после удаления памяти.`);
+      return;
+    }
+
     if (!this.chatProfiles[chatId]) {
       this.chatProfiles[chatId] = { topic: null, facts: null, style: null, lastUpdated: null };
     }
@@ -638,4 +1064,9 @@ class StorageService {
   }
 }
 
-module.exports = new StorageService();
+const storage = new StorageService();
+
+module.exports = storage;
+module.exports.StorageService = StorageService;
+module.exports.atomicWriteFileSync = atomicWriteFileSync;
+module.exports.atomicWriteJsonSync = atomicWriteJsonSync;

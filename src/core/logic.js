@@ -4,6 +4,13 @@ const config = require('../config');
 const axios = require('axios');
 const { exec } = require('child_process');
 const { sendRich, escapeHtml, normalizeMd } = require('../utils/rich');
+const { isForgetMeRequest } = require('../utils/privacy');
+const { shouldHandleProfileQuery } = require('../utils/profile-query');
+const {
+  buildOfficePromptContext,
+  extractOfficeText,
+  isOfficeDocument,
+} = require('../services/documents');
 const chatHistory = {};
 const analysisBuffers = {};
 const chatAnalysisBuffers = {}; // Буфер для анализа профиля чата
@@ -66,14 +73,43 @@ function getSychErrorReply(errText) {
     return phrases[Math.floor(Math.random() * phrases.length)];
 }
 
-function addToHistory(chatId, sender, text) {
+function addToHistory(chatId, sender, text, userId = null, relatedUserId = null) {
   if (!chatHistory[chatId]) chatHistory[chatId] = [];
-  const entry = { role: sender, text: text };
+  const entry = {
+    role: sender,
+    text: text,
+    userId: userId === null ? null : String(userId),
+    relatedUserId: relatedUserId === null ? null : String(relatedUserId),
+  };
   chatHistory[chatId].push(entry);
   if (chatHistory[chatId].length > config.contextSize) {
     chatHistory[chatId].shift();
   }
   return entry; // возвращаем запись, чтобы её можно было дообогатить (напр. описанием картинки)
+}
+
+function forgetUserFromRuntime(userId) {
+  const targetId = String(userId);
+
+  for (const chatId of Object.keys(chatHistory)) {
+    chatHistory[chatId] = chatHistory[chatId].filter(entry =>
+      String(entry.userId) !== targetId && String(entry.relatedUserId) !== targetId
+    );
+  }
+
+  for (const chatId of Object.keys(analysisBuffers)) {
+    analysisBuffers[chatId] = analysisBuffers[chatId]
+      .filter(entry => String(entry.userId) !== targetId);
+  }
+
+  for (const chatId of Object.keys(chatAnalysisBuffers)) {
+    chatAnalysisBuffers[chatId] = chatAnalysisBuffers[chatId]
+      .filter(entry => String(entry.userId) !== targetId);
+  }
+
+  for (let i = recentActiveUsers.length - 1; i >= 0; i--) {
+    if (String(recentActiveUsers[i].id) === targetId) recentActiveUsers.splice(i, 1);
+  }
 }
 
 function replyOpts(msg, threadId) {
@@ -368,6 +404,29 @@ async function processMessage(bot, msg) {
     storage.trackUser(chatId, msg.from);
   }
 
+  const forgetMeRequested = command === '/forget_me'
+    || isForgetMeRequest(text, config.triggerRegex);
+
+  if (forgetMeRequested) {
+      const result = await storage.forgetUser(userId, msg.from.username || '');
+      forgetUserFromRuntime(userId);
+      stopTyping();
+
+      const removed = result.profilesRemoved
+        + result.chatReferencesRemoved
+        + result.remindersRemoved
+        + result.instructionsRemoved
+        + result.chatProfilesReset
+        + result.backupsScrubbed;
+      const detail = removed > 0
+        ? `Удалил профиль, упоминания, инструкции, связанные напоминания и данные из резервных снимков.`
+        : `Постоянных данных о тебе и так не было.`;
+
+      return sendRich(bot, chatId, {
+        markdown: `🦉 Готово. ${detail} Текущий контекст разговора тоже очищен — начинаем с чистого листа.`
+      }, replyOpts(msg, threadId));
+  }
+
   // === НАБЛЮДАТЕЛЬ ===
   if (!analysisBuffers[chatId]) analysisBuffers[chatId] = [];
   
@@ -382,7 +441,7 @@ async function processMessage(bot, msg) {
 
       // Пишем в буфер для анализа профиля чата
       if (!chatAnalysisBuffers[chatId]) chatAnalysisBuffers[chatId] = [];
-      chatAnalysisBuffers[chatId].push({ name: displayName, text });
+      chatAnalysisBuffers[chatId].push({ userId, name: displayName, text });
   }
   if (analysisBuffers[chatId].length >= BUFFER_SIZE) {
       processBuffer(chatId);
@@ -459,7 +518,8 @@ async function processMessage(bot, msg) {
 <ul>
 <li>Кидай <b>войс</b> — расшифрую и сделаю краткую суть</li>
 <li>Кидай <b>фото/видео</b> — пойму, что там, прокомментирую и запомню для вопросов потом</li>
-<li>Кидай <b>PDF/TXT/код</b> — прочитаю и отвечу на вопросы</li>
+<li>Кидай <b>PDF, DOCX, PPTX, XLSX, TXT или код</b> — прочитаю и отвечу на вопросы</li>
+<li>«Сыч, перескажи [YouTube-ссылка]» — возьму субтитры и разберу ролик</li>
 <li>Кидай ссылку на картинку — скачаю и посмотрю</li>
 <li>Гуглю актуальное: курсы, новости, погода</li>
 <li>«Сыч напомни завтра в 10» — поставлю напоминание (можно реплаем)</li>
@@ -475,6 +535,7 @@ async function processMessage(bot, msg) {
 <ul>
 <li>«Сыч кто я?» — моё честное мнение о тебе</li>
 <li>«Сыч расскажи про @юзера» или «Сыч расскажи про TGID» — досье на участника</li>
+<li>«Сыч, забудь меня» — удалить моё досье, историю и напоминания</li>
 <li>«Сыч стата» — статистика токенов</li>
 <li>«Сыч, этот чат про [тема]» — задать тему чата</li>
 </ul>
@@ -520,7 +581,7 @@ async function processMessage(bot, msg) {
     startTyping(); 
   }
 
-  const currentMsgEntry = addToHistory(chatId, senderName, text);
+  const currentMsgEntry = addToHistory(chatId, senderName, text, userId);
 
   // === СТАТИСТИКА ===
   if (cleanText === 'сыч стата' || cleanText === 'сыч статистика') {
@@ -595,10 +656,12 @@ async function processMessage(bot, msg) {
             stopTyping();
             try { return await sendRich(bot, chatId, { markdown: normalizeMd(description) }, replyOpts(msg, threadId)); } catch(e){}
         }
-        stopTyping();
-        return sendRich(bot, chatId, {
-            markdown: `Не нашёл такого участника в памяти этого чата. Укажи @username или точный TGID.`
-        }, replyOpts(msg, threadId));
+        if (shouldHandleProfileQuery(targetName, targetProfile)) {
+            stopTyping();
+            return sendRich(bot, chatId, {
+                markdown: `Не нашёл такого участника в памяти этого чата. Укажи @username или точный TGID.`
+            }, replyOpts(msg, threadId));
+        }
     }
       
       if (cleanText.match(/(монетк|кинь|брось|подбрось|подкинь)/)) {
@@ -652,6 +715,7 @@ async function processMessage(bot, msg) {
 
     let imageBuffer = null;
     let mimeType = "image/jpeg"; // По умолчанию для фото
+    let externalContext = "";
 
     // === ОБРАБОТКА МЕДИА (ФОТО, ВИДЕО, ДОКИ, СТИКЕРЫ) ===
     
@@ -702,6 +766,8 @@ async function processMessage(bot, msg) {
     // 4. ДОКУМЕНТЫ (PDF, TXT, CSV...)
     else if (msg.document || (msg.reply_to_message && msg.reply_to_message.document)) {
         const doc = msg.document || msg.reply_to_message.document;
+        const documentMime = String(doc.mime_type || 'application/octet-stream').toLowerCase();
+        const documentName = doc.file_name || 'document';
         
         // Список того, что Gemini точно ест
         const allowedMimes = [
@@ -714,19 +780,42 @@ async function processMessage(bot, msg) {
             return sendRich(bot, chatId, { markdown: "🐘 Не, файл тяжелый (больше 20мб). Я пас." }, replyOpts(msg, threadId));
         }
 
-        if (!allowedMimes.includes(doc.mime_type) && !doc.mime_type.startsWith('image/')) {
-             // Если формат странный, но юзер прямо просит - можно попробовать рискнуть, но лучше предупредить
-             return sendRich(bot, chatId, { markdown: "🗿 Эт че за формат? Я такое не читаю. Давай PDF или текст." }, replyOpts(msg, threadId));
+        const officeDocument = isOfficeDocument(documentName, documentMime);
+        if (!allowedMimes.includes(documentMime) && !documentMime.startsWith('image/') && !officeDocument) {
+             return sendRich(bot, chatId, {
+                 markdown: "🗿 Этот формат пока не читаю. Давай PDF, DOCX, PPTX, XLSX или обычный текст."
+             }, replyOpts(msg, threadId));
         }
 
         try {
             await bot.sendChatAction(chatId, 'upload_document', getActionOptions(threadId));
             const link = await bot.getFileLink(doc.file_id);
             const resp = await axios.get(link, { responseType: 'arraybuffer' });
-            imageBuffer = Buffer.from(resp.data);
-            mimeType = doc.mime_type;
-            console.log(`[MEDIA] Док скачан (${mimeType})`);
-        } catch(e) { console.error("Ошибка дока:", e.message); }
+            const documentBuffer = Buffer.from(resp.data);
+
+            if (officeDocument) {
+                const extracted = extractOfficeText(documentBuffer, {
+                    fileName: documentName,
+                    mimeType: documentMime,
+                    maxChars: config.officeTextMaxChars,
+                    maxExpandedBytes: config.officeExpandedMaxBytes,
+                });
+                externalContext = buildOfficePromptContext(extracted, documentName);
+                console.log(`[DOCUMENT] ${documentName}: ${extracted.kind}, ${extracted.text.length} симв.${extracted.truncated ? ' (сокращено)' : ''}`);
+            } else {
+                // PDF, изображения и текстовые документы оставляем Gemini:
+                // модель видит их исходную структуру и визуальный контекст.
+                imageBuffer = documentBuffer;
+                mimeType = documentMime;
+                console.log(`[MEDIA] Док скачан (${mimeType})`);
+            }
+        } catch(e) {
+            stopTyping();
+            console.error("Ошибка дока:", e.message);
+            return sendRich(bot, chatId, {
+                markdown: `Не смог разобрать файл: ${e.message}`
+            }, replyOpts(msg, threadId));
+        }
     }
 
     // 5. ССЫЛКА (если ничего другого нет)
@@ -796,7 +885,8 @@ async function processMessage(bot, msg) {
         instruction,
         userProfile,
         !isDirectlyCalled,
-        chatProfile // <--- Передаём профиль чата
+        chatProfile, // <--- Передаём профиль чата
+        externalContext
     );
 
     console.log(`[DEBUG] 2. Ответ от AI получен! Длина: ${aiResponse ? aiResponse.length : "PUSTO"}`);
@@ -839,7 +929,7 @@ async function processMessage(bot, msg) {
         await sendRich(bot, chatId, { markdown: normalizeMd(formattedResponse) }, replyOpts(msg, threadId));
 
         stopTyping(); // <-- Всё, сообщение ушло, выключаем статус
-        addToHistory(chatId, "Сыч", aiResponse);
+        addToHistory(chatId, "Сыч", aiResponse, config.botId, userId);
 
     } catch (error) {
         stopTyping(); // <-- Если ошибка, ОБЯЗАТЕЛЬНО выключаем
@@ -866,7 +956,7 @@ async function processMessage(bot, msg) {
                     },
                 });
              }
-             addToHistory(chatId, "Сыч", aiResponse);
+             addToHistory(chatId, "Сыч", aiResponse, config.botId, userId);
         } catch (e2) { console.error("FATAL SEND ERROR (Даже аварийная не ушла):", e2.message); }
     }
 

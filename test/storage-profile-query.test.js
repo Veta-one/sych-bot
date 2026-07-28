@@ -72,6 +72,8 @@ test('findProfileByQuery resolves username, real name and exact TGID within one 
     assert.equal(storage.findProfileByQuery('-1001', '30464851'), null);
     assert.equal(storage.findProfileByQuery('-1001', '999999'), null);
     assert.equal(storage.findProfileByQuery('-1001', '123456789'), null);
+    assert.equal(storage.findProfileByQuery('-1001', 'veta'), null);
+    assert.equal(storage.findProfileByQuery('-1001', 'витал'), null);
   } finally {
     storage.data = originalData;
     storage.profiles = originalProfiles;

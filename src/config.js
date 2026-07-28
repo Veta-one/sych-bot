@@ -1,6 +1,11 @@
 const packageInfo = require('../package.json');
 require('dotenv').config();
 
+function positiveNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+}
+
 // Собираем ключи для Native Google (Fallback или Search)
 const geminiKeys = [];
 if (process.env.GOOGLE_GEMINI_API_KEY) geminiKeys.push(process.env.GOOGLE_GEMINI_API_KEY);
@@ -61,6 +66,15 @@ module.exports = {
   // истории чата и едет в контексте, пока картинка в окне, — поэтому потолок конечный.
   // ~1500 ≈ хороший абзац-полтора. Под скрины с большими таблицами текста можно поднять.
   imageDescMaxChars: 1500,
+
+  // === НАДЁЖНОСТЬ ХРАНИЛИЩА ===
+  backupIntervalMs: positiveNumber(process.env.BACKUP_INTERVAL_HOURS, 24) * 60 * 60 * 1000,
+  backupRetention: Math.floor(positiveNumber(process.env.BACKUP_RETENTION, 14)),
+
+  // === ВНЕШНИЙ КОНТЕНТ ===
+  youtubeTranscriptMaxChars: Math.floor(positiveNumber(process.env.YOUTUBE_TRANSCRIPT_MAX_CHARS, 100000)),
+  officeTextMaxChars: Math.floor(positiveNumber(process.env.OFFICE_TEXT_MAX_CHARS, 100000)),
+  officeExpandedMaxBytes: Math.floor(positiveNumber(process.env.OFFICE_EXPANDED_MAX_MB, 32) * 1024 * 1024),
 
   triggerRegex: /(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i,
 };

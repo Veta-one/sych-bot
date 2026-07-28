@@ -159,6 +159,9 @@ ai.setBot(bot);
 console.log("Сыч запущен и готов пояснять за жизнь.");
 console.log(`Admin ID: ${config.adminId}`);
 
+storage.backupRetention = config.backupRetention;
+storage.startAutomaticBackups(config.backupIntervalMs);
+
 bot.getMe().then((me) => {
   console.log(`[BOT] @${me.username || 'unknown'} business=${Boolean(me.can_connect_to_business)}`);
 }).catch((err) => {
@@ -280,9 +283,16 @@ bot.on('message', async (msg) => {
   await logic.processMessage(bot, msg);
 });
 
-// Сохраняем базу при выходе
-process.on('SIGINT', () => {
-  console.log("Сохранение данных перед выходом...");
-  storage.forceSave(); 
-  process.exit();
-});
+// Сохраняем базу при штатном завершении (Ctrl+C, PM2/systemd stop).
+let shuttingDown = false;
+function shutdown(signal) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`Получен ${signal}. Сохранение данных перед выходом...`);
+  storage.stopAutomaticBackups();
+  storage.forceSave();
+  process.exit(0);
+}
+
+process.on('SIGINT', () => shutdown('SIGINT'));
+process.on('SIGTERM', () => shutdown('SIGTERM'));

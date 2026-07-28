@@ -1,10 +1,10 @@
 {
   "name": "sych-bot",
-  "version": "1.10.1",
+  "version": "1.11.0",
   "main": "bot.js",
   "scripts": {
     "start": "node src/index.js",
-    "test": "node --test test/storage-profile-query.test.js test/telegram-api-compat.test.js"
+    "test": "node --test test/storage-profile-query.test.js test/profile-query-routing.test.js test/storage-reliability.test.js test/privacy-command.test.js test/youtube.test.js test/documents.test.js test/content-policy.test.js test/telegram-api-compat.test.js"
   },
   "keywords": [],
   "author": "",
@@ -15,9 +15,11 @@
     "@tavily/core": "^0.7.6",
     "axios": "^1.18.1",
     "dotenv": "^16.6.1",
+    "fflate": "^0.8.2",
     "lodash.debounce": "^4.0.8",
     "node-telegram-bot-api": "^1.2.0",
-    "openai": "^6.15.0"
+    "openai": "^6.15.0",
+    "youtube-transcript": "^1.3.1"
   },
   "description": ""
 }
