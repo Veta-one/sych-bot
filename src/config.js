@@ -28,10 +28,10 @@ module.exports = {
   aiBaseUrl: process.env.AI_BASE_URL || "https://openrouter.ai/api/v1",
   aiKey: process.env.OPENROUTER_API_KEY || process.env.AI_API_KEY, 
 
-  // === АКТУАЛЬНЫЕ МОДЕЛИ (ИЮНЬ 2026) ===
+  // === АКТУАЛЬНЫЕ МОДЕЛИ (АВГУСТ 2026) ===
 
   // 1. УМНАЯ (Ответы в чате)
-  mainModel: 'google/gemini-3.5-flash',
+  mainModel: 'google/gemini-3.7-flash',
   
   // 2. ЛОГИКА (Анализ, реакции, проверки)
   // Free версия недоступна, используем эффективную платную
