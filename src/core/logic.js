@@ -6,6 +6,7 @@ const { exec } = require('child_process');
 const { sendRich, escapeHtml, normalizeMd } = require('../utils/rich');
 const { isForgetMeRequest } = require('../utils/privacy');
 const { shouldHandleProfileQuery } = require('../utils/profile-query');
+const { resolveAddressedCommand } = require('../utils/commands');
 const {
   buildOfficePromptContext,
   extractOfficeText,
@@ -189,6 +190,22 @@ async function processMessage(bot, msg) {
     const userId = msg.from?.id;
     if (!userId) return;
 
+    let text = msg.text || msg.caption || "";
+    let addressedCommand = null;
+    if (text.trimStart().startsWith('/')) {
+        try {
+            addressedCommand = await resolveAddressedCommand(bot, text);
+        } catch (error) {
+            console.error(`[COMMAND] Не удалось определить адресата команды: ${error.message}`);
+            return;
+        }
+        // Ignore unaddressed/foreign commands before media, memory, or AI work,
+        // even when they contain a trigger word or reply to this bot.
+        if (!addressedCommand) return;
+    }
+    const command = addressedCommand?.name || '';
+    const commandSuffix = addressedCommand ? `@${addressedCommand.username}` : '';
+
     const isBusinessMessage = Boolean(msg.business_connection_id);
 
     // === ⛔ ГЛОБАЛЬНЫЙ БАН ===
@@ -203,8 +220,6 @@ async function processMessage(bot, msg) {
     let threadId = msg.is_topic_message ? msg.message_thread_id : (msg.message_thread_id || (msg.reply_to_message ? msg.reply_to_message.message_thread_id : null));
     if (typeof threadId !== 'number') threadId = null;
     
-    let text = msg.text || msg.caption || "";
-
     const cleanText = text.toLowerCase();
     const replyUserId = msg.reply_to_message?.from?.id;
     const isReplyToBot = replyUserId && String(replyUserId) === String(config.botId);
@@ -250,7 +265,6 @@ async function processMessage(bot, msg) {
         }, 90000);
     };
 
-    const command = text.trim().split(/[\s@]+/)[0].toLowerCase(); 
   
     // Определяем красивое имя чата (Название группы или Имя юзера в личке)
     const chatTitle = msg.chat.title || msg.chat.username || msg.chat.first_name || "Unknown";
@@ -473,7 +487,7 @@ async function processMessage(bot, msg) {
     // 2. РАЗБАН
     if (command === '/unban') {
         const targetId = text.split(' ')[1];
-        if (!targetId) return sendRich(bot, chatId, { html: "⚠️ Введи ID: <code>/unban 123456</code>" }, baseOpts(msg, threadId));
+        if (!targetId) return sendRich(bot, chatId, { html: `⚠️ Введи ID: <code>/unban${commandSuffix} 123456</code>` }, baseOpts(msg, threadId));
         
         storage.unbanUser(targetId);
         return sendRich(bot, chatId, { html: `✅ Юзер <code>${escapeHtml(targetId)}</code> разбанен.` }, baseOpts(msg, threadId));
@@ -492,7 +506,7 @@ async function processMessage(bot, msg) {
                 return `<li><b>${escapeHtml(u.name)}</b> — <code>${u.id}</code><br/>💬 "${escapeHtml(u.text)}..."<br/>📂 ${escapeHtml(String(u.chat))}</li>`;
             }).join('');
 
-            return sendRich(bot, chatId, { html: `<h4>Последние активные</h4><ol>${list}</ol><p>Забанить: <code>/ban ID</code></p>` }, baseOpts(msg, threadId));
+            return sendRich(bot, chatId, { html: `<h4>Последние активные</h4><ol>${list}</ol><p>Забанить: <code>/ban${commandSuffix} ID</code></p>` }, baseOpts(msg, threadId));
         }
 
         // Вариант Б: /ban @username или /ban 123456
@@ -543,10 +557,11 @@ async function processMessage(bot, msg) {
 </details>
 <details><summary>⚙️ Настройки</summary>
 <ul>
-<li><code>/mute</code> — режим тишины</li>
-<li><code>/reset</code> — сброс памяти</li>
-<li><code>/version</code> — версия бота</li>
+<li><code>/mute${commandSuffix}</code> — режим тишины</li>
+<li><code>/reset${commandSuffix}</code> — сброс памяти</li>
+<li><code>/version${commandSuffix}</code> — версия бота</li>
 </ul>
+<p>Команды выполняются только с адресом этого бота после @, в том числе в личке. Команды без адреса и команды другим ботам игнорируются.</p>
 </details>
 <blockquote>ver: ${config.version}</blockquote>`;
     try { return await sendRich(bot, chatId, { html: helpText }, baseOpts(msg, threadId)); } catch (e) {}

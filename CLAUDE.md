@@ -168,6 +168,8 @@ See `.env.example` for full configuration template.
 
 ## Bot Commands (in-chat)
 
+Slash commands require an explicit recipient matching the bot's actual `getMe().username` (cached per bot instance): `/mute@Siitch_bot`, `/start@Siitch_bot`, etc. Bare commands and commands for other bots are ignored before media, memory, or AI processing, including in private/business chats, captions, and replies. Matching is case-insensitive. `src/utils/commands.js` owns recipient validation; `src/core/logic.js` applies it before command handling. Natural-language triggers remain unchanged. All slash commands listed below require the `@bot_username` suffix.
+
 - `/start` - Bot info
 - `/ban [username]` - Ban user (admin only)
 - `/unban [ID]` - Restore user (admin only)
