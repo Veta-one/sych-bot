@@ -65,6 +65,15 @@ test('reply events use the announcement date and support offsets without inventi
   assert.equal(resolveReminderDecision({ ...event, timeQuotes: ['завтра в 20:00'] }, input).kind, 'clarify');
 });
 
+test('a bare reply keeps the actual announcement even if the model puts the bot name in the subject', () => {
+  const contextText = 'В субботу состоится стрим про игры. Начало в 20:00 МСК.';
+  for (const reminderText of ['Сыч', 'Стрим', '']) {
+    const result = resolveReminderDecision({ ...plan, reminderText }, { userText: 'Сыч напомни завтра в 12', contextText, now });
+    assert.equal(result.kind, 'schedule');
+    assert.equal(result.reminderText, contextText);
+  }
+});
+
 test('follow-up can supply only the missing clock while retaining the original date', () => {
   const decision = resolveReminderDecision({ ...plan, timeQuotes: ['завтра', 'в 12'] }, {
     userText: 'Сыч напомни завтра про молоко\nУточнение пользователя: в 12', now,

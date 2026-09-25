@@ -100,7 +100,8 @@ function resolveReminderDecision(parsed, { userText, contextText = '', contextDa
   if (parsed.intent === 'answer_now') return { kind: 'answer' };
   if (parsed.intent === 'cancel') return { kind: 'cancel' };
   if (parsed.intent === 'clarify') return clarification(parsed.missing);
-  if (typeof parsed.reminderText !== 'string' || !parsed.reminderText.trim()) return clarification('subject');
+  let reminderText = typeof parsed.reminderText === 'string' ? parsed.reminderText.trim() : '';
+  if (!reminderText && !contextText.trim()) return clarification('subject');
   if (/кажд|ежеднев|еженедел/i.test(userText)) return clarification('recurring');
   const source = parsed.timeSource === 'request' ? userText : parsed.timeSource === 'context' ? contextText : '';
   const quotes = parsed.timeQuotes;
@@ -110,12 +111,16 @@ function resolveReminderDecision(parsed, { userText, contextText = '', contextDa
   if (/сегодня|завтра/i.test(source) && !/сегодня|завтра/i.test(expression)) return clarification('date');
   if (/мск|msk|москв/i.test(source) && !/мск|msk|москв/i.test(expression)) return clarification();
   if (/(?:utc|gmt)\s*[+-]/i.test(source) && !/(?:utc|gmt)\s*[+-]/i.test(expression)) return clarification();
-  // A model must not turn the bot's name into the subject of an empty request.
-  if (!contextText.trim()) {
-    let subject = userText.toLowerCase();
-    for (const quote of quotes) subject = subject.replace(quote.toLowerCase(), '');
-    subject = subject.replace(/(?:^|[^а-яёa-z])(?:сыч|sych|напомни|напоминай|мне|пожалуйста)(?=$|[^а-яёa-z])/gi, ' ').replace(/[^а-яёa-z0-9]/gi, '');
-    if (!subject || /^(сыч|sych|напоминание)$/i.test(parsed.reminderText.trim())) return clarification('subject');
+  // For a bare reply request, retain the actual announcement, including its
+  // details, instead of trusting a model to invent or shorten the subject.
+  let subject = userText.toLowerCase();
+  if (parsed.timeSource === 'request') for (const quote of quotes) subject = subject.replace(quote.toLowerCase(), '');
+  if (typeof parsed.offsetQuote === 'string' && parsed.offsetQuote) subject = subject.replace(parsed.offsetQuote.toLowerCase(), '');
+  subject = subject.replace(/уточнение пользователя:/g, '').replace(/об этом|про это|о н[её]м|о ней/g, '')
+    .replace(/(?:^|[^а-яёa-z])(?:сыч|sych|напомни|напоминай|мне|пожалуйста)(?=$|[^а-яёa-z])/gi, ' ').replace(/[^а-яёa-z0-9]/gi, '');
+  if (!subject || !reminderText || /^(сыч|sych|напоминание)$/i.test(reminderText)) {
+    if (!contextText.trim()) return clarification('subject');
+    reminderText = contextText.trim();
   }
   // A bare reply to a post with several clock times needs disambiguation.
   if (parsed.timeSource === 'context' && (contextText.match(/\b\d{1,2}:\d{2}\b/g) || []).length > 1) return clarification('ambiguous');
@@ -129,7 +134,7 @@ function resolveReminderDecision(parsed, { userText, contextText = '', contextDa
     timestamp -= offset;
   }
   if (timestamp <= now) return clarification('past');
-  return { kind: 'schedule', targetTime: new Date(timestamp).toISOString(), reminderText: parsed.reminderText.trim() };
+  return { kind: 'schedule', targetTime: new Date(timestamp).toISOString(), reminderText };
 }
 
 function reminderConfirmation(reminder) {

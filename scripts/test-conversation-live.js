@@ -11,7 +11,7 @@ process.env.SYCH_DATA_DIR = path.join(runDir, 'data');
 const config = require('../src/config');
 const storage = require('../src/services/storage');
 const ai = require('../src/services/ai');
-const report = { started: new Date().toISOString(), mode: process.argv.includes('--telegram') ? 'telegram-handler' : 'classifier', cases: [] };
+const report = { version: config.version, started: new Date().toISOString(), mode: process.argv.includes('--telegram') ? 'telegram-handler' : 'classifier', cases: [] };
 
 async function check(name, input, callback) {
   const row = { name, input };
@@ -58,6 +58,10 @@ async function classifier() {
       fs.writeFileSync(path.join(runDir, `${name}.json`), JSON.stringify({ result, raw }, null, 2));
       assert.equal(result.kind, kind, JSON.stringify({ result, raw }));
       if (targetTime) assert.equal(result.targetTime, targetTime);
+      if (kind === 'schedule') {
+        const subject = /reply-announcement|event-/.test(name) ? /стрим/i : name === 'duration' ? /вод/i : name === 'future-question' ? /ремонт/i : /молок/i;
+        assert.match(result.reminderText, subject);
+      }
       return { result, raw };
     });
   }
@@ -95,6 +99,8 @@ async function telegram() {
     return { ...msg, text, from: { id: admin, first_name: 'Тест' } };
   }
   async function request(name, { text, audio, spoken, replyTo }, expect) {
+    const filter = process.argv.find(arg => arg.startsWith('--case='))?.slice(7);
+    if (filter && !filter.split(',').includes(name)) return { pass: false, skipped: true };
     const before = { sent: sends.length, parsed: parses.length, transcribed: transcripts.length, answered: responses.length, tasks: storage.data.reminders.length, raw: rawDecisions.length };
     return check(name, { text: text || spoken, audio, replyTo: replyTo?.text }, async () => {
       let incoming;
@@ -114,6 +120,7 @@ async function telegram() {
       assert.ok(result.outputs.every(s => s.ok && s.messageId), 'Telegram did not return message ids');
       if (expect.kind) assert.equal(result.decisions.at(-1)?.kind, expect.kind, JSON.stringify(result.decisions));
       assert.equal(result.created.length, expect.created || 0);
+      if (expect.subject) assert.match(result.created[0]?.text || '', expect.subject);
       if (expect.answer) {
         assert.equal(result.answers.length, 1);
         assert.equal(result.outputs.length, 1, 'No transcript card alongside a dialog answer');
@@ -125,11 +132,11 @@ async function telegram() {
   }
   await request('text-recall', { text: 'Сыч, напомни, сколько дней в неделе?' }, { kind: 'answer', answer: /7|семь/i });
   const missing = await request('missing-time', { text: 'Сыч, напомни купить молоко' }, { kind: 'clarify' });
-  if (missing.pass) await request('time-follow-up', { text: 'завтра в 12', replyTo: reply(missing) }, { kind: 'schedule', created: 1 });
+  if (missing.pass) await request('time-follow-up', { text: 'завтра в 12', replyTo: reply(missing) }, { kind: 'schedule', created: 1, subject: /молок/i });
   const announce = await context('В субботу состоится стрим про игры.');
-  await request('reply-announcement', { text: 'Сыч напомни завтра в 12', replyTo: announce }, { kind: 'schedule', created: 1 });
+  await request('reply-announcement', { text: 'Сыч напомни завтра в 12', replyTo: announce }, { kind: 'schedule', created: 1, subject: /стрим.*игр/i });
   const timed = await context('Стрим завтра в 20:00 МСК.');
-  await request('event-offset', { text: 'Сыч напомни за час до начала', replyTo: timed }, { kind: 'schedule', created: 1 });
+  await request('event-offset', { text: 'Сыч напомни за час до начала', replyTo: timed }, { kind: 'schedule', created: 1, subject: /стрим/i });
   await request('recall-event', { text: 'Сыч напомни, во сколько завтра стрим?', replyTo: timed }, { kind: 'answer', answer: /20:00|20\.00|восемь|в 20/ });
   const cancel = await request('missing-clock', { text: 'Сыч напомни завтра проверить заметки' }, { kind: 'clarify' });
   if (cancel.pass) await request('cancel-follow-up', { text: 'отмена', replyTo: reply(cancel) }, { kind: 'cancel' });
@@ -137,7 +144,7 @@ async function telegram() {
   if (math.pass) await request('voice-reply', { audio: 'reply', spoken: 'А сколько будет три плюс пять?', replyTo: reply(math) }, { answer: /8|восемь/i });
   await request('voice-recall', { audio: 'recall', spoken: 'Сыч, напомни, сколько дней в неделе?' }, { kind: 'answer', answer: /7|семь/i });
   await request('voice-plain', { audio: 'plain', spoken: 'Мы завтра собираемся прогуляться по парку. Если будет дождь, останемся дома.' }, { card: true });
-  const reminder = await request('voice-reminder', { audio: 'reminder', spoken: 'Сыч, напомни через минуту проверить тестовое уведомление.' }, { kind: 'schedule', created: 1 });
+  const reminder = await request('voice-reminder', { audio: 'reminder', spoken: 'Сыч, напомни через минуту проверить тестовое уведомление.' }, { kind: 'schedule', created: 1, subject: /уведомлен/i });
   if (reminder.pass) {
     const task = reminder.created[0];
     const remaining = Math.max(0, Date.parse(task.time) - Date.now() + 250);
