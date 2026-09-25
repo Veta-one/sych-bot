@@ -144,6 +144,10 @@ See `.env.example` for full configuration template.
 
 **Использование:** контекст чата передаётся в каждый запрос AI (~100 токенов).
 
+## Voice transcription and summaries
+
+`transcribeAudio()` uses a dedicated native Gemini model with neutral transcription instructions, JSON schema `{text: string}`, and no Sych personality or search tools. Up to 700 characters, no summary request is made. Longer transcripts go to a separate neutral summary model with `{summary: string}`; the full transcript is the only source. Preserve questions, requests, names, numbers, deadlines, negations, uncertainty and conditions; never force everything into one sentence. Empty, invalid, over-600-character or less-than-2x-compressed summaries are discarded, never truncated. Summary processing has a 20-second total deadline and must not discard a successful transcript on failure. Key rotation recreates both voice models. `src/utils/voice.js` owns parsing/length policy, `formatVoiceMessage()` in `rich.js` produces one escaped card with the transcript expanded or under disclosure. Chat context always receives the full transcription. Covered by `test/voice.test.js`.
+
 ## Image Memory (Vision Context)
 
 Когда бот реально смотрит на изображение (его позвали по фото/стикеру/картинке-ссылке или реплаем на них), после ответа он **асинхронно** получает **подробное** нейтральное описание картинки (абзац-полтора, потолок `config.imageDescMaxChars`, дефолт 1500 символов) дешёвой нативной моделью (`describeModel` на `gemini-2.5-flash-lite`, без характера Сыча и без поиска) и **вшивает его прямо в запись истории этого сообщения** (`[🖼 на картинке: ...]`). Промпт описания (`prompts.describeImage()`) намеренно универсальный — без перечня типов деталей; единственный жёсткий запрет — выдумывать то, чего не видно.

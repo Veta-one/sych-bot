@@ -9,6 +9,7 @@
 
 const axios = require('axios');
 const config = require('../config');
+const { selectVoiceSummary } = require('./voice');
 
 const API = `https://api.telegram.org/bot${config.telegramToken}`;
 
@@ -18,6 +19,20 @@ function escapeHtml(text = '') {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+}
+
+function formatVoiceMessage(transcription, userName, duration) {
+  const seconds = Number.isFinite(duration) && duration >= 0 ? Math.floor(duration) : null;
+  const durationLabel = seconds === null ? '' : ` · <code>${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}</code>`;
+  const header = `<p>🎙 <b>${escapeHtml(userName)}</b>${durationLabel}</p>`;
+  const transcript = `<blockquote>${escapeHtml(transcription.text).replace(/\r?\n/g, '<br/>')}</blockquote>`;
+  const summary = selectVoiceSummary(transcription.text, transcription.summary);
+  if (!summary) return { html: header + transcript };
+  return {
+    html: header
+      + `<p><b>Кратко:</b><br/>${escapeHtml(summary).replace(/\r?\n/g, '<br/>')}</p>`
+      + `<details><summary>Полная расшифровка</summary>${transcript}</details>`,
+  };
 }
 
 // Грубая, но надёжная конвертация нашего HTML в читаемый плейн-текст (для фоллбэка).
@@ -143,4 +158,4 @@ async function sendRich(bot, chatId, content, opts = {}) {
   }
 }
 
-module.exports = { sendRich, htmlToPlain, escapeHtml, normalizeMd };
+module.exports = { sendRich, htmlToPlain, escapeHtml, normalizeMd, formatVoiceMessage };

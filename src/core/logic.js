@@ -3,7 +3,7 @@ const ai = require('../services/ai');
 const config = require('../config');
 const axios = require('axios');
 const { exec } = require('child_process');
-const { sendRich, escapeHtml, normalizeMd } = require('../utils/rich');
+const { sendRich, escapeHtml, normalizeMd, formatVoiceMessage } = require('../utils/rich');
 const { isForgetMeRequest } = require('../utils/privacy');
 const { shouldHandleProfileQuery } = require('../utils/profile-query');
 const { resolveAddressedCommand } = require('../utils/commands');
@@ -366,37 +366,13 @@ async function processMessage(bot, msg) {
         stopTyping();
 
         if (transcription) {
-            let replyText = "";
-            
-            // Считаем длины
-            const fullLen = transcription.text.length;
-            const tldrLen = transcription.summary.length;
-
-            // Логика полезности TLDR:
-            // Показываем суть, только если она короче оригинала хотя бы на 15% (умножаем на 0.85).
-            // Если TLDR почти такой же длины или длиннее — в нем нет смысла.
-            const isTldrUseful = tldrLen < (fullLen * 0.65);
-
-            // Длительность голосового (0:47), если доступна
-            const durSec = media.duration;
-            const durStr = (typeof durSec === 'number' && durSec > 0)
-                ? `${Math.floor(durSec / 60)}:${String(durSec % 60).padStart(2, '0')}`
-                : '';
-            const durTag = durStr ? ` · <code>${durStr}</code>` : '';
-            const safeName = escapeHtml(userName);
-
-            if (isTldrUseful) {
-                // Карточка: шапка (имя + длительность) + суть + кат «Расшифровка»
-                replyText = `<p>🎙 <b>Голосовое</b> · ${safeName}${durTag}</p>`
-                    + `<p><b>Суть:</b> ${escapeHtml(transcription.summary)}</p>`
-                    + `<details><summary>Расшифровка</summary><blockquote>${escapeHtml(transcription.text)}</blockquote></details>`;
-            } else {
-                // Короткое голосовое: имя + длительность + цитата (без TL;DR)
-                replyText = `<p>🎙 <b>${safeName}</b>${durTag}</p><blockquote>${escapeHtml(transcription.text)}</blockquote>`;
+            // A single voice card; a failed/inefficient summary leaves the full transcript visible.
+            const voiceMessage = formatVoiceMessage(transcription, userName, media.duration);
+            try {
+                await sendRich(bot, chatId, voiceMessage, replyOpts(msg, threadId));
+            } catch (error) {
+                console.error(`[VOICE SEND ERROR] ${error.message}`);
             }
-
-            // Останавливаем "печатает"
-            try { await sendRich(bot, chatId, { html: replyText }, replyOpts(msg, threadId)); } catch(e) {}
             
             // !!! ВАЖНО: Если чат в муте — на этом всё. Не отвечаем на содержимое.
             if (storage.isTopicMuted(chatId, threadId)) return;
@@ -531,7 +507,7 @@ async function processMessage(bot, msg) {
     const helpText = `<h3>🦉 Что я умею</h3>
 <b>Вижу и слышу</b>
 <ul>
-<li>Кидай <b>войс</b> — расшифрую и сделаю краткую суть</li>
+<li>Кидай <b>войс</b> — короткий покажу текстом; для длинного добавлю краткое содержание и полную расшифровку под раскрытием. Сохраню вопросы, сроки и условия</li>
 <li>Кидай <b>фото/видео</b> — пойму, что там, прокомментирую и запомню для вопросов потом</li>
 <li>Кидай <b>PDF, DOCX, PPTX, XLSX, TXT или код</b> — прочитаю и отвечу на вопросы</li>
 <li>«Сыч, перескажи [YouTube-ссылка]» — возьму субтитры, а если они закрыты — посмотрю само видео</li>

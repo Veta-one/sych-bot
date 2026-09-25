@@ -21,10 +21,12 @@ const {
 } = require('./youtube-gemini');
 const { shouldSkipSearchForPrimarySource } = require('../utils/content-policy');
 const { withTimeout } = require('../utils/async');
+const { parseVoiceJson, readTranscript, shouldSummarizeVoice, selectVoiceSummary } = require('../utils/voice');
 
 const YOUTUBE_TRANSCRIPT_TIMEOUT_MS = 25000;
 const TAVILY_EXTRACT_TIMEOUT_MS = 12000;
 const TAVILY_SEARCH_TIMEOUT_MS = 20000;
+const VOICE_SUMMARY_TIMEOUT_MS = 20000;
 
 class AiService {
   constructor() {
@@ -149,6 +151,24 @@ ${googleRows}
         model: config.googleNativeModel,
         safetySettings: safetySettings,
     });
+
+    // Voice processing must not inherit Sych's personality or web search tools.
+    const voiceModel = (systemInstruction, field) => genAI.getGenerativeModel({
+        model: config.googleNativeModel,
+        systemInstruction,
+        safetySettings,
+        generationConfig: {
+            temperature: 0.1,
+            responseMimeType: 'application/json',
+            responseSchema: {
+                type: 'object',
+                properties: { [field]: { type: 'string' } },
+                required: [field],
+            },
+        },
+    });
+    this.transcriptionModel = voiceModel(prompts.voiceTranscriptionSystem(), 'text');
+    this.voiceSummaryModel = voiceModel(prompts.voiceSummarySystem(), 'summary');
   }
 
   rotateNativeKey() {
@@ -655,17 +675,33 @@ async generateFlavorText(task, result) {
     }
 
     try {
-        return await this.executeNativeWithRetry(async () => {
+        const text = await this.executeNativeWithRetry(async () => {
           const parts = [ { inlineData: { mimeType: mimeType, data: audioBuffer.toString("base64") } }, { text: prompts.transcription(userName) }];
-          const result = await this.nativeModel.generateContent(parts);
-          let text = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
-          const first = text.indexOf('{'), last = text.lastIndexOf('}');
-          if (first !== -1 && last !== -1) text = text.substring(first, last + 1);
-          return JSON.parse(text);
+          const result = await this.transcriptionModel.generateContent(parts, { timeout: 60000 });
+          return readTranscript(result.response.text());
         });
+        return { text, summary: await this.summarizeVoiceTranscript(text) };
     } catch (e) {
         console.error(`[TRANSCRIPTION FAIL] ${e.message}`);
         return null;
+    }
+  }
+
+  async summarizeVoiceTranscript(text) {
+    if (!shouldSummarizeVoice(text)) return '';
+    const deadline = Date.now() + VOICE_SUMMARY_TIMEOUT_MS;
+    try {
+      const summary = await withTimeout(this.executeNativeWithRetry(async () => {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw new Error('Истёк срок подготовки саммари');
+        const result = await this.voiceSummaryModel.generateContent(prompts.voiceSummary(text), { timeout: remainingMs });
+        return parseVoiceJson(result.response.text())?.summary;
+      }), VOICE_SUMMARY_TIMEOUT_MS, 'Саммари голосового');
+      return selectVoiceSummary(text, summary);
+    } catch (error) {
+      // The transcript is already usable; a failed optional summary must not lose it.
+      console.error(`[VOICE SUMMARY FAIL] ${error.message}`);
+      return '';
     }
   }
 
