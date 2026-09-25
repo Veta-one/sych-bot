@@ -4,6 +4,7 @@ const logic = require('./core/logic');
 const storage = require('./services/storage');
 const axios = require('axios');
 const { sendRich, escapeHtml } = require('./utils/rich');
+const { createReminderDelivery } = require('./services/reminder-delivery');
 
 
 const originalLog = console.log;
@@ -169,35 +170,8 @@ bot.getMe().then((me) => {
 });
 
 // === ТИКЕР НАПОМИНАЛОК (Проверка каждую минуту) ===
-setInterval(() => {
-  const pending = storage.getPendingReminders();
-  
-  if (pending.length > 0) {
-      console.log(`[REMINDER] Сработало напоминаний: ${pending.length}`);
-      
-      const idsToRemove = [];
-
-      pending.forEach(task => {
-          // Формируем сообщение
-          const message = task.text
-              ? `⏰ <b>${escapeHtml(task.username)}</b>, напоминаю!<blockquote>${escapeHtml(task.text)}</blockquote>`
-              : `⏰ <b>${escapeHtml(task.username)}</b>, напоминаю!`;
-          
-          // Отправляем
-          sendRich(bot, task.chatId, { html: message }).then(() => {
-              console.log(`[REMINDER] Успешно отправлено: ${task.text}`);
-          }).catch(err => {
-              console.error(`[REMINDER ERROR] Не смог отправить в ${task.chatId}: ${err.message}`);
-              // Если юзер заблочил бота, все равно удаляем, чтобы не спамить в лог ошибками
-          });
-
-          idsToRemove.push(task.id);
-      });
-
-      // Чистим базу
-      storage.removeReminders(idsToRemove);
-  }
-}, 60 * 1000); // 60000 мс = 1 минута
+const deliverReminders = createReminderDelivery(bot, storage);
+setInterval(() => deliverReminders().catch(error => console.error(`[REMINDER TICK ERROR] ${error.message}`)), 60000);
 
 // Обработка ошибок поллинга
 bot.on('polling_error', (error) => {

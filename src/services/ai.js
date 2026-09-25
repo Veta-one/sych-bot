@@ -22,6 +22,7 @@ const {
 const { shouldSkipSearchForPrimarySource } = require('../utils/content-policy');
 const { withTimeout } = require('../utils/async');
 const { parseVoiceJson, readTranscript, shouldSummarizeVoice, selectVoiceSummary } = require('../utils/voice');
+const { resolveReminderDecision, isRecallQuestion } = require('../utils/reminders');
 
 const YOUTUBE_TRANSCRIPT_TIMEOUT_MS = 25000;
 const TAVILY_EXTRACT_TIMEOUT_MS = 12000;
@@ -554,12 +555,13 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
 // === ВСПОМОГАТЕЛЬНЫЕ МЕТОДЫ (LOGIC MODEL) ===
   
   // Универсальный метод для логики
-  async runLogicModel(promptJson) {
+  async runLogicModel(promptJson, { temperature } = {}) {
     // 1. Пробуем через API (Logic Model)
     if (this.openai) {
         try {
             const completion = await this.openai.chat.completions.create({
                 model: config.logicModel,
+                ...(temperature == null ? {} : { temperature }),
                 messages: [{ role: "user", content: promptJson }],
                 response_format: { type: "json_object" }
             });
@@ -570,7 +572,10 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
     // 2. Fallback Native
     try {
         return await this.executeNativeWithRetry(async () => {
-           const result = await this.nativeModel.generateContent(promptJson);
+           const request = temperature == null ? promptJson : {
+             contents: [{ role: 'user', parts: [{ text: promptJson }] }], generationConfig: { temperature },
+           };
+           const result = await this.nativeModel.generateContent(request);
            let text = result.response.text().replace(/```json/g, '').replace(/```/g, '').trim();
            const first = text.indexOf('{'), last = text.lastIndexOf('}');
            if (first !== -1 && last !== -1) text = text.substring(first, last + 1);
@@ -680,7 +685,7 @@ async generateFlavorText(task, result) {
           const result = await this.transcriptionModel.generateContent(parts, { timeout: 60000 });
           return readTranscript(result.response.text());
         });
-        return { text, summary: await this.summarizeVoiceTranscript(text) };
+        return { text };
     } catch (e) {
         console.error(`[TRANSCRIPTION FAIL] ${e.message}`);
         return null;
@@ -728,10 +733,11 @@ async generateFlavorText(task, result) {
   }
 
   // === ПАРСИНГ НАПОМИНАНИЯ (С КОНТЕКСТОМ) ===
-  async parseReminder(userText, contextText = "") {
-    const now = this.getCurrentTime();
-    const prompt = prompts.parseReminder(now, userText, contextText);
-    return this.runLogicModel(prompt);
+  async parseReminder(userText, contextText = "", { contextDate = null, now = Date.now() } = {}) {
+    if (isRecallQuestion(userText)) return { kind: 'answer' };
+    const prompt = prompts.parseReminder(new Date(now).toISOString(), userText, contextText);
+    const parsed = await withTimeout(this.runLogicModel(prompt, { temperature: 0 }), 20000, 'Разбор напоминания').catch(() => null);
+    return resolveReminderDecision(parsed, { userText, contextText, contextDate, now });
   }
 }
 

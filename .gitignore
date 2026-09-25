@@ -25,3 +25,6 @@ scripts/indent-test.js
 
 # Полученные для анализа сторонние исходники (могут содержать чужие ключи и базы)
 my_files/
+
+# Local live-test recordings and reports (never production data)
+test-output/

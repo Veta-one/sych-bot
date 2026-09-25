@@ -47,6 +47,7 @@ function loadAi({ transcript = 'Уточни адрес, пожалуйста.',
     './storage': { initGoogleStats() {}, incrementGoogleStat() {}, markGoogleKeyExhausted() {} },
     '../utils/rich': {}, './youtube': {}, './youtube-gemini': {}, '../utils/content-policy': {},
     '../utils/voice': voice,
+    '../utils/reminders': require('../src/utils/reminders'),
     '../utils/async': { withTimeout: (operation, timeout, label) => withTimeout(operation, stall ? 15 : timeout, label) },
   });
   return { ai, calls, models };
@@ -61,7 +62,7 @@ test('up to 700 characters uses one neutral audio request and never summarizes',
     const { ai, calls, models } = loadAi({ transcript: text });
     const result = await ai.transcribeAudio(Buffer.from('audio'), 'Имя', 'audio/ogg');
     assert.equal(result.text, text);
-    assert.equal(result.summary, '');
+    assert.equal(result.summary, undefined);
     assert.equal(calls.length, 1);
     assert.equal(calls[0].field, 'text');
     assert.equal(calls[0].input[0].inlineData.mimeType, 'audio/ogg');
@@ -78,6 +79,8 @@ test('long voice gets a separate text-only summary request using the complete tr
   const { ai, calls } = loadAi({ transcript: longTranscript, summary: usefulSummary });
   const result = await ai.transcribeAudio(Buffer.from('audio'), 'Имя', 'audio/ogg');
   assert.equal(result.text, longTranscript.trim());
+  assert.equal(calls.length, 1, 'recognition does not summarize before routing');
+  result.summary = await ai.summarizeVoiceTranscript(result.text);
   assert.equal(result.summary, usefulSummary);
   assert.equal(calls.length, 2);
   assert.equal(calls[1].field, 'summary');
@@ -91,6 +94,7 @@ test('summary errors, bad JSON, wrong types, empty output, and stalls preserve t
     { rawSummary: '{"summary":42}' }, { summary: '' }, { stall: true }]) {
     const { ai } = loadAi({ transcript: longTranscript, ...failure });
     const result = await ai.transcribeAudio(Buffer.from('audio'), 'Имя', 'audio/ogg');
+    result.summary = await ai.summarizeVoiceTranscript(result.text);
     assert.equal(result.text, longTranscript.trim());
     assert.equal(result.summary, '');
   }
@@ -100,6 +104,7 @@ test('inefficient or oversized summaries are rejected whole, never cut mid-condi
   for (const [text, summary] of [['т'.repeat(800), 'с'.repeat(401)], ['т'.repeat(2000), 'с'.repeat(601)]]) {
     const { ai } = loadAi({ transcript: text, summary });
     const result = await ai.transcribeAudio(Buffer.from('audio'), 'Имя', 'audio/ogg');
+    result.summary = await ai.summarizeVoiceTranscript(result.text);
     assert.equal(result.text, text);
     assert.equal(result.summary, '');
   }
@@ -148,12 +153,13 @@ test('message handler sends one voice card in the original topic and preserves f
   const handler = loadModule('core/logic.js', {
     '../services/storage': { isBanned: () => false, hasChat: () => true, updateChatName() {},
       trackUser() {}, isTopicMuted: () => false, getChatProfile: () => ({ topic: 'test' }) },
-    '../services/ai': { transcribeAudio: async () => result },
+    '../services/ai': { transcribeAudio: async () => result, summarizeVoiceTranscript: async () => usefulSummary },
     '../config': { adminId: 999, botId: 888, triggerRegex: /сыч|sych/i, contextSize: 30 },
     axios: { get: async () => ({ data: Buffer.from('audio') }) }, child_process: {},
     '../utils/rich': { ...rich, sendRich: async (...args) => { sent.push(args); } },
     '../utils/privacy': { isForgetMeRequest: () => false }, '../utils/profile-query': {},
     '../utils/commands': {}, '../services/documents': {},
+    '../utils/reminders': require('../src/utils/reminders'),
   }, { setTimeout, clearTimeout, setInterval, clearInterval, Math: { ...Math, random: () => 1 } });
   const msg = { message_id: 10, from: { id: 999, first_name: 'Имя' },
     chat: { id: -100, type: 'supergroup' }, is_topic_message: true, message_thread_id: 184,

@@ -81,7 +81,7 @@ function splitChunks(text, size = 4000) {
  * @param {number|string} chatId
  * @param {{html?:string, markdown?:string, fallback?:string}} content — ровно одно из html / markdown
  * @param {{replyTo?:number, threadId?:number, businessId?:string, replyMarkup?:object, silent?:boolean}} [opts]
- * @returns {Promise<{ok:boolean, mode:'rich'|'fallback', error?:string}>}
+ * @returns {Promise<{ok:boolean, mode:'rich'|'rich-noimg'|'fallback', messageId?:number, error?:string}>}
  */
 async function sendRich(bot, chatId, content, opts = {}) {
   const rich = {};
@@ -101,8 +101,8 @@ async function sendRich(bot, chatId, content, opts = {}) {
   // proxy:false — чтобы axios шёл напрямую (как node-telegram-bot-api), игнорируя
   // переменные окружения HTTP(S)_PROXY (иначе локальный прокси ломает запрос).
   try {
-    await axios.post(`${API}/sendRichMessage`, { chat_id: chatId, rich_message: rich, ...extra }, { proxy: false });
-    return { ok: true, mode: 'rich' };
+    const response = await axios.post(`${API}/sendRichMessage`, { chat_id: chatId, rich_message: rich, ...extra }, { proxy: false });
+    return { ok: true, mode: 'rich', messageId: response.data?.result?.message_id };
   } catch (e) {
     const desc = e.response?.data?.description || e.message;
 
@@ -115,9 +115,9 @@ async function sendRich(bot, chatId, content, opts = {}) {
       if (content.markdown != null) noImg.markdown = content.markdown.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\n{3,}/g, '\n\n').trim();
       if (content.html != null) noImg.html = content.html.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/<img[^>]*>/gi, '');
       try {
-        await axios.post(`${API}/sendRichMessage`, { chat_id: chatId, rich_message: noImg, ...extra }, { proxy: false });
+        const response = await axios.post(`${API}/sendRichMessage`, { chat_id: chatId, rich_message: noImg, ...extra }, { proxy: false });
         console.error(`[RICH] медиа не прошло, отправил без картинок: ${desc}`);
-        return { ok: true, mode: 'rich-noimg' };
+        return { ok: true, mode: 'rich-noimg', messageId: response.data?.result?.message_id };
       } catch (_) { /* падаем в общий фоллбэк ниже */ }
     }
 
@@ -137,24 +137,28 @@ async function sendRich(bot, chatId, content, opts = {}) {
     if (opts.silent) legacy.disable_notification = true;
 
     // Для markdown-контента пробуем сохранить разметку (legacy Markdown), иначе плейн.
+    let messageId;
     if (content.markdown != null && content.fallback == null) {
       for (const chunk of splitChunks(content.markdown)) {
         try {
-          await bot.sendMessage(chatId, chunk, { ...legacy, parse_mode: 'Markdown' });
+          const sent = await bot.sendMessage(chatId, chunk, { ...legacy, parse_mode: 'Markdown' });
+          messageId ||= sent.message_id;
         } catch (_) {
-          await bot.sendMessage(chatId, chunk, legacy); // совсем сырой текст
+          const sent = await bot.sendMessage(chatId, chunk, legacy); // совсем сырой текст
+          messageId ||= sent.message_id;
         }
       }
-      return { ok: true, mode: 'fallback', error: desc };
+      return { ok: true, mode: 'fallback', error: desc, messageId };
     }
 
     const plain = content.fallback != null ? content.fallback
       : content.html != null ? htmlToPlain(content.html)
       : String(content.markdown || '');
     for (const chunk of splitChunks(plain)) {
-      await bot.sendMessage(chatId, chunk, legacy);
+      const sent = await bot.sendMessage(chatId, chunk, legacy);
+      messageId ||= sent.message_id;
     }
-    return { ok: true, mode: 'fallback', error: desc };
+    return { ok: true, mode: 'fallback', error: desc, messageId };
   }
 }
 

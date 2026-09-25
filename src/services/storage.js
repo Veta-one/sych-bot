@@ -203,7 +203,8 @@ class StorageService {
 
   // === НАПОМИНАЛКИ (Новые методы) ===
 
-  addReminder(chatId, userId, username, timeIso, text) {
+  addReminder(chatId, userId, username, timeIso, text, { threadId = null, businessId = null, sourceMessageId = null } = {}) {
+    if (!Number.isFinite(Date.parse(timeIso)) || Date.parse(timeIso) <= Date.now()) throw new Error('Некорректное время напоминания');
     if (!this.data.reminders) this.data.reminders = [];
     
     this.data.reminders.push({
@@ -211,6 +212,9 @@ class StorageService {
         chatId,
         userId,
         username,
+        threadId,
+        businessId,
+        sourceMessageId,
         time: timeIso, // Время срабатывания (ISO string)
         text: text
     });

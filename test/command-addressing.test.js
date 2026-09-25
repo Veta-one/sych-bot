@@ -53,6 +53,7 @@ function loadHandler() {
     '../utils/privacy': { isForgetMeRequest: () => false },
     '../utils/profile-query': {},
     '../utils/commands': { resolveAddressedCommand },
+    '../utils/reminders': require('../src/utils/reminders'),
     '../services/documents': {},
   };
   const module = { exports: {} };

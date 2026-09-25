@@ -7,6 +7,8 @@ const { sendRich, escapeHtml, normalizeMd, formatVoiceMessage } = require('../ut
 const { isForgetMeRequest } = require('../utils/privacy');
 const { shouldHandleProfileQuery } = require('../utils/profile-query');
 const { resolveAddressedCommand } = require('../utils/commands');
+const { PendingReminders, reminderConfirmation } = require('../utils/reminders');
+const pendingReminders = new PendingReminders();
 const {
   buildOfficePromptContext,
   extractOfficeText,
@@ -90,6 +92,7 @@ function addToHistory(chatId, sender, text, userId = null, relatedUserId = null)
 }
 
 function forgetUserFromRuntime(userId) {
+  pendingReminders.forgetUser(userId);
   const targetId = String(userId);
 
   for (const chatId of Object.keys(chatHistory)) {
@@ -220,11 +223,11 @@ async function processMessage(bot, msg) {
     let threadId = msg.is_topic_message ? msg.message_thread_id : (msg.message_thread_id || (msg.reply_to_message ? msg.reply_to_message.message_thread_id : null));
     if (typeof threadId !== 'number') threadId = null;
     
-    const cleanText = text.toLowerCase();
+    let cleanText = text.toLowerCase();
     const replyUserId = msg.reply_to_message?.from?.id;
     const isReplyToBot = replyUserId && String(replyUserId) === String(config.botId);
-    const hasTriggerWord = config.triggerRegex.test(cleanText); 
-    const isDirectlyCalled = hasTriggerWord || isReplyToBot; 
+    let hasTriggerWord = config.triggerRegex.test(cleanText);
+    let isDirectlyCalled = hasTriggerWord || isReplyToBot;
 
     // === ЕДИНЫЙ КОНТРОЛЛЕР СТАТУСА "ПЕЧАТАЕТ" ===
     let typingTimer = null;
@@ -350,6 +353,7 @@ async function processMessage(bot, msg) {
 
    // === ОБРАБОТКА ГОЛОСОВЫХ (Voice to Text) ===
    if (msg.voice || msg.audio) {
+    if (storage.isTopicMuted(chatId, threadId)) return;
     startTyping(); 
 
     try {
@@ -363,26 +367,29 @@ async function processMessage(bot, msg) {
 
         const transcription = await ai.transcribeAudio(buffer, userName, mimeType);
         
-        stopTyping();
-
         if (transcription) {
-            // A single voice card; a failed/inefficient summary leaves the full transcript visible.
-            const voiceMessage = formatVoiceMessage(transcription, userName, media.duration);
-            try {
-                await sendRich(bot, chatId, voiceMessage, replyOpts(msg, threadId));
-            } catch (error) {
-                console.error(`[VOICE SEND ERROR] ${error.message}`);
-            }
-            
-            // !!! ВАЖНО: Если чат в муте — на этом всё. Не отвечаем на содержимое.
+            text = [text.trim(), transcription.text].filter(Boolean).join('\n');
+            msg.text = text;
+            cleanText = text.toLowerCase();
+            hasTriggerWord = config.triggerRegex.test(cleanText);
+            isDirectlyCalled = hasTriggerWord || isReplyToBot;
+            // The mute may have changed while speech recognition was running.
             if (storage.isTopicMuted(chatId, threadId)) return;
-
-            // Если не в муте — подменяем текст, чтобы бот мог прокомментировать
-            text = transcription.text; 
-            msg.text = transcription.text;
+            if (!isDirectlyCalled) {
+                transcription.summary = await ai.summarizeVoiceTranscript(transcription.text);
+                if (storage.isTopicMuted(chatId, threadId)) return;
+                const voiceMessage = formatVoiceMessage(transcription, userName, media.duration);
+                await sendRich(bot, chatId, voiceMessage, replyOpts(msg, threadId));
+            }
+        } else {
+            await sendRich(bot, chatId, { markdown: 'Не удалось расшифровать голосовое. Попробуй ещё раз или напиши текстом.' }, replyOpts(msg, threadId));
+            return;
         }
     } catch (e) {
         console.error("Ошибка голосового:", e.message);
+        return;
+    } finally {
+        stopTyping();
     }
 }
 
@@ -507,13 +514,15 @@ async function processMessage(bot, msg) {
     const helpText = `<h3>🦉 Что я умею</h3>
 <b>Вижу и слышу</b>
 <ul>
-<li>Кидай <b>войс</b> — короткий покажу текстом; для длинного добавлю краткое содержание и полную расшифровку под раскрытием. Сохраню вопросы, сроки и условия</li>
+<li>Скажи в <b>голосовом</b> «Сыч, сколько будет два плюс два?» — отвечу как на текст. Голосовым реплаем на мой ответ можно продолжить разговор без имени</li>
+<li>Обычный <b>войс</b> покажу текстом; для длинного добавлю краткое содержание и полную расшифровку под раскрытием</li>
 <li>Кидай <b>фото/видео</b> — пойму, что там, прокомментирую и запомню для вопросов потом</li>
 <li>Кидай <b>PDF, DOCX, PPTX, XLSX, TXT или код</b> — прочитаю и отвечу на вопросы</li>
 <li>«Сыч, перескажи [YouTube-ссылка]» — возьму субтитры, а если они закрыты — посмотрю само видео</li>
 <li>Кидай ссылку на картинку — скачаю и посмотрю</li>
 <li>Гуглю актуальное: курсы, новости, погода</li>
-<li>«Сыч напомни завтра в 10» — поставлю напоминание (можно реплаем)</li>
+<li>«Сыч напомни завтра в 10 купить молоко» — уведомлю позже. Реплаем на анонс: «Сыч напомни завтра в 12» или «Сыч напомни за час до начала»</li>
+<li>«Сыч напомни, сколько дней в неделе» — отвечу сейчас. Если для уведомления не хватает времени или темы, уточню: ответь реплаем на мой вопрос. Можно голосом. Без указанного пояса — Екатеринбург (UTC+5), можно указать МСК</li>
 </ul>
 <details><summary>🎲 Развлекуха</summary>
 <ul>
@@ -582,30 +591,54 @@ async function processMessage(bot, msg) {
   }
 
   // === НАПОМИНАЛКИ ===
-  if (isDirectlyCalled && (cleanText.includes("напомни") || cleanText.includes("напоминай"))) {
-      
-    bot.sendChatAction(chatId, 'typing', getActionOptions(threadId)).catch(() => {});
-    console.log(`[LOGIC] Обнаружен запрос на напоминание: ${text}`);
-
-    // 1. Вытаскиваем текст сообщения, на которое ответили (если есть)
-    const replyContent = msg.reply_to_message 
-        ? (msg.reply_to_message.text || msg.reply_to_message.caption || "") 
-        : "";
-
-    // 2. Передаем и запрос юзера, и контекст реплая
-    const parsed = await ai.parseReminder(text, replyContent);
-    
-    if (parsed && parsed.targetTime) {
-        const username = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
-        
-        storage.addReminder(chatId, userId, username, parsed.targetTime, parsed.reminderText);
-        
-        console.log(`[REMINDER SET] Установлено на: ${parsed.targetTime}`);
-        return sendRich(bot, chatId, { markdown: parsed.confirmation }, replyOpts(msg, threadId));
-    } else {
-        console.log(`[REMINDER ERROR] AI не смог распарсить время.`);
+  const pendingReminder = isReplyToBot ? pendingReminders.get(msg, threadId) : null;
+  if (isDirectlyCalled && (pendingReminder || /напомни|напоминай/.test(cleanText))) {
+    // Consume before awaiting so concurrent replies cannot complete the same request twice.
+    if (pendingReminder) pendingReminders.clear(msg, threadId);
+    const request = pendingReminder ? {
+      ...pendingReminder, userText: `${pendingReminder.userText}\nУточнение пользователя: ${text}`,
+    } : {
+      userText: text,
+      contextText: msg.reply_to_message?.text || msg.reply_to_message?.caption || '',
+      contextDate: (msg.reply_to_message?.forward_origin?.date || msg.reply_to_message?.date) * 1000 || null,
+      sourceMessageId: msg.reply_to_message?.message_id || msg.message_id,
+    };
+    let parsed;
+    try {
+      parsed = await ai.parseReminder(request.userText, request.contextText, { contextDate: request.contextDate });
+    } catch (error) {
+      console.error(`[REMINDER PARSE ERROR] ${error.message}`);
+      parsed = { kind: 'error' };
+    } finally {
+      stopTyping();
     }
-}
+    if (storage.isTopicMuted(chatId, threadId)) return;
+    if (parsed?.kind === 'schedule') {
+      const username = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
+      storage.addReminder(chatId, userId, username, parsed.targetTime, parsed.reminderText, {
+        threadId, businessId: msg.business_connection_id || null, sourceMessageId: request.sourceMessageId,
+      });
+      pendingReminders.clear(msg, threadId);
+      console.log(`[REMINDER SET] ${parsed.targetTime} chat=${chatId} thread=${threadId}`);
+      return sendRich(bot, chatId, { markdown: reminderConfirmation(parsed) }, replyOpts(msg, threadId));
+    }
+    if (parsed?.kind === 'clarify') {
+      const sent = await sendRich(bot, chatId, {
+        markdown: `⏰ ${parsed.question}\nОтветь реплаем на это сообщение. Для отмены — «отмена».`,
+      }, replyOpts(msg, threadId));
+      pendingReminders.set(msg, threadId, sent.messageId, request);
+      return;
+    }
+    if (parsed?.kind === 'cancel') {
+      pendingReminders.clear(msg, threadId);
+      return sendRich(bot, chatId, { markdown: 'Хорошо, новое напоминание не создаю.' }, replyOpts(msg, threadId));
+    }
+    if (parsed?.kind !== 'answer') {
+      if (pendingReminder) pendingReminders.set(msg, threadId, pendingReminder.promptId, pendingReminder);
+      return sendRich(bot, chatId, { markdown: 'Не удалось разобрать просьбу. Напоминание не создано. Попробуй ещё раз.' }, replyOpts(msg, threadId));
+    }
+    // Information requested now continues through the usual search/personality pipeline.
+  }
 
 
   // === ФИЧИ ===
