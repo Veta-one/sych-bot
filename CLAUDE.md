@@ -200,3 +200,5 @@ Slash commands require an explicit recipient matching the bot's actual `getMe().
 - `Сыч расскажи про @username` / `Сыч расскажи про TGID` - Show a participant profile by username or exact Telegram user ID within the current chat
 - `Сыч стата` - Show token usage statistics
 - `Сыч, этот чат про [тема]` - Set chat topic manually
+
+Quote presentation: src/utils/quotes.js normalizes HTML and Markdown quotes centrally in sendRich. Quotes are expandable by default, except inside a closed details block or another quote. Code examples remain literal. Voice cards use an expandable quote at <=700 characters and a closed details disclosure above that threshold, even when summary generation fails. Legacy delivery uses expandable_blockquote entities with UTF-16 offsets and lossless chunks. See test/quotes.test.js. Summary generation policy is unchanged.

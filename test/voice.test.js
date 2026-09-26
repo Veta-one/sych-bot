@@ -130,7 +130,7 @@ test('missing or invalid transcripts never produce invented summaries', async ()
   assert.equal(calls.length, 0);
 });
 
-const rich = loadModule('utils/rich.js', { axios: {}, '../config': {}, './voice': voice });
+const rich = loadModule('utils/rich.js', { axios: {}, '../config': {}, './voice': voice, './quotes': require('../src/utils/quotes') });
 
 test('voice cards escape user content, preserve paragraphs and show the full transcript', () => {
   const short = rich.formatVoiceMessage({ text: 'Не <удаляй> & сохрани.\nУточни адрес.', summary: 'Нельзя скрывать короткий текст.' }, '<Имя>', 67);
@@ -138,12 +138,15 @@ test('voice cards escape user content, preserve paragraphs and show the full tra
   assert.match(short.html, /1:07/);
   assert.match(short.html, /&lt;удаляй&gt; &amp; сохрани\.<br\/>Уточни адрес/);
   assert.doesNotMatch(short.html, /<details>|Кратко:/);
+  assert.match(short.html, /<blockquote expandable>/);
   const long = rich.formatVoiceMessage({ text: longTranscript, summary: usefulSummary + '\n• Ничего <не обещаю>.' }, 'Имя', 145);
-  assert.match(long.html, /<details><summary>Полная расшифровка<\/summary>/);
+  assert.match(long.html, /<details><summary>Расшифровка<\/summary><blockquote>/);
+  assert.doesNotMatch(long.html, /expandable/);
   assert.match(long.html, /<br\/>• Ничего &lt;не обещаю&gt;/);
   assert.ok(long.html.includes(longTranscript));
   const fallback = rich.formatVoiceMessage({ text: longTranscript, summary: '' }, 'Имя');
-  assert.doesNotMatch(fallback.html, /<details>|Кратко:/);
+  assert.doesNotMatch(fallback.html, /expandable|Кратко:/);
+  assert.match(fallback.html, /<details><summary>Расшифровка<\/summary><blockquote>/);
   assert.ok(fallback.html.includes(longTranscript));
 });
 

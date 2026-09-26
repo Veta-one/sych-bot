@@ -3,7 +3,7 @@ const ai = require('../services/ai');
 const config = require('../config');
 const axios = require('axios');
 const { exec } = require('child_process');
-const { sendRich, escapeHtml, normalizeMd, formatVoiceMessage } = require('../utils/rich');
+const { sendRich, escapeHtml, normalizeMd, formatVoiceMessage, quoteFallback } = require('../utils/rich');
 const { isForgetMeRequest } = require('../utils/privacy');
 const { shouldHandleProfileQuery } = require('../utils/profile-query');
 const { resolveAddressedCommand } = require('../utils/commands');
@@ -515,7 +515,7 @@ async function processMessage(bot, msg) {
 <b>Вижу и слышу</b>
 <ul>
 <li>Скажи в <b>голосовом</b> «Сыч, сколько будет два плюс два?» — отвечу как на текст. Голосовым реплаем на мой ответ можно продолжить разговор без имени</li>
-<li>Обычный <b>войс</b> покажу текстом; для длинного добавлю краткое содержание и полную расшифровку под раскрытием</li>
+<li>Короткий <b>войс</b> покажу свёрнутой цитатой; для длинного добавлю краткое содержание и кнопку «Расшифровка» — полный текст открывается одним нажатием</li>
 <li>Кидай <b>фото/видео</b> — пойму, что там, прокомментирую и запомню для вопросов потом</li>
 <li>Кидай <b>PDF, DOCX, PPTX, XLSX, TXT или код</b> — прочитаю и отвечу на вопросы</li>
 <li>«Сыч, перескажи [YouTube-ссылка]» — возьму субтитры, а если они закрыты — посмотрю само видео</li>
@@ -970,11 +970,15 @@ async function processMessage(bot, msg) {
         sendRich(bot, config.adminId, { html: `<p>⚠️ <b>Ошибка отправки:</b></p><pre><code>${escapeHtml(error.message)}</code></pre><p>📂 Чат: <b>${escapeHtml(chatTitle)}</b> · 🆔 <code>${chatId}</code></p>` }).catch(() => {});
 
         // АВАРИЙНАЯ ОТПРАВКА (Если Markdown сломался или что-то еще)
-        // Шлем чистый текст без всякого форматирования
+        // Сохраняем свёрнутые цитаты даже при аварийной отправке.
         try { 
-             const rawChunks = aiResponse.match(/[\s\S]{1,4000}/g) || [aiResponse];
+             const rawChunks = quoteFallback({ markdown: aiResponse })
+                 || (aiResponse.match(/[\s\S]{1,4000}/g) || [aiResponse]).map(text => ({ text }));
              for (const chunk of rawChunks) {
-                await bot.sendMessage(chatId, chunk, {
+                await bot.sendMessage(chatId, chunk.text, {
+                    ...(chunk.entities ? { entities: chunk.entities } : {}),
+                    ...(threadId ? { message_thread_id: threadId } : {}),
+                    ...(msg.business_connection_id ? { business_connection_id: msg.business_connection_id } : {}),
                     reply_parameters: {
                         message_id: msg.message_id,
                         allow_sending_without_reply: true,

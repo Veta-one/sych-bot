@@ -9,7 +9,8 @@
 
 const axios = require('axios');
 const config = require('../config');
-const { selectVoiceSummary } = require('./voice');
+const { selectVoiceSummary, shouldSummarizeVoice } = require('./voice');
+const { collapseHtmlQuotes, collapseMarkdownQuotes, quoteFallback } = require('./quotes');
 
 const API = `https://api.telegram.org/bot${config.telegramToken}`;
 
@@ -25,13 +26,14 @@ function formatVoiceMessage(transcription, userName, duration) {
   const seconds = Number.isFinite(duration) && duration >= 0 ? Math.floor(duration) : null;
   const durationLabel = seconds === null ? '' : ` · <code>${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}</code>`;
   const header = `<p>🎙 <b>${escapeHtml(userName)}</b>${durationLabel}</p>`;
-  const transcript = `<blockquote>${escapeHtml(transcription.text).replace(/\r?\n/g, '<br/>')}</blockquote>`;
+  const long = shouldSummarizeVoice(transcription.text);
+  const transcript = `<blockquote${long ? '' : ' expandable'}>${escapeHtml(transcription.text).replace(/\r?\n/g, '<br/>')}</blockquote>`;
   const summary = selectVoiceSummary(transcription.text, transcription.summary);
-  if (!summary) return { html: header + transcript };
+  if (!long) return { html: header + transcript };
   return {
     html: header
-      + `<p><b>Кратко:</b><br/>${escapeHtml(summary).replace(/\r?\n/g, '<br/>')}</p>`
-      + `<details><summary>Полная расшифровка</summary>${transcript}</details>`,
+      + (summary ? `<p><b>Кратко:</b><br/>${escapeHtml(summary).replace(/\r?\n/g, '<br/>')}</p>` : '')
+      + `<details><summary>Расшифровка</summary>${transcript}</details>`,
   };
 }
 
@@ -85,8 +87,8 @@ function splitChunks(text, size = 4000) {
  */
 async function sendRich(bot, chatId, content, opts = {}) {
   const rich = {};
-  if (content.html != null) rich.html = content.html;
-  else if (content.markdown != null) rich.markdown = content.markdown;
+  if (content.html != null) rich.html = collapseHtmlQuotes(content.html);
+  else if (content.markdown != null) rich.markdown = collapseMarkdownQuotes(content.markdown);
   else throw new Error('sendRich: нужен html или markdown');
 
   // Параметры для нового метода (стиль Bot API: reply_parameters вместо reply_to_message_id)
@@ -112,8 +114,8 @@ async function sendRich(bot, chatId, content, opts = {}) {
     const hasImg = /!\[|<tg-(collage|slideshow)/i.test(content.markdown || '') || /<img|<tg-(collage|slideshow)/i.test(content.html || '');
     if (hasImg && /media|no_media|RICH_MESSAGE/i.test(desc)) {
       const noImg = {};
-      if (content.markdown != null) noImg.markdown = content.markdown.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/\n{3,}/g, '\n\n').trim();
-      if (content.html != null) noImg.html = content.html.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/<img[^>]*>/gi, '');
+      if (rich.markdown != null) noImg.markdown = rich.markdown.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/<img[^>]*>/gi, '').replace(/\n{3,}/g, '\n\n').trim();
+      if (rich.html != null) noImg.html = rich.html.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/<img[^>]*>/gi, '');
       try {
         const response = await axios.post(`${API}/sendRichMessage`, { chat_id: chatId, rich_message: noImg, ...extra }, { proxy: false });
         console.error(`[RICH] медиа не прошло, отправил без картинок: ${desc}`);
@@ -138,6 +140,14 @@ async function sendRich(bot, chatId, content, opts = {}) {
 
     // Для markdown-контента пробуем сохранить разметку (legacy Markdown), иначе плейн.
     let messageId;
+    const quotedChunks = content.fallback == null ? quoteFallback(rich) : null;
+    if (quotedChunks) {
+      for (const chunk of quotedChunks) {
+        const sent = await bot.sendMessage(chatId, chunk.text, { ...legacy, entities: chunk.entities });
+        messageId ||= sent.message_id;
+      }
+      return { ok: true, mode: 'fallback', error: desc, messageId };
+    }
     if (content.markdown != null && content.fallback == null) {
       for (const chunk of splitChunks(content.markdown)) {
         try {
@@ -162,4 +172,4 @@ async function sendRich(bot, chatId, content, opts = {}) {
   }
 }
 
-module.exports = { sendRich, htmlToPlain, escapeHtml, normalizeMd, formatVoiceMessage };
+module.exports = { sendRich, htmlToPlain, escapeHtml, normalizeMd, formatVoiceMessage, quoteFallback };
