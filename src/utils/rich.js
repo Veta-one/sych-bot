@@ -22,17 +22,13 @@ function escapeHtml(text = '') {
     .replace(/>/g, '&gt;');
 }
 
-function formatVoiceMessage(transcription, userName, duration) {
-  const seconds = Number.isFinite(duration) && duration >= 0 ? Math.floor(duration) : null;
-  const durationLabel = seconds === null ? '' : ` · <code>${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}</code>`;
-  const header = `<p>🎙 <b>${escapeHtml(userName)}</b>${durationLabel}</p>`;
+function formatVoiceMessage(transcription) {
   const long = shouldSummarizeVoice(transcription.text);
   const transcript = `<blockquote${long ? '' : ' expandable'}>${escapeHtml(transcription.text).replace(/\r?\n/g, '<br/>')}</blockquote>`;
   const summary = selectVoiceSummary(transcription.text, transcription.summary);
-  if (!long) return { html: header + transcript };
+  if (!long) return { html: transcript };
   return {
-    html: header
-      + (summary ? `<p><b>Кратко:</b><br/>${escapeHtml(summary).replace(/\r?\n/g, '<br/>')}</p>` : '')
+    html: (summary ? `<p>${escapeHtml(summary).replace(/\r?\n/g, '<br/>')}</p>` : '')
       + `<details><summary>Расшифровка</summary>${transcript}</details>`,
   };
 }

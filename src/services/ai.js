@@ -154,7 +154,7 @@ ${googleRows}
         safetySettings: safetySettings,
     });
 
-    // Voice processing must not inherit Sych's personality or web search tools.
+    // Speech recognition stays neutral and separate from the summary writer.
     const voiceModel = (systemInstruction, field) => genAI.getGenerativeModel({
         model: config.googleNativeModel,
         systemInstruction,
@@ -170,7 +170,6 @@ ${googleRows}
         },
     });
     this.transcriptionModel = voiceModel(prompts.voiceTranscriptionSystem(), 'text');
-    this.voiceSummaryModel = voiceModel(prompts.voiceSummarySystem(), 'summary');
   }
 
   rotateNativeKey() {
@@ -771,17 +770,37 @@ async generateFlavorText(task, result) {
     }
   }
 
-  async summarizeVoiceTranscript(text) {
+  async summarizeVoiceTranscript(text, speaker = '') {
     if (!shouldSummarizeVoice(text)) return '';
+    if (!this.openai) {
+      console.warn('[VOICE SUMMARY FAIL] Основная модель недоступна: не настроен API');
+      return '';
+    }
     const deadline = Date.now() + VOICE_SUMMARY_TIMEOUT_MS;
     try {
-      const summary = await withTimeout(this.executeNativeWithRetry(async () => {
+      const request = async (system, input, temperature) => {
         const remainingMs = deadline - Date.now();
         if (remainingMs <= 0) throw new Error('Истёк срок подготовки саммари');
-        const result = await this.voiceSummaryModel.generateContent(prompts.voiceSummary(text), { timeout: remainingMs });
-        return parseVoiceJson(result.response.text())?.summary;
-      }), VOICE_SUMMARY_TIMEOUT_MS, 'Саммари голосового');
-      return selectVoiceSummary(text, summary);
+        const result = await this.openai.chat.completions.create({
+          model: config.mainModel,
+          messages: [{ role: 'system', content: system }, { role: 'user', content: input }],
+          temperature, max_tokens: 2000, response_format: { type: 'json_object' },
+        }, { timeout: remainingMs, maxRetries: 0 });
+        storage.incrementStat('smart');
+        const summary = parseVoiceJson(result.choices?.[0]?.message?.content)?.summary;
+        if (typeof summary !== 'string') throw new Error('Некорректный формат саммари');
+        return summary.trim();
+      };
+      return await withTimeout((async () => {
+        const draft = await request(prompts.voiceSummarySystem(), prompts.voiceSummary(text, speaker), 0.1);
+        if (!draft) return '';
+        // Only the reviewed result is publishable. Also gives an oversized draft
+        // one chance to become shorter without cutting away a condition.
+        const summary = await request(prompts.voiceSummaryReviewSystem(), JSON.stringify({ speaker, transcript: text, draft }), 0);
+        const selected = selectVoiceSummary(text, summary);
+        if (!selected) console.warn(`[VOICE SUMMARY REJECT] Проверенный ответ пустой или превышает лимит (${summary.length} символов)`);
+        return selected;
+      })(), VOICE_SUMMARY_TIMEOUT_MS, 'Саммари голосового');
     } catch (error) {
       // The transcript is already usable; a failed optional summary must not lose it.
       console.error(`[VOICE SUMMARY FAIL] ${error.message}`);

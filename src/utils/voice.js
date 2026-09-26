@@ -1,5 +1,5 @@
 const VOICE_SUMMARY_THRESHOLD = 700;
-const VOICE_SUMMARY_MAX_CHARS = 600;
+const VOICE_SUMMARY_MAX_CHARS = 360;
 
 function parseVoiceJson(raw) {
   return JSON.parse(String(raw).trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, ''));

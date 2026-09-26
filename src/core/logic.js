@@ -376,9 +376,12 @@ async function processMessage(bot, msg) {
             // The mute may have changed while speech recognition was running.
             if (storage.isTopicMuted(chatId, threadId)) return;
             if (!isDirectlyCalled) {
-                transcription.summary = await ai.summarizeVoiceTranscript(transcription.text);
+                // A forwarded voice or uploaded audio need not belong to its sender.
+                const speaker = msg.voice && !msg.forward_origin && !msg.forward_from && !msg.forward_sender_name
+                    ? userName : '';
+                transcription.summary = await ai.summarizeVoiceTranscript(transcription.text, speaker);
                 if (storage.isTopicMuted(chatId, threadId)) return;
-                const voiceMessage = formatVoiceMessage(transcription, userName, media.duration);
+                const voiceMessage = formatVoiceMessage(transcription);
                 await sendRich(bot, chatId, voiceMessage, replyOpts(msg, threadId));
             }
         } else {
@@ -515,7 +518,7 @@ async function processMessage(bot, msg) {
 <b>Вижу и слышу</b>
 <ul>
 <li>Скажи в <b>голосовом</b> «Сыч, сколько будет два плюс два?» — отвечу как на текст. Голосовым реплаем на мой ответ можно продолжить разговор без имени</li>
-<li>Короткий <b>войс</b> покажу свёрнутой цитатой; для длинного добавлю краткое содержание и кнопку «Расшифровка» — полный текст открывается одним нажатием</li>
+<li>Короткий <b>войс</b> покажу свёрнутой цитатой; длинный перескажу в 2–3 предложениях своим языком. Под кнопкой «Расшифровка» — полный текст, открывается одним нажатием</li>
 <li>Кидай <b>фото/видео</b> — пойму, что там, прокомментирую и запомню для вопросов потом</li>
 <li>Кидай <b>PDF, DOCX, PPTX, XLSX, TXT или код</b> — прочитаю и отвечу на вопросы</li>
 <li>«Сыч, перескажи [YouTube-ссылка]» — возьму субтитры, а если они закрыты — посмотрю само видео</li>
