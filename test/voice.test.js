@@ -74,6 +74,7 @@ function loadAi({ transcript = 'Уточни адрес, пожалуйста.',
     './storage': { initGoogleStats() {}, incrementGoogleStat() {}, markGoogleKeyExhausted(index) { exhaustedKeys.push(index); }, incrementStat() {} },
     '../utils/rich': {}, './youtube': {}, './youtube-gemini': {}, '../utils/content-policy': {}, './research': {},
     '../utils/voice': voice,
+    '../utils/interjection': require('../src/utils/interjection'),
     '../utils/reminders': require('../src/utils/reminders'),
     '../utils/async': { withTimeout: (operation, timeout, label) => {
       const deadlineGuard = label === 'Расшифровка голосового';
@@ -392,6 +393,7 @@ test('message handler sends one voice card in the original topic and preserves f
     '../utils/rich': { ...rich, sendRich: async (...args) => { sent.push(args); } },
     '../utils/privacy': { isForgetMeRequest: () => false }, '../utils/profile-query': {},
     '../utils/commands': {}, '../services/documents': {},
+    '../utils/interjection': require('../src/utils/interjection'),
     '../utils/reminders': require('../src/utils/reminders'),
   }, { setTimeout, clearTimeout, setInterval, clearInterval, Math: { ...Math, random: () => 1 } });
   const msg = { message_id: 10, from: { id: 999, first_name: 'Имя' },

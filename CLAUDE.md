@@ -71,6 +71,7 @@ src/
    - Ban check → Thread resolution → Admin presence check → Command detection
    - Private messages forward to admin
    - Group messages go through AI processing
+   - Spontaneous activity: without a trigger word, the bot may add a single emoji reaction (`REACTION_CHANCE`) or interject with a short remark (`SPONTANEOUS_CHANCE`, per-chat cooldown `SPONTANEOUS_COOLDOWN_MIN`). The decision is a pure function in `src/utils/interjection.js`; the interjection reuses the normal pipeline with `isSpontaneous=true`, which disables search, URL reading and fact review. Business chats are skipped.
 3. **ai.js**: Multi-model response generation with search integration
 4. **storage.js**: Persist updates to JSON files
 
@@ -108,6 +109,10 @@ AI_API_KEY             # OpenRouter API key
 AI_BASE_URL            # Optional, defaults to OpenRouter
 SEARCH_PROVIDER        # tavily | perplexity | google
 TAVILY_API_KEY         # If using Tavily search
+SPONTANEOUS_CHANCE     # Шанс спонтанной реплики, 0.05 = 5%
+SPONTANEOUS_COOLDOWN_MIN # Пауза между спонтанными репликами в чате, минуты
+SPONTANEOUS_MAX_CHARS  # Потолок длины спонтанной реплики
+REACTION_CHANCE        # Шанс одиночной эмодзи-реакции, 0.015 = 1.5%
 GOOGLE_GEMINI_API_KEY  # Required for fallback
 GOOGLE_GEMINI_API_KEY_2 # Optional additional keys for rotation
 YOUTUBE_GEMINI_MODEL   # Direct public YouTube fallback, default gemini-3.5-flash-lite

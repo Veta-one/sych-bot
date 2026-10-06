@@ -5,6 +5,13 @@ function positiveNumber(value, fallback) {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
+// Доля от 0 до 1 — для шансов и вероятностей, которые задаются в .env.
+function ratio(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return Math.min(Math.max(parsed, 0), 1);
+}
+
 
 // Собираем ключи для Native Google (Fallback или Search)
 const geminiKeys = [];
@@ -81,5 +88,14 @@ module.exports = {
   officeTextMaxChars: Math.floor(positiveNumber(process.env.OFFICE_TEXT_MAX_CHARS, 100000)),
   officeExpandedMaxBytes: Math.floor(positiveNumber(process.env.OFFICE_EXPANDED_MAX_MB, 32) * 1024 * 1024),
 
+  // === СПОНТАННАЯ АКТИВНОСТЬ В ЧАТЕ ===
+  // Шанс влезть в разговор самому, без обращения по имени: 0.05 = 5% подходящих сообщений.
+  spontaneousChance: ratio(process.env.SPONTANEOUS_CHANCE, 0.05),
+  // Минимальная пауза между спонтанными репликами в одном чате, минуты.
+  spontaneousCooldownMs: positiveNumber(process.env.SPONTANEOUS_COOLDOWN_MIN, 15) * 60 * 1000,
+  // Потолок длины спонтанной реплики, символы.
+  spontaneousMaxChars: Math.floor(positiveNumber(process.env.SPONTANEOUS_MAX_CHARS, 300)),
+  // Шанс одиночной эмодзи-реакции на чужое сообщение (раньше было зашито 0.015).
+  reactionChance: ratio(process.env.REACTION_CHANCE, 0.015),
   triggerRegex: /(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i,
 };

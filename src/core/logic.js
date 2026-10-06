@@ -8,6 +8,11 @@ const { isForgetMeRequest } = require('../utils/privacy');
 const { shouldHandleProfileQuery } = require('../utils/profile-query');
 const { resolveAddressedCommand } = require('../utils/commands');
 const { PendingReminders, reminderConfirmation } = require('../utils/reminders');
+const {
+  MIN_MESSAGE_CHARS,
+  shouldInterject,
+  trimInterjection,
+} = require('../utils/interjection');
 const pendingReminders = new PendingReminders();
 const {
   buildOfficePromptContext,
@@ -21,6 +26,10 @@ const BUFFER_SIZE = 20;
 const CHAT_BUFFER_SIZE = 50; // Анализируем чат каждые 50 сообщений
 // Храним 10 последних активных юзеров для удобного бана
 const recentActiveUsers = []; 
+
+// Время последней спонтанной реплики по чатам. Живёт в памяти процесса: после
+// перезапуска кулдаун начинается заново — для редкого вмешательства это допустимо.
+const lastInterjectionAt = new Map();
 
 // === ГЕНЕРАТОР ОТМАЗОК СЫЧА ===
 function getSychErrorReply(errText) {
@@ -89,6 +98,40 @@ function addToHistory(chatId, sender, text, userId = null, relatedUserId = null)
     chatHistory[chatId].shift();
   }
   return entry; // возвращаем запись, чтобы её можно было дообогатить (напр. описанием картинки)
+}
+
+// Спонтанная реплика: бот влезает в чужой разговор сам, без обращения по имени.
+// Идёт тем же путём, что и обычный ответ (характер, досье, контекст чата), но
+// коротко и без поиска: isSpontaneous отключает исследование и чтение ссылок.
+async function sendSpontaneousReply({ bot, msg, chatId, threadId, text, userId, senderName }) {
+  try {
+    const userProfile = storage.getProfile(chatId, userId);
+    const chatProfile = storage.getChatProfile(chatId);
+
+    const reply = await ai.getResponse(
+      chatHistory[chatId] || [],
+      { sender: senderName, text: text, replyText: '' },
+      null,
+      'image/jpeg',
+      '',
+      userProfile,
+      true, // isSpontaneous
+      chatProfile,
+      ''
+    );
+
+    const trimmed = trimInterjection(reply, config.spontaneousMaxChars);
+    if (!trimmed) {
+      console.log(`[INTERJECTION] ${chatId}: сказать нечего, молчу`);
+      return;
+    }
+
+    await sendRich(bot, chatId, { markdown: normalizeMd(trimmed) }, replyOpts(msg, threadId));
+    addToHistory(chatId, 'Сыч', trimmed, config.botId, userId);
+    console.log(`[INTERJECTION] ${chatId}: ${trimmed.slice(0, 80)}`);
+  } catch (error) {
+    console.error(`[INTERJECTION ERROR] ${error.message}`);
+  }
 }
 
 function forgetUserFromRuntime(userId) {
@@ -524,6 +567,7 @@ async function processMessage(bot, msg) {
 <li>«Сыч, перескажи [YouTube-ссылка]» — возьму субтитры, а если они закрыты — посмотрю само видео</li>
 <li>Кидай ссылку на картинку — скачаю и посмотрю</li>
 <li>Гуглю актуальное: курсы, новости, погода. «Сыч, проверь, это правда?» или «Откуда информация?» — проверю источники, дам ссылки и скажу, если подтверждения не нашёл</li>
+<li>Иногда я влезаю в разговор сам, без обращения, — короткой репликой. Хочешь тишины: <code>/mute${commandSuffix}</code></li>
 <li>«Сыч напомни завтра в 10 купить молоко» — уведомлю позже. Реплаем на анонс: «Сыч напомни завтра в 12» или «Сыч напомни за час до начала»</li>
 <li>«Сыч напомни, сколько дней в неделе» — отвечу сейчас. Если для уведомления не хватает времени или темы, уточню: ответь реплаем на мой вопрос. Можно голосом. Без указанного пояса — Екатеринбург (UTC+5), можно указать МСК</li>
 </ul>
@@ -723,18 +767,35 @@ async function processMessage(bot, msg) {
   // Бот отвечает ТОЛЬКО когда его явно вызвали (тег "сыч/sych") или ответили на его сообщение
   const shouldAnswer = isDirectlyCalled;
 
-  // === ЛОГИКА РЕАКЦИЙ (15%) ===
-  if (!shouldAnswer && text.length > 10 && !isReplyToBot && Math.random() < 0.015) {
-      
-    // Берем контекст (последние 10 сообщений), чтобы реакция была в тему
-    const historyBlock = chatHistory[chatId].slice(-15).map(m => `${m.role}: ${m.text}`).join('\n');
-    
-    // Передаем истории вместе с текущим текстом
-    ai.determineReaction(historyBlock + `\nСообщение для реакции: ${text}`).then(async (emoji) => {
-        if (emoji) {
-            try { await bot.setMessageReaction(chatId, msg.message_id, { reaction: [{ type: 'emoji', emoji: emoji }] }); } catch (e) {}
-        }
-    });
+  // === СПОНТАННАЯ АКТИВНОСТЬ: РЕАКЦИЯ ИЛИ РЕПЛИКА ===
+  // Пороги — в config.js (.env: REACTION_CHANCE, SPONTANEOUS_CHANCE,
+  // SPONTANEOUS_COOLDOWN_MIN, SPONTANEOUS_MAX_CHARS).
+  // В business-переписках молчим: там бот работает ассистентом, а не участником чата.
+  if (!shouldAnswer && !isReplyToBot && !msg.business_connection_id && text.length > MIN_MESSAGE_CHARS) {
+
+    // Берем контекст (последние 15 сообщений), чтобы реакция была в тему
+    const historyBlock = (chatHistory[chatId] || []).slice(-15).map(m => `${m.role}: ${m.text}`).join('\n');
+
+    // 1. Одиночная эмодзи-реакция на чужое сообщение
+    if (Math.random() < config.reactionChance) {
+        // Передаем истории вместе с текущим текстом
+        ai.determineReaction(historyBlock + `\nСообщение для реакции: ${text}`).then(async (emoji) => {
+            if (emoji) {
+                try { await bot.setMessageReaction(chatId, msg.message_id, { reaction: [{ type: 'emoji', emoji: emoji }] }); } catch (e) {}
+            }
+        });
+    }
+
+    // 2. Спонтанная реплика фразой — с кулдауном на чат
+    if (shouldInterject({
+        chance: config.spontaneousChance,
+        cooldownMs: config.spontaneousCooldownMs,
+        lastAt: lastInterjectionAt.get(chatId) || 0,
+        random: Math.random,
+    })) {
+        lastInterjectionAt.set(chatId, Date.now());
+        sendSpontaneousReply({ bot, msg, chatId, threadId, text, userId, senderName });
+    }
 }
 
   // === ОТПРАВКА ОТВЕТА ===

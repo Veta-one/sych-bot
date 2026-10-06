@@ -378,7 +378,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   let extractedText = externalContext || "";
   let youtubeFallbackQuery = null;
   const urlM = (currentMessage.text || '').match(/https?:\/\/[^\s)]+/);
-  if (urlM && !/\.(jpg|jpeg|png|webp|gif|bmp)(\?|$)/i.test(urlM[0])) {
+  if (!isSpontaneous && urlM && !/\.(jpg|jpeg|png|webp|gif|bmp)(\?|$)/i.test(urlM[0])) {
       const rest = currentMessage.text.replace(urlM[0], '').trim();
       const wantsRead = rest.length < 80 || /перескаж|статья|статью|ссылк|прочит|разбер|что (там|тут|пишут|по этой)|открой|резюм|tl;?dr|о чём|кратко|суть/i.test(currentMessage.text.toLowerCase());
       if (wantsRead) {
@@ -451,7 +451,13 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       currentMessage.text,
       Boolean(extractedText)
   );
-  const searchDecision = youtubeFallbackQuery
+  const searchDecision = isSpontaneous
+      ? {
+          needsSearch: false,
+          searchQuery: null,
+          reason: "спонтанная реплика — поиск не запускаем",
+        }
+      : youtubeFallbackQuery
       ? {
           needsSearch: true,
           searchQuery: youtubeFallbackQuery,

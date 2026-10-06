@@ -29,6 +29,7 @@ function harness() {
       formatVoiceMessage: x => ({ html: `VOICE CARD: ${x.text}` }) },
     '../utils/privacy': { isForgetMeRequest: () => false }, '../utils/profile-query': {},
     '../utils/commands': {}, '../services/documents': {}, '../utils/reminders': require('../src/utils/reminders'),
+    '../utils/interjection': require('../src/utils/interjection'),
   };
   const box = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/core/logic.js'), 'utf8'), {
