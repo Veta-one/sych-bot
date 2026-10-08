@@ -386,6 +386,7 @@ test('message handler sends one voice card in the original topic and preserves f
   const result = { text: longTranscript, summary: usefulSummary };
   const handler = loadModule('core/logic.js', {
     './ephemeral': require('../src/core/ephemeral'),
+    '../services/publication': require('../src/services/publication'),
     '../services/storage': { isBanned: () => false, hasChat: () => true, updateChatName() {},
       trackUser() {}, isTopicMuted: () => false, getChatProfile: () => ({ topic: 'test' }) },
     '../services/ai': { transcribeAudio: async () => result, summarizeVoiceTranscript: async (text, speaker) => { speakers.push(speaker); return usefulSummary; } },

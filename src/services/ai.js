@@ -338,15 +338,19 @@ async reviewEvidence(prompt) {
   });
 }
 
-async finalizeResearchedAnswer(answer, result) {
+async finalizeResearchedAnswer(answer, result, responsePolicy = {}) {
   if (!result) return answer;
-  if (!result.claims.length) return conservativeAnswer(result);
+  if (!result.claims.length) {
+    if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
+    return conservativeAnswer(result);
+  }
   try {
     const audit = await withTimeout(this.reviewEvidence(answerAuditPrompt(answer, result)), 16000, 'Проверка готового ответа');
     if (audit?.approved === true) return answer;
     if (audit?.approved === false && typeof audit.answer === 'string' && audit.answer.trim()) return audit.answer.trim();
   } catch (error) { console.error(`[ANSWER AUDIT FAIL] ${error.message}`); }
   // Failure of the verifier must not release an unchecked confident draft.
+  if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
   return conservativeAnswer(result);
 }
   
@@ -372,7 +376,7 @@ async extractUrl(url, { full = false } = {}) {
 }
 
 // === ОСНОВНОЙ ОТВЕТ ===
-async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false, chatProfile = null, externalContext = "") {
+async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false, chatProfile = null, externalContext = "", responsePolicy = {}) {
   this.resetStatsIfNeeded();
   console.log(`[DEBUG AI] getResponse вызван.`);
 
@@ -487,8 +491,12 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       console.log(`[RESEARCH] sources=${result.sources.length} claims=${result.claims.length} sufficient=${result.sufficient} errors=${result.errors.length}`);
       // No evidence means no factual draft to improvise around. This also avoids
       // paying for a writer and another verifier during a search outage.
-      if (!result.claims.length && !result.imageUrls.length) return conservativeAnswer(result);
+      if (!result.claims.length && !result.imageUrls.length) {
+          if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
+          return conservativeAnswer(result);
+      }
   } else if (searchDecision.unavailable) {
+      if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
       researchContext = '\nПроверка необходимости поиска недоступна. Не утверждай, что проверил внешние факты. Для актуальных сведений явно скажи, что сейчас их подтвердить не удалось.\n';
   }
 
@@ -551,18 +559,18 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
               console.warn(`[AI TRUNCATED] Ответ обрезан лимитом токенов (finish_reason=length, max_tokens=${config.maxOutputTokens}). Подними config.maxOutputTokens.`);
           }
           storage.incrementStat('smart');
-          return this.finalizeResearchedAnswer(choice.message.content.replace(/^thought[\s\S]*?\n\n/i, ''), researchResult);
+          return this.finalizeResearchedAnswer(choice.message.content.replace(/^thought[\s\S]*?\n\n/i, ''), researchResult, responsePolicy);
       } catch (e) {
           console.error(`[API SMART FAIL] ${e.message}. Fallback to Native...`);
       }
   }
 
   // 4. FALLBACK (Если API упал или ключа нет)
-  return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile, extractedText, researchContext, researchResult);
+  return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile, extractedText, researchContext, researchResult, responsePolicy);
 }
 
 // Helper для Native вызова (чтобы не дублировать код)
-async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile = null, extractedText = "", researchContext = "", researchResult = null) {
+async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile = null, extractedText = "", researchContext = "", researchResult = null, responsePolicy = {}) {
     const relevantHistory = history.slice(-20);
     const contextStr = relevantHistory.map(m => `${m.role}: ${m.text}`).join('\n');
 
@@ -631,7 +639,7 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
                text += `\n\n<details><summary>Источники</summary>\n\n` + unique.map((l, i) => `${i + 1}. ${l}`).join('\n') + `\n\n</details>`;
            }
       }
-      return this.finalizeResearchedAnswer(text, researchResult);
+      return this.finalizeResearchedAnswer(text, researchResult, responsePolicy);
     });
 }
 

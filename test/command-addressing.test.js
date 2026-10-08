@@ -45,6 +45,7 @@ function loadHandler() {
   };
   const dependencies = {
     './ephemeral': require('../src/core/ephemeral'),
+    '../services/publication': require('../src/services/publication'),
     '../services/storage': storage,
     '../services/ai': {},
     '../config': { adminId: 999, botId: 888, triggerRegex: /сыч|sych/i },

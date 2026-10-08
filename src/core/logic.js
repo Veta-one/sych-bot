@@ -3,6 +3,7 @@ const ai = require('../services/ai');
 const config = require('../config');
 const axios = require('axios');
 const { createEphemeralHandler, isEphemeralMessage } = require('./ephemeral');
+const { createPublication } = require('../services/publication');
 const { exec } = require('child_process');
 const { sendRich, escapeHtml, normalizeMd, formatVoiceMessage, quoteFallback } = require('../utils/rich');
 const { isForgetMeRequest } = require('../utils/privacy');
@@ -25,6 +26,8 @@ const recentActiveUsers = [];
 const handleEphemeral = createEphemeralHandler({
     config, storage, ai, sendRich,
     getPublicHistory: chatId => chatHistory[chatId] || [],
+    publishMessage: (bot, msg, answer, target) => createPublication(bot, msg, target).send(answer),
+    onPublicMessage: (chatId, text) => addToHistory(chatId, 'Сыч', text, config.botId),
     download: async url => axios.get(url, { responseType: 'arraybuffer', timeout: 15000, maxContentLength: 20 * 1024 * 1024 }),
 });
 
@@ -218,6 +221,7 @@ async function processMessage(bot, msg) {
         if (!addressedCommand) return;
     }
     const command = addressedCommand?.name || '';
+    if (command === '/ask' || command === '/say') return;
     const commandSuffix = addressedCommand ? `@${addressedCommand.username}` : '';
 
     const isBusinessMessage = Boolean(msg.business_connection_id);
@@ -541,13 +545,6 @@ async function processMessage(bot, msg) {
 
   if (command === '/help' || command === '/start') {
     const helpText = `<h3>🦉 Что я умею</h3>
-<b>Скрытые команды владельца в группе</b>
-<ul>
-<li><code>/ask${commandSuffix} вопрос</code> реплаем на сообщение или картинку: ответ видишь только ты. К своей команде можно добавить фото, текст и ссылку. Для фото команда идёт в начале подписи</li>
-<li><code>/mute${commandSuffix}</code> выключает или включает публичную активность во всём чате. Скрытые команды доступны, напоминания ждут включения</li>
-<li><code>/ban${commandSuffix}</code> реплаем на участника: перестаю отвечать и реагировать на него только в этом чате. Доступ к группе не блокирую. Снять запрет: <code>/unban${commandSuffix} ID</code></li>
-</ul>
-<p>Используй актуальный Telegram и проверь, что клиент показывает скрытый режим команды. Частные вопросы не попадают в общую память. Сначала появляется «Думаю…», затем она заменяется ответом. После закрытия приложения скрытые сообщения могут исчезнуть.</p>
 <b>Вижу и слышу</b>
 <ul>
 <li>Скажи в <b>голосовом</b> «Сыч, сколько будет два плюс два?» — отвечу как на текст. Голосовым реплаем на мой ответ можно продолжить разговор без имени</li>
@@ -578,11 +575,10 @@ async function processMessage(bot, msg) {
 </details>
 <details><summary>⚙️ Настройки</summary>
 <ul>
-<li><code>/mute${commandSuffix}</code> — режим тишины</li>
 <li><code>/reset${commandSuffix}</code> — сброс памяти</li>
 <li><code>/version${commandSuffix}</code> — версия бота</li>
 </ul>
-<p>Обычные команды выполняются только с адресом этого бота после @, в том числе в личке. В подтверждённом скрытом обновлении Telegram можно выбрать команду из меню без ручного адреса. Команды другим ботам игнорируются.</p>
+<p>Команды выполняются только с адресом этого бота после @, в том числе в личке. Команды другим ботам игнорируются.</p>
 </details>
 <blockquote>ver: ${config.version}</blockquote>`;
     try { return await sendRich(bot, chatId, { html: helpText }, baseOpts(msg, threadId)); } catch (e) {}

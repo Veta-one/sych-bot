@@ -164,6 +164,28 @@ test('search outage reaches both writers as missing evidence, never silently as 
   assert.equal(calls.length, 0);
 });
 
+test('public composition fails privately instead of returning a research error for publication', async () => {
+  const { ai, calls } = harness();
+  ai.performSearch = async () => [];
+  await assert.rejects(ai.getResponse([], { text: 'Сыч проверь новость', sender: 'Сыч' },
+    null, undefined, '', null, false, null, '', { failOnUnavailable: true }), /PUBLIC_RESPONSE_UNAVAILABLE/);
+  assert.equal(calls.length, 0);
+});
+
+test('public composition rejects unavailable verification in both writer paths', async () => {
+  const { ai } = harness();
+  ai.reviewEvidence = async prompt => prompt.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА') ? null
+    : { claims: [{ claim: 'Kazakhstan supported.', status: 'supported', sourceId: 'S1', quote: 'Kazakhstan is supported for Claude.ai.' }], sufficient: true };
+  const input = { text: 'Сыч проверь поддерживаемые страны', sender: 'Сыч' };
+  await assert.rejects(ai.getResponse([], input, null, undefined, '', null, false, null, '',
+    { failOnUnavailable: true }), /PUBLIC_RESPONSE_UNAVAILABLE/);
+  ai.openai.chat.completions.create = async () => { throw Error('Writer offline'); };
+  ai.keys = ['synthetic'];
+  ai.nativeModel = { generateContent: async () => ({ response: { text: () => 'Draft answer', candidates: [{}] } }) };
+  await assert.rejects(ai.getResponse([], input, null, undefined, '', null, false, null, '',
+    { failOnUnavailable: true }), /PUBLIC_RESPONSE_UNAVAILABLE/);
+});
+
 test('approved researched answers can link to any domain outside the source-page URLs', async () => {
   const { ai } = harness();
   const result = { claims: [{ claim: 'A source reports the project.', status: 'supported', url: 'https://example.org/article' }], gaps: [], errors: [] };

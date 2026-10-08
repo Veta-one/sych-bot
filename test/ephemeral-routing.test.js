@@ -19,16 +19,19 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
-function harness({ answer, send, download, now, answerTimeoutMs, integration = false } = {}) {
+function harness({ answer, send, download, publish, now, answerTimeoutMs, integration = false } = {}) {
   const state = { sent: [], answers: [], downloads: [], files: [], publicEffects: [],
-    moderation: [], saves: 0, muted: new Set(), banned: new Map() };
+    moderation: [], saves: 0, muted: new Set(), topicMuted: new Set(), banned: new Map(),
+    publications: [], publicRecorded: [], events: [], instructionReads: 0, profileReads: [] };
   let nextId = 500;
   const config = { adminId: OWNER, botId: BOT, contextSize: 30, triggerRegex: /сыч|sych/i };
   const publicHistory = [{ role: 'Участник', text: 'synthetic-public-context', userId: String(OTHER) }];
   const record = name => (...args) => state.publicEffects.push({ name, args });
   const storage = {
-    getUserInstruction: () => 'synthetic-owner-instruction',
-    getProfile: () => ({ realName: 'Владелец' }),
+    data: { chats: { [CHAT]: { users: { [OTHER]: '@synthetic_other' } } } },
+    profiles: { [CHAT]: { [OTHER]: { realName: 'Участник', username: '@synthetic_other' } } },
+    getUserInstruction: () => { state.instructionReads++; return 'synthetic-owner-instruction'; },
+    getProfile: (...args) => { state.profileReads.push(args); return { realName: 'Владелец' }; },
     getChatProfile: () => ({ topic: 'synthetic-topic' }),
     toggleChatMute: chat => {
       if (state.muted.has(chat)) state.muted.delete(chat); else state.muted.add(chat);
@@ -44,7 +47,7 @@ function harness({ answer, send, download, now, answerTimeoutMs, integration = f
     unbanUser: record('unbanUser'),
     unbanUserInChat: record('unbanUserInChat'),
     isChatMuted: chat => state.muted.has(chat),
-    isTopicMuted: chat => state.muted.has(chat),
+    isTopicMuted: (chat, thread) => state.muted.has(chat) || state.topicMuted.has(`${chat}:${thread}`),
     toggleMute: (chat, thread) => { record('toggleMute')(chat, thread); return true; },
     hasChat: () => true,
     updateChatName: record('updateChatName'),
@@ -52,11 +55,14 @@ function harness({ answer, send, download, now, answerTimeoutMs, integration = f
     bulkUpdateProfiles: record('bulkUpdateProfiles'),
     updateChatProfile: record('updateChatProfile'),
     getProfilesForUsers: () => ({}),
+    getChat: () => ({ users: { [OTHER]: '@synthetic_other' } }),
+    findUserIdByUsername: username => String(username).replace(/^@/, '').toLowerCase() === 'synthetic_other' ? OTHER : null,
     forgetUser: async () => ({ profilesRemoved: 0, chatReferencesRemoved: 0, remindersRemoved: 0,
       instructionsRemoved: 0, chatProfilesReset: 0, backupsScrubbed: 0 }),
   };
   const ai = {
     async getResponse(...args) {
+      state.events.push('ai');
       const call = { history: args[0].map(entry => ({ ...entry })), input: { ...args[1] },
         images: args[2], instruction: args[4], profile: args[5], private: isPrivateWork() };
       state.answers.push(call);
@@ -70,6 +76,7 @@ function harness({ answer, send, download, now, answerTimeoutMs, integration = f
     transcribeAudio: async () => { record('transcribeAudio')(); return { text: 'Сыч, ответь' }; },
   };
   const sendRich = async (bot, chat, content, opts = {}) => {
+    state.events.push(opts.ephemeral ? 'private-send' : 'public-rich-send');
     const call = { chat, content, opts };
     state.sent.push(call);
     if (send) return send(call, state.sent.length);
@@ -77,6 +84,7 @@ function harness({ answer, send, download, now, answerTimeoutMs, integration = f
       : { messageId: ++nextId };
   };
   const get = async url => {
+    state.events.push('download');
     state.downloads.push(url);
     return download ? download(url) : Buffer.from(`synthetic-image:${url}`);
   };
@@ -88,8 +96,18 @@ function harness({ answer, send, download, now, answerTimeoutMs, integration = f
     setMessageReaction: async (...args) => { record('setMessageReaction')(...args); },
     leaveChat: async (...args) => { record('leaveChat')(...args); },
   };
+  const publishMessage = async (botInstance, msg, text, target) => {
+    state.events.push('publish');
+    const call = { bot: botInstance, msg, text, target, private: isPrivateWork() };
+    state.publications.push(call);
+    return publish ? publish(call) : { messageId: ++nextId, text };
+  };
+  const onPublicMessage = (chat, text) => {
+    state.events.push('record-public');
+    state.publicRecorded.push({ chat, text });
+  };
   const handler = createEphemeralHandler({ config, storage, ai, sendRich, download: get,
-    getPublicHistory: () => publicHistory, ...(now ? { now } : {}),
+    getPublicHistory: () => publicHistory, publishMessage, onPublicMessage, ...(now ? { now } : {}),
     ...(answerTimeoutMs ? { answerTimeoutMs } : {}) });
   let processMessage;
   if (integration) {
@@ -101,6 +119,9 @@ function harness({ answer, send, download, now, answerTimeoutMs, integration = f
       '../utils/privacy': { isForgetMeRequest: () => false }, '../utils/profile-query': {},
       '../utils/commands': require('../src/utils/commands'),
       '../utils/reminders': require('../src/utils/reminders'), '../services/documents': {},
+      '../services/publication': { createPublication: (botInstance, msg, target) => ({
+        send: text => publishMessage(botInstance, msg, text, target),
+      }) },
     };
     const box = { exports: {} };
     vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/core/logic.js'), 'utf8'), {
@@ -571,4 +592,345 @@ test('a concurrent duplicate mute cannot toggle the group back on', async () => 
   confirmation.resolve({ ephemeralMessageId: 701 });
   await first;
   assertPrivateOnly(h.state);
+});
+
+test('say publishes one generated result after a private acknowledgement and records only the delivered text', async () => {
+  const h = harness({ answer: async () => 'synthetic-model-composition',
+    publish: async () => ({ messageId: 701, text: 'synthetic-delivered-public-composition' }) });
+  await h.handle({ text: `/say ${SECRET}`, message_thread_id: 184,
+    reply_to_message: { message_id: 12, from: { id: OTHER }, text: 'public-source' } });
+  assert.equal(h.state.answers.length, 1);
+  const call = h.state.answers[0];
+  assert.deepEqual(call.history, h.publicHistory);
+  assert.equal(call.input.sender, 'Сыч');
+  assert.equal(call.input.replyText, 'public-source');
+  assert.ok(call.input.text.includes(SECRET));
+  assert.equal(call.private, true);
+  assert.equal(call.profile, null);
+  assert.equal(h.state.instructionReads, 0);
+  assert.deepEqual(h.state.profileReads, []);
+  assert.ok(call.instruction.length > 0, 'composition has its own directive');
+  assert.equal(call.instruction.includes('synthetic-owner-instruction'), false);
+  assert.equal(h.state.publications.length, 1);
+  assert.equal(h.state.publications[0].text, 'synthetic-model-composition');
+  assert.equal(h.state.publications[0].msg.reply_to_message.message_id, 12);
+  assert.deepEqual(h.state.publicRecorded, [{ chat: CHAT, text: 'synthetic-delivered-public-composition' }]);
+  assert.equal(JSON.stringify(h.state.publicRecorded).includes(SECRET), false);
+  assert.deepEqual(h.state.events, ['private-send', 'ai', 'publish', 'record-public', 'private-send']);
+  assertPrivateOnly(h.state);
+});
+
+test('say accepts both image sources but publishes only the composition returned by AI', async () => {
+  const h = harness({ answer: async () => 'public-image-commentary' });
+  await h.handle({ text: undefined, caption: '/say сравни эти картинки https://article.example/page',
+    photo: [{ file_id: 'private-request-photo' }],
+    reply_to_message: { message_id: 12, from: { id: OTHER }, caption: 'public-source-caption',
+      photo: [{ file_id: 'public-source-photo' }] } });
+  assert.equal(h.state.answers[0].images.length, 2);
+  assert.deepEqual(h.state.files.sort(), ['private-request-photo', 'public-source-photo']);
+  assert.equal(h.state.publications.length, 1);
+  assert.equal(h.state.publications[0].text, 'public-image-commentary');
+  assert.equal(h.state.events[0], 'private-send');
+  assert.ok(h.state.events.indexOf('ai') > h.state.events.indexOf('download'));
+  assertPrivateOnly(h.state);
+});
+
+test('say keeps explicit tracked and untracked usernames independent of historical user IDs', async () => {
+  for (const username of ['synthetic_other', 'synthetic_untracked']) {
+    const h = harness({ answer: async () => '{{recipient}}, привет.' });
+    await h.handle({ text: `/say @${username} поздоровайся с участником` });
+    assert.equal(h.state.publications.length, 1);
+    const target = h.state.publications[0].target;
+    assert.equal(String(target.username).replace(/^@/, ''), username);
+    assert.equal(target.id, undefined, 'a reassigned explicit handle must not bind to a historical user ID');
+    assertPrivateOnly(h.state);
+  }
+  const h = harness();
+  await h.handle({ text: '/say отметь пользователя и поприветствуй' });
+  assert.equal(h.state.publications.length, 0);
+  assert.equal(h.state.answers.length, 0);
+  assertPrivateOnly(h.state);
+});
+
+test('stale or duplicate cached handles cannot override the explicitly requested username', async () => {
+  for (const users of [{ [OTHER]: '@synthetic_reassigned' },
+    { [OTHER]: '@synthetic_reassigned', 77: '@synthetic_reassigned' }]) {
+    const h = harness({ answer: async () => '{{recipient}}, привет.' });
+    h.storage.data.chats[CHAT].users = users;
+    h.storage.profiles[CHAT][OTHER] = { realName: 'Previous owner', username: '@synthetic_reassigned' };
+    h.storage.profiles[CHAT][77] = { realName: 'Another old owner', username: '@synthetic_reassigned' };
+    await h.handle({ text: '/say тегни @synthetic_reassigned и скажи привет' });
+    assert.equal(h.state.publications.length, 1);
+    assert.deepEqual(h.state.publications[0].target, { username: 'synthetic_reassigned' });
+    assertPrivateOnly(h.state);
+  }
+});
+
+test('an instruction to mention the replied author takes priority over an incidental username in the body', async () => {
+  const source = { message_id: 12, from: { id: OTHER, first_name: 'Боб', username: 'synthetic_bob' }, text: 'public-source' };
+  for (const text of [
+    '/say отметь автора и скажи, что @synthetic_alice его ждёт',
+    '/say тегни его и скажи, что @synthetic_alice его ждёт',
+    '/say упомяни её и скажи, что @synthetic_alice ждёт',
+  ]) {
+    const h = harness({ answer: async () => '{{recipient}}, тебя ждут.' });
+    await h.handle({ text, reply_to_message: source });
+    assert.equal(h.state.publications.length, 1);
+    assert.equal(h.state.publications[0].target.id, OTHER);
+    assert.equal(h.state.publications[0].target.username, 'synthetic_bob');
+    assertPrivateOnly(h.state);
+  }
+});
+
+test('an explicit instruction to mention another handle does not switch to the replied author', async () => {
+  const h = harness({ answer: async () => '{{recipient}}, привет.' });
+  await h.handle({ text: '/say тегни @synthetic_alice и скажи привет', reply_to_message: {
+    message_id: 12, from: { id: OTHER, first_name: 'Боб', username: 'synthetic_bob' }, text: 'public-source',
+  } });
+  assert.equal(h.state.publications.length, 1);
+  assert.deepEqual(h.state.publications[0].target, { username: 'synthetic_alice' });
+  assertPrivateOnly(h.state);
+});
+
+test('say can mention a replied human without a username, including a locally banned participant', async () => {
+  const h = harness({ answer: async () => '{{recipient}}, привет.' });
+  h.storage.banUserInChat(CHAT, OTHER, 'synthetic-local-ban');
+  await h.handle({ text: '/say отметь автора и скажи привет', reply_to_message: {
+    message_id: 12, from: { id: OTHER, first_name: 'Ася' }, text: 'public-source',
+  } });
+  assert.equal(h.state.publications.length, 1);
+  assert.equal(h.state.publications[0].target.id, OTHER);
+  assert.equal(h.state.publications[0].target.first_name, 'Ася');
+  assert.equal(h.state.publications[0].target.username, undefined);
+  assertPrivateOnly(h.state);
+});
+
+test('say cannot use private ask history or become a cached private dialog itself', async () => {
+  const h = harness();
+  await h.handle({ text: '/ask old-private-secret' });
+  h.state.instructionReads = 0;
+  h.state.profileReads.length = 0;
+  await h.handle({ text: '/say independent-public-composition' });
+  assert.deepEqual(h.state.answers[1].history, h.publicHistory);
+  assert.equal(h.state.answers[1].profile, null);
+  assert.equal(h.state.instructionReads, 0);
+  assert.deepEqual(h.state.profileReads, []);
+  const sayReceiptId = h.state.sent.at(-1).opts.ephemeral.editId;
+  await h.handle({ text: 'продолжи', reply_to_message: { message_id: 0,
+    ephemeral_message_id: sayReceiptId, date: 1791446400, from: { id: BOT } } });
+  assert.equal(h.state.answers.length, 2, 'say receipts are not cached private answers');
+  assert.equal(h.state.publications.length, 1);
+  assert.equal(JSON.stringify(h.state.publicRecorded).includes('old-private-secret'), false);
+});
+
+test('say rejects every private replied source before AI, even if it claims a public message ID', async () => {
+  const h = harness();
+  for (const source of [
+    { message_id: 0, ephemeral_message_id: 51, from: { id: BOT }, text: 'private-answer' },
+    { message_id: 12, ephemeral_message_id: -51, from: { id: OTHER }, text: 'private-source' },
+  ]) await h.handle({ text: '/say republish source', reply_to_message: source });
+  assert.equal(h.state.answers.length, 0);
+  assert.equal(h.state.publications.length, 0);
+  assert.equal(h.state.publicRecorded.length, 0);
+  assertPrivateOnly(h.state);
+});
+
+test('say respects whole-chat and topic mutes before any AI work', async () => {
+  for (const wholeChat of [true, false]) {
+    const h = harness();
+    if (wholeChat) h.state.muted.add(CHAT);
+    else h.state.topicMuted.add(`${CHAT}:184`);
+    await h.handle({ text: '/say публичное сообщение', message_thread_id: 184 });
+    assert.equal(h.state.answers.length, 0);
+    assert.equal(h.state.publications.length, 0);
+    assertPrivateOnly(h.state);
+  }
+});
+
+test('a mute applied while say is being generated prevents public publication and history writes', async () => {
+  const answer = deferred();
+  const h = harness({ answer: () => answer.promise });
+  const pending = h.handle({ text: '/say slow-public-composition' });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.state.answers.length, 1);
+  await h.handle({ text: '/mute' });
+  answer.resolve('synthetic-late-public-composition');
+  await pending;
+  assert.equal(h.state.publications.length, 0);
+  assert.equal(h.state.publicRecorded.length, 0);
+  assertPrivateOnly(h.state);
+});
+
+test('an inherited topic mute or forgetting during say generation cancels the pending publication', async () => {
+  for (const action of ['topic-mute', 'forget']) {
+    const answer = deferred();
+    const h = harness({ answer: () => answer.promise });
+    const pending = h.handle({ text: '/say slow-public-composition', reply_to_message: {
+      message_id: 12, message_thread_id: 184, from: { id: OTHER }, text: 'public-source',
+    } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(h.state.answers.length, 1);
+    if (action === 'topic-mute') h.state.topicMuted.add(`${CHAT}:184`);
+    else h.handler.forgetUser(OWNER);
+    answer.resolve('synthetic-late-public-composition');
+    await pending;
+    assert.equal(h.state.publications.length, 0, action);
+    assert.equal(h.state.publicRecorded.length, 0, action);
+    assertPrivateOnly(h.state);
+  }
+});
+
+test('failed, empty or timed-out say generation never reaches public delivery', async () => {
+  for (const setup of [
+    { answer: async () => { throw new Error('synthetic-private-model-error'); } },
+    { answer: async () => '' },
+    { answer: () => new Promise(() => {}), answerTimeoutMs: 5 },
+  ]) {
+    const h = harness(setup);
+    await h.handle({ text: `/say ${SECRET}` });
+    assert.equal(h.state.publications.length, 0);
+    assert.equal(h.state.publicRecorded.length, 0);
+    assert.equal(JSON.stringify(h.state.sent).includes('synthetic-private-model-error'), false);
+    assertPrivateOnly(h.state);
+  }
+});
+
+test('say publication errors stay private and do not retry even when the same update is redelivered', async () => {
+  const h = harness({ publish: async () => { throw new Error('synthetic-private-network-error'); } });
+  const msg = h.message({ text: `/say ${SECRET}` });
+  await h.handler(h.bot, msg);
+  await h.handler(h.bot, { ...msg });
+  assert.equal(h.state.publications.length, 1, 'an uncertain public send cannot be retried by duplicate updates');
+  assert.equal(h.state.publicRecorded.length, 0);
+  assert.equal(h.state.answers.length, 1);
+  assert.equal(JSON.stringify(h.state.sent).includes('synthetic-private-network-error'), false);
+  assertPrivateOnly(h.state);
+});
+
+test('say acknowledgement failure stops generation and cannot publish', async () => {
+  const h = harness({ send: async () => { throw new Error('synthetic-private-ack-error'); } });
+  await h.handle({ text: '/say public-result', photo: [{ file_id: 'never-read' }] });
+  assert.equal(h.state.answers.length, 0);
+  assert.equal(h.state.files.length, 0);
+  assert.equal(h.state.publications.length, 0);
+  assert.equal(h.state.publicRecorded.length, 0);
+  assertPrivateOnly(h.state);
+});
+
+test('a failed say generation cannot publish on redelivery after AI recovers, but a new owner input can', async () => {
+  let recovered = false;
+  const h = harness({ answer: async () => {
+    if (!recovered) throw new Error('synthetic-private-model-error');
+    return 'synthetic-recovered-public-result';
+  } });
+  const msg = h.message({ text: '/say initial-failed-composition' });
+  await h.handler(h.bot, msg);
+  recovered = true;
+  await h.handler(h.bot, { ...msg });
+  assert.equal(h.state.answers.length, 1);
+  assert.equal(h.state.publications.length, 0, 'redelivery is not renewed permission to publish a failed request');
+  await h.handle({ text: '/say new-owner-composition' });
+  assert.equal(h.state.answers.length, 2);
+  assert.equal(h.state.publications.length, 1);
+  assertPrivateOnly(h.state);
+});
+
+test('a say rejected while muted cannot publish on redelivery after unmuting, but a new owner input can', async () => {
+  const h = harness();
+  const msg = h.message({ text: '/say initial-muted-composition' });
+  h.state.muted.add(CHAT);
+  await h.handler(h.bot, msg);
+  h.state.muted.delete(CHAT);
+  await h.handler(h.bot, { ...msg });
+  assert.equal(h.state.answers.length, 0);
+  assert.equal(h.state.publications.length, 0, 'unmuting must not revive a rejected request');
+  await h.handle({ text: '/say new-owner-composition' });
+  assert.equal(h.state.answers.length, 1);
+  assert.equal(h.state.publications.length, 1);
+  assertPrivateOnly(h.state);
+});
+
+test('a say with failed private acknowledgement cannot publish on redelivery after transport recovers', async () => {
+  let recovered = false;
+  const h = harness({ send: async call => {
+    if (!recovered) throw new Error('synthetic-private-ack-error');
+    return { ephemeralMessageId: call.opts.ephemeral.editId || 701, messageDate: 1791446400 };
+  } });
+  const msg = h.message({ text: '/say initial-unacknowledged-composition' });
+  await h.handler(h.bot, msg);
+  recovered = true;
+  await h.handler(h.bot, { ...msg });
+  assert.equal(h.state.answers.length, 0);
+  assert.equal(h.state.publications.length, 0);
+  assert.equal(h.state.sent.length, 1, 'a completed failed request is not acknowledged again on redelivery');
+  await h.handle({ text: '/say new-owner-composition' });
+  assert.equal(h.state.answers.length, 1);
+  assert.equal(h.state.publications.length, 1);
+  assertPrivateOnly(h.state);
+});
+
+test('failed private say receipt cannot repeat a successful public publication', async () => {
+  const h = harness({ send: async (call, n) => {
+    if (n === 1) return { ephemeralMessageId: 701, messageDate: 1791446400 };
+    throw new Error('synthetic-private-receipt-error');
+  } });
+  const msg = h.message({ text: '/say public-result' });
+  await h.handler(h.bot, msg);
+  await h.handler(h.bot, { ...msg });
+  assert.equal(h.state.publications.length, 1);
+  assert.equal(h.state.publicRecorded.length, 1);
+  assert.equal(h.state.answers.length, 1);
+  assertPrivateOnly(h.state);
+});
+
+test('concurrent and completed duplicate say updates produce a single public message', async () => {
+  const answer = deferred();
+  const h = harness({ answer: () => answer.promise });
+  const msg = h.message({ text: '/say public-once' });
+  const first = h.handler(h.bot, msg);
+  await h.handler(h.bot, { ...msg });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(h.state.answers.length, 1);
+  answer.resolve('synthetic-public-once');
+  await first;
+  await h.handler(h.bot, { ...msg });
+  assert.equal(h.state.publications.length, 1);
+  assert.equal(h.state.publicRecorded.length, 1);
+  assert.equal(h.state.answers.length, 1);
+  assertPrivateOnly(h.state);
+});
+
+test('unauthorized and ordinary say commands cannot publish or reach public AI handling', async () => {
+  const h = harness({ integration: true });
+  await h.process({ text: '/say private-unauthorized', from: { id: OTHER } });
+  await h.process({ text: '/say@Other_bot Сыч, public-result' });
+  await h.process({ text: '/say@Siitch_bot Сыч, public-result', ephemeral_message_id: undefined, message_id: 20 });
+  await h.process({ text: '/say Сыч, public-result', ephemeral_message_id: undefined, message_id: 21 });
+  assert.equal(h.state.publications.length, 0);
+  assert.equal(h.state.answers.length, 0);
+  assert.equal(h.state.sent.length, 0);
+});
+
+test('say enters only the delivered public result in subsequent public history', async () => {
+  const h = harness({ integration: true, answer: async call => call.private ? 'synthetic-public-final' : 'public-follow-up' });
+  await h.process({ text: `/say ${SECRET}` });
+  await h.process({ ephemeral_message_id: undefined, message_id: 20, text: 'Сыч, follow-up' });
+  assert.equal(h.state.answers.length, 2);
+  const publicHistory = h.state.answers[1].history;
+  assert.equal(publicHistory.some(entry => entry.text === 'synthetic-public-final'), true);
+  assert.equal(JSON.stringify(publicHistory).includes(SECRET), false);
+  assert.equal(h.state.answers[1].private, false);
+});
+
+test('public help does not expose hidden owner commands for either owner or other participants', async () => {
+  for (const user of [OWNER, OTHER]) {
+    const h = harness({ integration: true });
+    await h.process({ ephemeral_message_id: undefined, message_id: 20, text: '/help@Siitch_bot',
+      from: { id: user, first_name: 'Участник' } });
+    assert.equal(h.state.sent.length, 1);
+    assert.equal(h.state.sent[0].opts.ephemeral, undefined);
+    assert.doesNotMatch(h.state.sent[0].content.html, /\/(?:ask|say|mute|ban)(?:@|\b)|скрыт/iu);
+    assert.equal(h.state.publications.length, 0);
+    assert.equal(h.state.answers.length, 0);
+  }
 });

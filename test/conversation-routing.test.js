@@ -23,6 +23,7 @@ function harness() {
   };
   const dependencies = {
     './ephemeral': require('../src/core/ephemeral'),
+    '../services/publication': require('../src/services/publication'),
     '../services/storage': storage, '../services/ai': ai,
     '../config': { adminId: 999, botId: 888, contextSize: 30, triggerRegex: /(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i },
     axios: { get: async () => ({ data: Buffer.from('audio') }) }, child_process: {},

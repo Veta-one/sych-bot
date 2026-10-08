@@ -29,7 +29,7 @@ Auto-deployment triggers on push to `main` via GitHub Actions (`.github/workflow
 
 При любых изменениях:
 1. Обновить версию в `package.json` (поле `"version"`)
-2. **При добавлении новой функции** — обновить `/help` команду в `src/core/logic.js` (helpText)
+2. **При добавлении новой функции** — обновить `/help` команду в `src/core/logic.js` (helpText). Исключение по прямому запросу владельца 2026-10-08: скрытые owner-команды не объявлять в общей справке.
 3. **При важных изменениях** — обновить `README.md` и `CLAUDE.md` если затронута документируемая функциональность
 4. Закоммитить и запушить в `main`:
    ```bash
@@ -192,7 +192,7 @@ Tests: `reminders.test.js`, `conversation-routing.test.js`, `rich-message-id.tes
 
 ### Ephemeral owner commands (v1.14.0)
 
-`index.js` routes updates with `ephemeral_message_id` directly to `logic.js` before public security messages and menu refresh work. `logic.js` intercepts them before public observers, user tracking, history, reactions and typing. `core/ephemeral.js` implements owner-only `/ask`, `/mute` and `/ban`; foreign/unauthorized or malformed private updates never fall through. A bare command may be accepted only in a real ephemeral update (`message_id=0`); ordinary bare commands stay ignored.
+`index.js` routes updates with `ephemeral_message_id` directly to `logic.js` before public security messages and menu refresh work. `logic.js` intercepts them before public observers, user tracking, history, reactions and typing. `core/ephemeral.js` implements owner-only `/ask`, `/say`, `/mute` and `/ban`; foreign/unauthorized or malformed private updates never fall through. A bare command may be accepted only in a real ephemeral update (`message_id=0`); ordinary bare commands stay ignored. Ordinary `/ask` and `/say` are also rejected before history or AI work.
 
 `/ask` accepts text/caption, URL and current/replied images (including static stickers). Both images are sent as labelled media through main OpenRouter and native fallback. It first sends a private placeholder, then edits its ephemeral ID. Context is isolated by owner, chat, topic and the private answer ID plus its confirmed date, kept in memory for up to 30 minutes with a 64-entry cap. An unknown or mismatched date cannot recover cached history. Only explicit reply to a private bot answer continues that context. `/forget_me` clears it and prevents stale in-flight requests from repopulating it. No private input or answer enters public history/profile updates; private YouTube questions bypass the shared analysis cache.
 
@@ -200,7 +200,9 @@ Tests: `reminders.test.js`, `conversation-routing.test.js`, `rich-message-id.tes
 
 `/mute` toggles `data.chats[id].muted`, applying across topics and deferring reminders; private owner commands remain available. `/ban` by reply adds `data.chats[id].bannedUsers`; existing global bans remain compatible. `/unban` also clears the local entry. Never call Telegram banChatMember for this feature.
 
-`services/ephemeral-commands.js` preserves inherited menus and registers these3commands with `is_ephemeral:true` only in owner `chat_member` scope, neutral and language-specific. Startup refreshes known groups; public group traffic refreshes missing menus asynchronously. Registration errors do not stop polling. Protocol: API10.3 `ephemeral_message_parameters`, incoming message_id0 plus distinct ephemeral_message_id; non-admin initial reply within15seconds. These IDs may be signed/reused, so never confuse them with ordinary message IDs. Incoming photo-caption+publicreply support is confirmed in official Telegram Desktop; no album support is claimed.
+`/say` is the explicit public-output mode for a private instruction. It uses only the public history snapshot and public replied content, without private dialogs, the owner's profile or saved instructions. AI work remains in private context. `services/publication.js` sends only the finished plain-text reply in the same group/topic, optionally replying to the original ordinary message. A deterministic mention uses the replied user's ID or an explicit username; ambiguous names need a reply or username. The private request is never a public reply target. Publication has one send attempt and no fallback on ambiguous network results; duplicate completed updates are suppressed for 30 minutes with a 256-key cap. Only confirmed published text enters public history; the receipt and all failures are private. Mute and concurrent forget cancel pending publication. Never auto-publish private `/ask` continuations.
+
+`services/ephemeral-commands.js` preserves other commands and registers these four commands with `is_ephemeral:true` only in owner `chat_member` scope, neutral and language-specific. The four names are removed from public scopes and `/help` at the owner's request; owner registration must remain for Telegram to classify the input as private. Startup refreshes known groups; public group traffic refreshes missing menus asynchronously. Registration errors do not stop polling. Protocol: API10.3 `ephemeral_message_parameters`, incoming message_id0 plus distinct ephemeral_message_id; non-admin initial reply within15seconds. These IDs may be signed/reused, so never confuse them with ordinary message IDs. Incoming photo-caption+publicreply support is confirmed in official Telegram Desktop; no album support is claimed.
 
 Tests: `ephemeral-routing.test.js`, `ephemeral-transport.test.js`, `ephemeral-command-registration.test.js`, `chat-moderation.test.js`, `private-context.test.js`. Use isolated synthetic data. End-to-end visibility must be checked with sender and another group participant; synthetic tests and getMyCommands do not prove Telegram client rendering.
 
