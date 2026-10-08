@@ -84,6 +84,27 @@ test('recipient without a username is prepended by name and uses UTF-16 mention 
   assert.equal(entity.user.id, target.id);
 });
 
+test('optional replied author does not add an address or tag to a contextual response', async () => {
+  const h = harness();
+  const text = 'Не соглашусь: при изменении цены стоит показывать и старое, и новое значение.';
+  await createPublication(h.bot, message({ reply_to_message: { message_id: 12, from: TARGET } }),
+    { ...TARGET, mentionRequired: false }).send(text);
+  assert.equal(h.calls[0][1], text);
+  assert.equal(h.calls[0][2].entities, undefined);
+  assert.equal(h.calls[0][2].reply_parameters.message_id, 12);
+});
+
+test('a chosen optional author mention uses their name and exact ID without requiring a username', async () => {
+  for (const username of ['synthetic_other', undefined]) {
+    const h = harness();
+    const target = { id: 42, first_name: 'Ваня', username, mentionRequired: false };
+    await createPublication(h.bot, message(), target).send('{{recipient}}, пример с изменением цены получился ясным.');
+    assert.equal(h.calls[0][1], 'Ваня, пример с изменением цены получился ясным.');
+    assert.equal(h.calls[0][2].entities[0].user.id, 42);
+    assert.equal(h.calls[0][2].entities[0].length, 'Ваня'.length);
+  }
+});
+
 test('explicit untracked username is a normal Telegram mention and cannot invent a user ID', async () => {
   const h = harness();
   await createPublication(h.bot, message(), { username: 'synthetic_untracked' }).send('{{recipient}}, привет.');

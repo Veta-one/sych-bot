@@ -25,6 +25,7 @@ function createPublication(bot, msg, target = null) {
 
   let label;
   let user;
+  const mentionRequired = target?.mentionRequired !== false;
   if (target) {
     const username = /^[a-z0-9_]{1,32}$/i.test(target.username || '') ? target.username : null;
     if (target.id !== undefined) {
@@ -36,7 +37,7 @@ function createPublication(bot, msg, target = null) {
     } else if (!username) {
       throw publicationError('PUBLICATION_INVALID_TARGET');
     }
-    label = username ? `@${username}` : user.first_name;
+    label = !mentionRequired && user ? user.first_name : username ? `@${username}` : user.first_name;
   }
 
   return {
@@ -48,11 +49,11 @@ function createPublication(bot, msg, target = null) {
         const placeholder = '{{recipient}}';
         let offset = text.indexOf(placeholder);
         if (offset >= 0) text = text.split(placeholder).join(label);
-        else {
+        else if (mentionRequired) {
           offset = text.indexOf(label);
           if (offset < 0) { text = `${label}, ${text}`; offset = 0; }
         }
-        entities.push(user ? { type: 'text_mention', offset, length: label.length, user }
+        if (offset >= 0) entities.push(user ? { type: 'text_mention', offset, length: label.length, user }
           : { type: 'mention', offset, length: label.length });
       }
       if (text.includes('{{recipient}}')) throw publicationError('PUBLICATION_INVALID_TARGET');

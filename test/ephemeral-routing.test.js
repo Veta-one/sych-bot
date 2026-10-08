@@ -635,6 +635,43 @@ test('say accepts both image sources but publishes only the composition returned
   assertPrivateOnly(h.state);
 });
 
+test('a plain say reply supplies the source content and author without requiring a handle or an address', async () => {
+  const sourceText = 'При изменении цены публикую старое и новое значения и разницу между ними.';
+  for (const request of ['Сыч похвали его', 'Сыч оспорь его довод', 'Сыч раскритикуй этот пример',
+    'Сыч оспорь его довод о методе @synthetic_other',
+    'Сыч оспорь его довод о категории @synthetic_other',
+    'Сыч раскритикуй пример, отметь слабые места',
+    'Сыч оспорь его довод о тегах HTML',
+    'Сыч не тегай автора, оспорь его довод',
+    'Сыч не тегни @synthetic_other, оспорь довод',
+    'Сыч отметь авторизацию как главный риск',
+    'Сыч упомяни пользовательские сценарии']) {
+    const h = harness({ answer: async () => 'Не соглашусь с этим доводом.' });
+    await h.handle({ text: `/say ${request}`, reply_to_message: {
+      message_id: 12, from: { id: OTHER, first_name: 'Ваня', username: 'synthetic_vanya' }, text: sourceText,
+    } });
+    const call = h.state.answers[0];
+    assert.equal(call.input.replyText, sourceText);
+    assert.match(call.input.text, /Автор исходного сообщения: Ваня/);
+    assert.match(call.input.text, /Обращение и упоминание не обязательны/);
+    assert.equal(h.state.publications[0].target.id, OTHER);
+    assert.equal(h.state.publications[0].target.mentionRequired, false);
+    assert.equal(h.state.publications[0].msg.reply_to_message.message_id, 12);
+    assert.equal(h.state.publications[0].text, 'Не соглашусь с этим доводом.');
+    assertPrivateOnly(h.state);
+  }
+});
+
+test('say without a replied source does not force a forbidden username mention', async () => {
+  for (const verb of ['тегай', 'упоминай', 'отмечай']) {
+    const h = harness({ answer: async () => 'Сам подход спорный.' });
+    await h.handle({ text: `/say Сыч не ${verb} @synthetic_other, раскритикуй этот подход` });
+    assert.equal(h.state.publications[0].target, null);
+    assert.equal(h.state.publications[0].text, 'Сам подход спорный.');
+    assertPrivateOnly(h.state);
+  }
+});
+
 test('say keeps explicit tracked and untracked usernames independent of historical user IDs', async () => {
   for (const username of ['synthetic_other', 'synthetic_untracked']) {
     const h = harness({ answer: async () => '{{recipient}}, привет.' });
@@ -683,13 +720,17 @@ test('an instruction to mention the replied author takes priority over an incide
 });
 
 test('an explicit instruction to mention another handle does not switch to the replied author', async () => {
-  const h = harness({ answer: async () => '{{recipient}}, привет.' });
-  await h.handle({ text: '/say тегни @synthetic_alice и скажи привет', reply_to_message: {
-    message_id: 12, from: { id: OTHER, first_name: 'Боб', username: 'synthetic_bob' }, text: 'public-source',
-  } });
-  assert.equal(h.state.publications.length, 1);
-  assert.deepEqual(h.state.publications[0].target, { username: 'synthetic_alice' });
-  assertPrivateOnly(h.state);
+  for (const request of ['тегни @synthetic_alice и скажи привет',
+    'Сыч не тегай автора, тегни @synthetic_alice и оспорь довод',
+    'Сыч оспорь метод @synthetic_other и тегни @synthetic_alice']) {
+    const h = harness({ answer: async () => '{{recipient}}, привет.' });
+    await h.handle({ text: `/say ${request}`, reply_to_message: {
+      message_id: 12, from: { id: OTHER, first_name: 'Боб', username: 'synthetic_bob' }, text: 'public-source',
+    } });
+    assert.equal(h.state.publications.length, 1);
+    assert.deepEqual(h.state.publications[0].target, { username: 'synthetic_alice' });
+    assertPrivateOnly(h.state);
+  }
 });
 
 test('say can mention a replied human without a username, including a locally banned participant', async () => {
