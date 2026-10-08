@@ -105,3 +105,9 @@ test('Gemini API quota error keeps the HTTP status for key rotation', async () =
     /HTTP 429.*Quota exceeded/
   );
 });
+
+test('private analysis can bypass the shared question cache', async () => {
+  const plan = buildYoutubeGeminiPlan(VIDEO_URL, 'synthetic private video question', { model: 'gemini-test' });
+  await requestYoutubeGeminiAnalysis('test-key', plan, { cache: false, fetchFn: async () => successResponse() });
+  assert.equal(getCachedYoutubeGeminiAnalysis(plan), null);
+});

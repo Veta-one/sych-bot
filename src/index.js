@@ -5,6 +5,8 @@ const storage = require('./services/storage');
 const axios = require('axios');
 const { sendRich, escapeHtml } = require('./utils/rich');
 const { createReminderDelivery } = require('./services/reminder-delivery');
+const { ensureOwnerEphemeralCommands } = require('./services/ephemeral-commands');
+const { isPrivateWork } = require('./utils/private-context');
 
 
 const originalLog = console.log;
@@ -19,8 +21,10 @@ function getTimestamp() {
   return `${d}.${m}.${y}-${t}`;
 }
 
-console.log = (...args) => originalLog(getTimestamp(), ...args);
-console.error = (...args) => originalError(getTimestamp(), ...args);
+console.log = (...args) => { if (!isPrivateWork()) originalLog(getTimestamp(), ...args); };
+console.error = (...args) => { if (!isPrivateWork()) originalError(getTimestamp(), ...args); };
+const originalWarn = console.warn;
+console.warn = (...args) => { if (!isPrivateWork()) originalWarn(getTimestamp(), ...args); };
 
 
 // Создаем бота
@@ -169,6 +173,15 @@ bot.getMe().then((me) => {
   console.error(`[BOT] Не смог получить getMe: ${err.message}`);
 });
 
+// Refresh only the owner's group menu. Do not delay incoming private requests.
+async function registerKnownGroupCommands() {
+  for (const chatId of Object.keys(storage.data.chats).filter(id => Number(id) < 0)) {
+    await ensureOwnerEphemeralCommands(bot, Number(chatId), config.adminId).catch(() => {});
+    await new Promise(resolve => setTimeout(resolve, 150));
+  }
+}
+registerKnownGroupCommands().catch(() => console.error('[COMMANDS] Owner menu registration incomplete.'));
+
 // === ТИКЕР НАПОМИНАЛОК (Проверка каждую минуту) ===
 const deliverReminders = createReminderDelivery(bot, storage);
 setInterval(() => deliverReminders().catch(error => console.error(`[REMINDER TICK ERROR] ${error.message}`)), 60000);
@@ -202,6 +215,11 @@ bot.on('edited_business_message', async (msg) => {
 bot.on('message', async (msg) => {
   // Игнорируем сообщения, старше 2 минут (чтобы не отвечать на старое при рестарте)
   if (!isFreshMessage(msg)) return;
+
+  if (msg.ephemeral_message_id !== undefined) {
+    await logic.processMessage(bot, msg);
+    return;
+  }
 
   const chatId = msg.chat.id;
   const chatTitle = msg.chat.title || "Личка";
@@ -254,6 +272,11 @@ bot.on('message', async (msg) => {
   }
 
   // Дальше идет обычная логика...
+  if (msg.chat.type !== 'private') {
+    ensureOwnerEphemeralCommands(bot, chatId, config.adminId,
+      msg.from?.id === config.adminId ? msg.from.language_code : undefined)
+      .catch(() => console.error('[COMMANDS] Owner menu could not be refreshed.'));
+  }
   await logic.processMessage(bot, msg);
 });
 

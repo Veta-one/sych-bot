@@ -44,6 +44,7 @@ function loadHandler() {
     toggleMute: (chat, thread) => { effects.push({ chat, thread }); return true; },
   };
   const dependencies = {
+    './ephemeral': require('../src/core/ephemeral'),
     '../services/storage': storage,
     '../services/ai': {},
     '../config': { adminId: 999, botId: 888, triggerRegex: /сыч|sych/i },

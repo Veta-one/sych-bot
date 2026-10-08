@@ -4,20 +4,23 @@ const path = require('node:path');
 const vm = require('node:vm');
 const test = require('node:test');
 
-function harness() {
+function harness(extraDependencies = {}) {
   const calls = [];
+  const notifications = [];
   const config = { geminiKeys: [], searchProvider: 'tavily', mainModel: 'writer', logicModel: 'planner', maxOutputTokens: 1000 };
   const promptsModule = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/core/prompts.js'), 'utf8'), { module: promptsModule, require: () => config });
   const dependencies = {
+    '../utils/private-context': require('../src/utils/private-context'),
     '@google/generative-ai': {}, '../config': config, '../core/prompts': promptsModule.exports,
     axios: {}, openai: {}, '@tavily/core': {},
     './storage': { initGoogleStats() {}, resetStatsIfNeeded: () => false, incrementStat() {}, incrementGoogleStat() {} },
-    '../utils/rich': {}, './youtube': {}, './youtube-gemini': {},
+    '../utils/rich': { sendRich: async (...args) => { notifications.push(args); } }, './youtube': {}, './youtube-gemini': {},
     '../utils/content-policy': require('../src/utils/content-policy'), './research': require('../src/services/research'),
     '../utils/async': require('../src/utils/async'), '../utils/voice': {}, '../utils/reminders': {},
   };
   const box = { exports: {} };
+  Object.assign(dependencies, extraDependencies);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/services/ai.js'), 'utf8'), {
     module: box, require: name => { assert.ok(Object.hasOwn(dependencies, name), name); return dependencies[name]; },
     console: { log() {}, error() {}, warn() {} }, Buffer, setTimeout, clearTimeout,
@@ -28,8 +31,76 @@ function harness() {
   ai.performSearch = async () => [{ url: 'https://example.org/countries', title: 'Countries', content: 'Kazakhstan is supported for Claude.ai.' }];
   ai.extractUrl = async () => 'Kazakhstan is supported for Claude.ai.';
   ai.reviewEvidence = async prompt => prompt.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА') ? { approved: true } : ({ claims: [{ claim: 'Kazakhstan supported.', status: 'supported', sourceId: 'S1', quote: 'Kazakhstan is supported for Claude.ai.', limitation: 'No guarantee for a card.' }], sufficient: true });
-  return { ai, calls, config };
+  return { ai, calls, config, notifications };
 }
+
+test('a private query supplies both labelled images and the replied text to the main model', async () => {
+  const { ai, calls } = harness();
+  ai.runLogicModel = async () => ({ needsSearch: false });
+  await ai.getResponse([], { text: 'Сравни изображения', sender: 'Тест', replyText: 'Исходное сообщение' }, [
+    { buffer: Buffer.from('first'), mimeType: 'image/png', label: 'Текущий запрос' },
+    { buffer: Buffer.from('second'), mimeType: 'image/jpeg', label: 'Исходный реплай' },
+  ]);
+  const content = calls[0].messages[1].content;
+  assert.equal(content.filter(item => item.type === 'image_url').length, 2);
+  assert.match(content[0].text, /Сравни изображения/);
+  assert.match(content[0].text, /Исходное сообщение/);
+  assert.equal(content.filter(item => item.type === 'text').slice(1).map(item => item.text).join('|'), 'Текущий запрос|Исходный реплай');
+});
+
+test('native fallback retains both images and their labels for a private query', async () => {
+  const { ai } = harness();
+  ai.runLogicModel = async () => ({ needsSearch: false });
+  ai.openai.chat.completions.create = async () => { throw new Error('synthetic unavailable'); };
+  ai.keys = ['synthetic'];
+  let request;
+  ai.nativeModel = { generateContent: async value => {
+    request = value;
+    return { response: { text: () => 'Сравнение', candidates: [{}] } };
+  } };
+  await ai.getResponse([], { text: 'Сравни', sender: 'Тест' }, [
+    { buffer: Buffer.from('a'), mimeType: 'image/png', label: 'A' },
+    { buffer: Buffer.from('b'), mimeType: 'image/jpeg', label: 'B' },
+  ]);
+  const parts = request.contents[0].parts;
+  assert.equal(parts.filter(part => part.inlineData).length, 2);
+  assert.equal(parts.filter(part => part.inlineData).map(part => part.inlineData.mimeType).join('|'), 'image/png|image/jpeg');
+});
+
+test('private model failures do not send admin messages while public notifications still work', async () => {
+  const { runPrivateWork } = require('../src/utils/private-context');
+  const { ai, config, notifications } = harness();
+  ai.bot = {};
+  config.adminId = 999;
+  await runPrivateWork(async () => ai.notifyAdmin('synthetic private error'));
+  assert.equal(notifications.length, 0);
+  ai.notifyAdmin('public status');
+  assert.equal(notifications.length, 1);
+});
+
+test('private YouTube questions neither read nor populate the shared analysis cache', async () => {
+  const { runPrivateWork } = require('../src/utils/private-context');
+  let cacheReads = 0;
+  const requests = [];
+  const { ai } = harness({
+    './youtube': { isYouTubeUrl: () => true, selectYoutubeTranscriptMaxChars: () => 1000,
+      getYoutubeContext: async () => { throw Error('No subtitles'); } },
+    './youtube-gemini': { buildYoutubeGeminiPlan: () => ({ cacheKey: 'synthetic-question' }),
+      getCachedYoutubeGeminiAnalysis: () => { cacheReads++; return null; },
+      requestYoutubeGeminiAnalysis: async (key, plan, options) => { requests.push(options); return { text: 'Video facts' }; },
+      buildYoutubeGeminiPromptContext: () => 'Video facts' },
+  });
+  ai.keys = ['synthetic'];
+  ai.executeNativeWithRetry = fn => fn();
+  ai.runLogicModel = async () => ({ needsSearch: false });
+  const input = { sender: 'Тест', text: 'Сыч перескажи https://www.youtube.com/watch?v=synthetic' };
+  await runPrivateWork(() => ai.getResponse([], input));
+  assert.equal(cacheReads, 0);
+  assert.equal(requests[0].cache, false);
+  await ai.getResponse([], input);
+  assert.equal(cacheReads, 1);
+  assert.equal(requests[1].cache, true);
+});
 
 test('search planning receives the replied claim, even outside the short history', async () => {
   const { ai } = harness();

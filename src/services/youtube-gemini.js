@@ -217,8 +217,10 @@ async function requestYoutubeGeminiAnalysis(apiKey, plan, options = {}) {
 
   const now = options.now ?? Date.now();
   const ttlMs = Math.max(1000, Number(options.cacheTtlMs) || DEFAULT_CACHE_TTL_MS);
-  analysisCache.set(plan.cacheKey, { expiresAt: now + ttlMs, value });
-  pruneCache(now, Math.max(1, Number(options.cacheMaxEntries) || DEFAULT_CACHE_MAX_ENTRIES));
+  if (options.cache !== false) {
+    analysisCache.set(plan.cacheKey, { expiresAt: now + ttlMs, value });
+    pruneCache(now, Math.max(1, Number(options.cacheMaxEntries) || DEFAULT_CACHE_MAX_ENTRIES));
+  }
   return value;
 }
 

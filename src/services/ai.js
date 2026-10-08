@@ -22,6 +22,7 @@ const {
 const { shouldSkipSearchForPrimarySource, isVerificationRequest } = require('../utils/content-policy');
 const { research, evidenceContext, publicUrl, answerAuditPrompt, conservativeAnswer, citedProviderSources } = require('./research');
 const { withTimeout } = require('../utils/async');
+const { isPrivateWork } = require('../utils/private-context');
 const { parseVoiceJson, readTranscript, shouldSummarizeVoice, selectVoiceSummary } = require('../utils/voice');
 const { resolveReminderDecision, isRecallQuestion } = require('../utils/reminders');
 
@@ -66,6 +67,7 @@ class AiService {
   }
 
   notifyAdmin(message) {
+    if (isPrivateWork()) return;
     if (this.bot && config.adminId) {
         sendRich(this.bot, config.adminId, { markdown: message }).catch(() => {});
     }
@@ -404,7 +406,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
                       const plan = buildYoutubeGeminiPlan(urlM[0], currentMessage.text, {
                           model: config.youtubeGeminiModel,
                       });
-                      let analysis = getCachedYoutubeGeminiAnalysis(plan);
+                      let analysis = isPrivateWork() ? null : getCachedYoutubeGeminiAnalysis(plan);
                       const startedAt = Date.now();
 
                       if (!analysis) {
@@ -413,6 +415,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
                           }
                           analysis = await this.executeNativeWithRetry(() =>
                               requestYoutubeGeminiAnalysis(this.keys[this.keyIndex], plan, {
+                                  cache: !isPrivateWork(),
                                   cacheTtlMs: config.youtubeGeminiCacheTtlMs,
                                   timeoutMs: config.youtubeGeminiTimeoutMs,
                               })
@@ -526,10 +529,14 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
           const messages = [{ role: "system", content: prompts.system() }, { role: "user", content: [] }];
           messages[1].content.push({ type: "text", text: fullPromptText });
           if (imageBuffer) {
-              messages[1].content.push({
-                  type: "image_url",
-                  image_url: { url: `data:${mimeType};base64,${imageBuffer.toString('base64')}` }
-              });
+              const mediaItems = Array.isArray(imageBuffer) ? imageBuffer : [{ buffer: imageBuffer, mimeType }];
+              for (const media of mediaItems) {
+                  if (media.label) messages[1].content.push({ type: 'text', text: media.label });
+                  messages[1].content.push({
+                      type: "image_url",
+                      image_url: { url: `data:${media.mimeType};base64,${media.buffer.toString('base64')}` }
+                  });
+              }
           }
 
           const completion = await this.openai.chat.completions.create({
@@ -595,7 +602,13 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
 
     return this.executeNativeWithRetry(async () => {
       let promptParts = [];
-      if (imageBuffer) promptParts.push({ inlineData: { mimeType: mimeType, data: imageBuffer.toString("base64") } });
+      if (imageBuffer) {
+          const mediaItems = Array.isArray(imageBuffer) ? imageBuffer : [{ buffer: imageBuffer, mimeType }];
+          for (const media of mediaItems) {
+              if (media.label) promptParts.push({ text: media.label });
+              promptParts.push({ inlineData: { mimeType: media.mimeType, data: media.buffer.toString('base64') } });
+          }
+      }
       promptParts.push({ text: fullPromptText });
 
       const result = await this.nativeModel.generateContent({

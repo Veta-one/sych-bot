@@ -4,6 +4,8 @@ function createReminderDelivery(bot, storage, send = sendRich) {
   const inFlight = new Set();
   return async () => {
     for (const task of storage.getPendingReminders()) {
+      if (storage.isChatMuted?.(task.chatId)) continue;
+      if (storage.isBanned?.(task.userId, task.chatId)) continue;
       if (inFlight.has(task.id)) continue;
       inFlight.add(task.id);
       try {

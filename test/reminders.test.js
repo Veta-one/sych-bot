@@ -124,3 +124,48 @@ test('reminder delivery preserves topic and reply and retries failed sends witho
   assert.equal(sent[1][3].replyTo, 12);
   assert.equal(tasks.length, 0);
 });
+
+test('muting a chat holds its reminders until the chat is unmuted', async () => {
+  const box = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/services/reminder-delivery.js'), 'utf8'), {
+    module: box, require: () => ({ escapeHtml: s => s }), console: { log() {}, error() {} },
+  });
+  let muted = true;
+  let tasks = [{ id: 1, chatId: -100, threadId: 184, text: 'Reminder' }];
+  const sent = [];
+  const deliver = box.exports.createReminderDelivery({}, {
+    getPendingReminders: () => tasks,
+    isChatMuted: chatId => muted && chatId === -100,
+    removeReminders: ids => { tasks = tasks.filter(t => !ids.includes(t.id)); }, forceSave() {},
+  }, async (...args) => { sent.push(args); });
+  await deliver();
+  assert.equal(sent.length, 0);
+  assert.equal(tasks.length, 1);
+  muted = false;
+  await deliver();
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0][3].threadId, 184);
+  assert.equal(tasks.length, 0);
+});
+
+test('a chat-local ban holds only that users reminder in that chat', async () => {
+  const box = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/services/reminder-delivery.js'), 'utf8'), {
+    module: box, require: () => ({ escapeHtml: s => s }), console: { log() {}, error() {} },
+  });
+  let banned = true;
+  let tasks = [{ id: 1, chatId: -100, userId: 42 }, { id: 2, chatId: -200, userId: 42 }];
+  const sent = [];
+  const deliver = box.exports.createReminderDelivery({}, {
+    getPendingReminders: () => tasks,
+    isBanned: (user, chat) => banned && user === 42 && chat === -100,
+    removeReminders: ids => { tasks = tasks.filter(t => !ids.includes(t.id)); }, forceSave() {},
+  }, async (bot, chat) => { sent.push(chat); });
+  await deliver();
+  assert.deepEqual(sent, [-200]);
+  assert.equal(tasks.length, 1);
+  banned = false;
+  await deliver();
+  assert.deepEqual(sent, [-200, -100]);
+  assert.equal(tasks.length, 0);
+});

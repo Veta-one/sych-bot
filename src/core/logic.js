@@ -2,6 +2,7 @@ const storage = require('../services/storage');
 const ai = require('../services/ai');
 const config = require('../config');
 const axios = require('axios');
+const { createEphemeralHandler, isEphemeralMessage } = require('./ephemeral');
 const { exec } = require('child_process');
 const { sendRich, escapeHtml, normalizeMd, formatVoiceMessage, quoteFallback } = require('../utils/rich');
 const { isForgetMeRequest } = require('../utils/privacy');
@@ -21,6 +22,11 @@ const BUFFER_SIZE = 20;
 const CHAT_BUFFER_SIZE = 50; // Анализируем чат каждые 50 сообщений
 // Храним 10 последних активных юзеров для удобного бана
 const recentActiveUsers = []; 
+const handleEphemeral = createEphemeralHandler({
+    config, storage, ai, sendRich,
+    getPublicHistory: chatId => chatHistory[chatId] || [],
+    download: async url => axios.get(url, { responseType: 'arraybuffer', timeout: 15000, maxContentLength: 20 * 1024 * 1024 }),
+});
 
 // === ГЕНЕРАТОР ОТМАЗОК СЫЧА ===
 function getSychErrorReply(errText) {
@@ -92,6 +98,7 @@ function addToHistory(chatId, sender, text, userId = null, relatedUserId = null)
 }
 
 function forgetUserFromRuntime(userId) {
+  handleEphemeral.forgetUser(userId);
   pendingReminders.forgetUser(userId);
   const targetId = String(userId);
 
@@ -189,6 +196,10 @@ async function initChatProfile(bot, chatId) {
 }
 
 async function processMessage(bot, msg) {
+    if (isEphemeralMessage(msg)) {
+        await handleEphemeral(bot, msg);
+        return;
+    }
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
     if (!userId) return;
@@ -212,8 +223,16 @@ async function processMessage(bot, msg) {
     const isBusinessMessage = Boolean(msg.business_connection_id);
 
     // === ⛔ ГЛОБАЛЬНЫЙ БАН ===
-    if (storage.isBanned(userId) && userId !== config.adminId) {
+    if (storage.isBanned(userId, chatId) && userId !== config.adminId) {
         return; // Полный игнор
+    }
+    if (storage.isChatMuted?.(chatId)) {
+        // Data deletion remains available while the public chat is silent.
+        if (command === '/forget_me' || isForgetMeRequest(text, config.triggerRegex)) {
+            await storage.forgetUser(userId, msg.from.username || '');
+            forgetUserFromRuntime(userId);
+        }
+        return;
     }
     
     // 1. УМНЫЙ ПОИСК ТОПИКА
@@ -222,6 +241,8 @@ async function processMessage(bot, msg) {
     // В обычных группах тут может быть undefined, null или мусор — всё превращаем в null.
     let threadId = msg.is_topic_message ? msg.message_thread_id : (msg.message_thread_id || (msg.reply_to_message ? msg.reply_to_message.message_thread_id : null));
     if (typeof threadId !== 'number') threadId = null;
+    const isSilenced = () => storage.isTopicMuted(chatId, threadId)
+        || (userId !== config.adminId && storage.isBanned(userId, chatId));
     
     let cleanText = text.toLowerCase();
     const replyUserId = msg.reply_to_message?.from?.id;
@@ -248,6 +269,7 @@ async function processMessage(bot, msg) {
         if (typingTimer) return; // Уже печатает
 
         const sendAction = () => {
+            if (isSilenced()) { stopTyping(); return; }
             // Шлем action с учетом треда
             if (threadId) {
                 bot.sendChatAction(chatId, 'typing', { message_thread_id: threadId }).catch(() => {});
@@ -366,6 +388,7 @@ async function processMessage(bot, msg) {
         const userName = msg.from.first_name || "Анон";
 
         const transcription = await ai.transcribeAudio(buffer, userName, mimeType);
+        if (isSilenced()) return;
         
         if (transcription) {
             text = [text.trim(), transcription.text].filter(Boolean).join('\n');
@@ -374,13 +397,13 @@ async function processMessage(bot, msg) {
             hasTriggerWord = config.triggerRegex.test(cleanText);
             isDirectlyCalled = hasTriggerWord || isReplyToBot;
             // The mute may have changed while speech recognition was running.
-            if (storage.isTopicMuted(chatId, threadId)) return;
+            if (isSilenced()) return;
             if (!isDirectlyCalled) {
                 // A forwarded voice or uploaded audio need not belong to its sender.
                 const speaker = msg.voice && !msg.forward_origin && !msg.forward_from && !msg.forward_sender_name
                     ? userName : '';
                 transcription.summary = await ai.summarizeVoiceTranscript(transcription.text, speaker);
-                if (storage.isTopicMuted(chatId, threadId)) return;
+                if (isSilenced()) return;
                 const voiceMessage = formatVoiceMessage(transcription);
                 await sendRich(bot, chatId, voiceMessage, replyOpts(msg, threadId));
             }
@@ -472,10 +495,13 @@ async function processMessage(bot, msg) {
 
     // 2. РАЗБАН
     if (command === '/unban') {
-        const targetId = text.split(' ')[1];
-        if (!targetId) return sendRich(bot, chatId, { html: `⚠️ Введи ID: <code>/unban${commandSuffix} 123456</code>` }, baseOpts(msg, threadId));
+        const targetId = text.trim().split(/\s+/)[1];
+        if (!/^\d+$/.test(targetId || '') || !Number.isSafeInteger(Number(targetId)) || Number(targetId) <= 0) {
+            return sendRich(bot, chatId, { html: `⚠️ Введи положительный ID: <code>/unban${commandSuffix} 123456</code>` }, baseOpts(msg, threadId));
+        }
         
         storage.unbanUser(targetId);
+        storage.unbanUserInChat?.(chatId, targetId);
         return sendRich(bot, chatId, { html: `✅ Юзер <code>${escapeHtml(targetId)}</code> разбанен.` }, baseOpts(msg, threadId));
     }
 
@@ -515,6 +541,13 @@ async function processMessage(bot, msg) {
 
   if (command === '/help' || command === '/start') {
     const helpText = `<h3>🦉 Что я умею</h3>
+<b>Скрытые команды владельца в группе</b>
+<ul>
+<li><code>/ask${commandSuffix} вопрос</code> реплаем на сообщение или картинку: ответ видишь только ты. К своей команде можно добавить фото, текст и ссылку. Для фото команда идёт в начале подписи</li>
+<li><code>/mute${commandSuffix}</code> выключает или включает публичную активность во всём чате. Скрытые команды доступны, напоминания ждут включения</li>
+<li><code>/ban${commandSuffix}</code> реплаем на участника: перестаю отвечать и реагировать на него только в этом чате. Доступ к группе не блокирую. Снять запрет: <code>/unban${commandSuffix} ID</code></li>
+</ul>
+<p>Используй актуальный Telegram и проверь, что клиент показывает скрытый режим команды. Частные вопросы не попадают в общую память. Сначала появляется «Думаю…», затем она заменяется ответом. После закрытия приложения скрытые сообщения могут исчезнуть.</p>
 <b>Вижу и слышу</b>
 <ul>
 <li>Скажи в <b>голосовом</b> «Сыч, сколько будет два плюс два?» — отвечу как на текст. Голосовым реплаем на мой ответ можно продолжить разговор без имени</li>
@@ -549,7 +582,7 @@ async function processMessage(bot, msg) {
 <li><code>/reset${commandSuffix}</code> — сброс памяти</li>
 <li><code>/version${commandSuffix}</code> — версия бота</li>
 </ul>
-<p>Команды выполняются только с адресом этого бота после @, в том числе в личке. Команды без адреса и команды другим ботам игнорируются.</p>
+<p>Обычные команды выполняются только с адресом этого бота после @, в том числе в личке. В подтверждённом скрытом обновлении Telegram можно выбрать команду из меню без ручного адреса. Команды другим ботам игнорируются.</p>
 </details>
 <blockquote>ver: ${config.version}</blockquote>`;
     try { return await sendRich(bot, chatId, { html: helpText }, baseOpts(msg, threadId)); } catch (e) {}
@@ -615,7 +648,7 @@ async function processMessage(bot, msg) {
     } finally {
       stopTyping();
     }
-    if (storage.isTopicMuted(chatId, threadId)) return;
+    if (isSilenced()) return;
     if (parsed?.kind === 'schedule') {
       const username = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
       storage.addReminder(chatId, userId, username, parsed.targetTime, parsed.reminderText, {
@@ -655,6 +688,7 @@ async function processMessage(bot, msg) {
               const currentProfile = storage.getChatProfile(chatId);
               const updates = await ai.processManualChatDescription(description, currentProfile);
               stopTyping();
+              if (isSilenced()) return;
 
               if (updates && updates.topic) {
                   storage.updateChatProfile(chatId, updates);
@@ -682,6 +716,7 @@ async function processMessage(bot, msg) {
                 : targetName;
             const description = await ai.generateProfileDescription(targetProfile, targetLabel);
             stopTyping();
+            if (isSilenced()) return;
             try { return await sendRich(bot, chatId, { markdown: normalizeMd(description) }, replyOpts(msg, threadId)); } catch(e){}
         }
         if (shouldHandleProfileQuery(targetName, targetProfile)) {
@@ -696,6 +731,7 @@ async function processMessage(bot, msg) {
           try { await bot.sendChatAction(chatId, 'typing', getActionOptions(threadId)); } catch(e){}
           const result = Math.random() > 0.5 ? "ОРЁЛ" : "РЕШКА";
           const flavor = await ai.generateFlavorText("подбросить монетку", result);
+          if (isSilenced()) { stopTyping(); return; }
           try { return await sendRich(bot, chatId, { markdown: flavor }, replyOpts(msg, threadId)); } catch(e){}
       }
 
@@ -706,6 +742,7 @@ async function processMessage(bot, msg) {
           const max = parseInt(rangeMatch[2]);
           const rand = Math.floor(Math.random() * (max - min + 1)) + min;
           const flavor = await ai.generateFlavorText(`выбрать число ${min}-${max}`, String(rand));
+          if (isSilenced()) { stopTyping(); return; }
           try { return await sendRich(bot, chatId, { markdown: flavor }, replyOpts(msg, threadId)); } catch(e){}
       }
       
@@ -715,6 +752,7 @@ async function processMessage(bot, msg) {
           const randomUser = storage.getRandomUser(chatId);
           if (!randomUser) return sendRich(bot, chatId, { markdown: "Никого не знаю пока." }, baseOpts(msg, threadId));
           const flavor = await ai.generateFlavorText(`выбрать случайного человека из чата на вопрос "${text}"`, randomUser);
+          if (isSilenced()) { stopTyping(); return; }
           try { return await sendRich(bot, chatId, { markdown: flavor }, replyOpts(msg, threadId)); } catch(e){}
       }
   }
@@ -731,7 +769,7 @@ async function processMessage(bot, msg) {
     
     // Передаем истории вместе с текущим текстом
     ai.determineReaction(historyBlock + `\nСообщение для реакции: ${text}`).then(async (emoji) => {
-        if (emoji) {
+        if (emoji && !isSilenced()) {
             try { await bot.setMessageReaction(chatId, msg.message_id, { reaction: [{ type: 'emoji', emoji: emoji }] }); } catch (e) {}
         }
     });
@@ -939,6 +977,7 @@ async function processMessage(bot, msg) {
 
     
     // === ОТПРАВКА (rich markdown + авто-фоллбэк) ===
+    if (isSilenced()) { stopTyping(); return; }
     // Раньше тут "упрощали" разметку под legacy Markdown. Теперь наоборот — отдаём
     // богатый Markdown как есть, Telegram сам красиво его рисует (sendRichMessage).
     let formattedResponse = aiResponse;
@@ -975,9 +1014,11 @@ async function processMessage(bot, msg) {
         // АВАРИЙНАЯ ОТПРАВКА (Если Markdown сломался или что-то еще)
         // Сохраняем свёрнутые цитаты даже при аварийной отправке.
         try { 
+             if (isSilenced()) return;
              const rawChunks = quoteFallback({ markdown: aiResponse })
                  || (aiResponse.match(/[\s\S]{1,4000}/g) || [aiResponse]).map(text => ({ text }));
              for (const chunk of rawChunks) {
+                if (isSilenced()) return;
                 await bot.sendMessage(chatId, chunk.text, {
                     ...(chunk.entities ? { entities: chunk.entities } : {}),
                     ...(threadId ? { message_thread_id: threadId } : {}),

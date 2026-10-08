@@ -177,6 +177,7 @@ class StorageService {
     if (!this.data.chats) this.data.chats = {};
     if (!this.data.reminders) this.data.reminders = [];
     if (!this.data.bannedUsers) this.data.bannedUsers = {}; // { userId: "reason/name" }
+    for (const chat of Object.values(this.data.chats)) this._initializeChatModeration(chat);
 
     this.profiles = this._readJson(this.paths.profiles, {}, 'profiles.json');
     this.chatProfiles = this._readJson(this.paths.chatProfiles, {}, 'chatProfiles.json');
@@ -510,11 +511,21 @@ class StorageService {
 
   // === РАБОТА С ЧАТАМИ ===
 
+  _initializeChatModeration(chat) {
+    if (!Array.isArray(chat.mutedTopics)) chat.mutedTopics = [];
+    if (!chat.users || typeof chat.users !== 'object') chat.users = {};
+    if (typeof chat.muted !== 'boolean') chat.muted = false;
+    if (!chat.bannedUsers || typeof chat.bannedUsers !== 'object' || Array.isArray(chat.bannedUsers)) {
+      chat.bannedUsers = {};
+    }
+  }
+
   getChat(chatId) {
     if (!this.data.chats[chatId]) {
-      this.data.chats[chatId] = { mutedTopics: [], users: {} };
+      this.data.chats[chatId] = { mutedTopics: [], users: {}, muted: false, bannedUsers: {} };
       this.save();
     }
+    this._initializeChatModeration(this.data.chats[chatId]);
     return this.data.chats[chatId];
   }
 
@@ -560,6 +571,7 @@ class StorageService {
 
   isTopicMuted(chatId, threadId) {
     const chat = this.getChat(chatId);
+    if (chat.muted) return true;
     // Исправление: проверяем именно на null/undefined, чтобы цифра 0 не превращалась в 'general'
     let tid = (threadId === null || threadId === undefined) ? 'general' : threadId;
     
@@ -567,6 +579,17 @@ class StorageService {
     tid = String(tid);
     
     return chat.mutedTopics.some(t => String(t) === tid);
+  }
+
+  isChatMuted(chatId) {
+    return this.data.chats[chatId]?.muted === true;
+  }
+
+  toggleChatMute(chatId) {
+    const chat = this.getChat(chatId);
+    chat.muted = !chat.muted;
+    this.save();
+    return chat.muted;
   }
 
   toggleMute(chatId, threadId) {
@@ -750,6 +773,11 @@ class StorageService {
           this.chatProfilesBlockedUntil.set(String(chatId), Date.now() + 5 * 60 * 1000);
           continue;
         }
+        // Удаление памяти не снимает запрет отвечать пользователю. Сохраняем
+        // только его ID, убирая имя/причину из локальной записи модерации.
+        if (chat?.bannedUsers && Object.prototype.hasOwnProperty.call(chat.bannedUsers, targetId)) {
+          chat.bannedUsers[targetId] = 'Banned by Admin';
+        }
         if (!chat?.users) continue;
         if (Object.prototype.hasOwnProperty.call(chat.users, targetId)) {
           delete chat.users[targetId];
@@ -860,6 +888,10 @@ class StorageService {
               dbChanged = true;
               continue;
             }
+            if (chat?.bannedUsers && Object.prototype.hasOwnProperty.call(chat.bannedUsers, targetId)) {
+              chat.bannedUsers[targetId] = 'Banned by Admin';
+              dbChanged = true;
+            }
             if (!chat?.users || !Object.prototype.hasOwnProperty.call(chat.users, targetId)) continue;
             const trackedName = String(chat.users[targetId] || '');
             if (trackedName.startsWith('@')) snapshotUsernames.add(trackedName.slice(1).toLowerCase());
@@ -966,9 +998,10 @@ class StorageService {
 
     // === БАН-ХАММЕР ===
 
-    isBanned(userId) {
-      if (!this.data.bannedUsers) return false;
-      return !!this.data.bannedUsers[userId];
+    isBanned(userId, chatId = null) {
+      if (this.data.bannedUsers?.[userId]) return true;
+      if (chatId === null || chatId === undefined) return false;
+      return !!this.data.chats[chatId]?.bannedUsers?.[userId];
     }
   
     banUser(userId, info) {
@@ -983,7 +1016,31 @@ class StorageService {
       this.save();
     }
   
-    getBannedList() {
+    banUserInChat(chatId, userId, info) {
+      const targetId = this._moderationUserId(userId);
+      const chat = this.getChat(chatId);
+      chat.bannedUsers[targetId] = info || 'Banned by Admin';
+      this.save();
+    }
+
+    unbanUserInChat(chatId, userId) {
+      const targetId = this._moderationUserId(userId);
+      const chat = this.data.chats[chatId];
+      if (!chat?.bannedUsers) return;
+      delete chat.bannedUsers[targetId];
+      this.save();
+    }
+
+    _moderationUserId(userId) {
+      const targetId = String(userId);
+      if (!/^\d+$/.test(targetId) || !Number.isSafeInteger(Number(targetId)) || Number(targetId) <= 0) {
+        throw new TypeError('Некорректный Telegram user ID');
+      }
+      return String(Number(targetId));
+    }
+
+    getBannedList(chatId = null) {
+      if (chatId !== null && chatId !== undefined) return this.data.chats[chatId]?.bannedUsers || {};
       return this.data.bannedUsers || {};
     }
   

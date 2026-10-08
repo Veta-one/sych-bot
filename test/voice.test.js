@@ -69,6 +69,7 @@ function loadAi({ transcript = 'Уточни адрес, пожалуйста.',
     }
   }
   const ai = loadModule('services/ai.js', {
+    '../utils/private-context': require('../src/utils/private-context'),
     '@google/generative-ai': { GoogleGenerativeAI: FakeGoogle, HarmCategory: {}, HarmBlockThreshold: {} },
     '../config': config, '../core/prompts': prompts, axios: {}, openai: FakeOpenAI, '@tavily/core': {},
     './storage': { initGoogleStats() {}, incrementGoogleStat() {}, markGoogleKeyExhausted(index) { exhaustedKeys.push(index); }, incrementStat() {} },
@@ -384,6 +385,7 @@ test('message handler sends one voice card in the original topic and preserves f
   const speakers = [];
   const result = { text: longTranscript, summary: usefulSummary };
   const handler = loadModule('core/logic.js', {
+    './ephemeral': require('../src/core/ephemeral'),
     '../services/storage': { isBanned: () => false, hasChat: () => true, updateChatName() {},
       trackUser() {}, isTopicMuted: () => false, getChatProfile: () => ({ topic: 'test' }) },
     '../services/ai': { transcribeAudio: async () => result, summarizeVoiceTranscript: async (text, speaker) => { speakers.push(speaker); return usefulSummary; } },

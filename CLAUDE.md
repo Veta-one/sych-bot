@@ -190,7 +190,21 @@ Tests: `reminders.test.js`, `conversation-routing.test.js`, `rich-message-id.tes
 
 ## Bot Commands (in-chat)
 
-Slash commands require an explicit recipient matching the bot's actual `getMe().username` (cached per bot instance): `/mute@Siitch_bot`, `/start@Siitch_bot`, etc. Bare commands and commands for other bots are ignored before media, memory, or AI processing, including in private/business chats, captions, and replies. Matching is case-insensitive. `src/utils/commands.js` owns recipient validation; `src/core/logic.js` applies it before command handling. Natural-language triggers remain unchanged. All slash commands listed below require the `@bot_username` suffix.
+### Ephemeral owner commands (v1.14.0)
+
+`index.js` routes updates with `ephemeral_message_id` directly to `logic.js` before public security messages and menu refresh work. `logic.js` intercepts them before public observers, user tracking, history, reactions and typing. `core/ephemeral.js` implements owner-only `/ask`, `/mute` and `/ban`; foreign/unauthorized or malformed private updates never fall through. A bare command may be accepted only in a real ephemeral update (`message_id=0`); ordinary bare commands stay ignored.
+
+`/ask` accepts text/caption, URL and current/replied images (including static stickers). Both images are sent as labelled media through main OpenRouter and native fallback. It first sends a private placeholder, then edits its ephemeral ID. Context is isolated by owner, chat, topic and the private answer ID plus its confirmed date, kept in memory for up to 30 minutes with a 64-entry cap. An unknown or mismatched date cannot recover cached history. Only explicit reply to a private bot answer continues that context. `/forget_me` clears it and prevents stale in-flight requests from repopulating it. No private input or answer enters public history/profile updates; private YouTube questions bypass the shared analysis cache.
+
+`utils/rich.js` private options are `ephemeral:{receiverUserId,replyToEphemeralId?,editId?}`. Every rich/media/plain fallback preserves private delivery. Missing confirmation, network ambiguity or oversized plain fallback fails closed; never call public sendMessage as an emergency route for private content. `utils/private-context.js` uses AsyncLocalStorage to suppress model/search payload logs and admin notifications inside private AI work while public logging keeps working.
+
+`/mute` toggles `data.chats[id].muted`, applying across topics and deferring reminders; private owner commands remain available. `/ban` by reply adds `data.chats[id].bannedUsers`; existing global bans remain compatible. `/unban` also clears the local entry. Never call Telegram banChatMember for this feature.
+
+`services/ephemeral-commands.js` preserves inherited menus and registers these3commands with `is_ephemeral:true` only in owner `chat_member` scope, neutral and language-specific. Startup refreshes known groups; public group traffic refreshes missing menus asynchronously. Registration errors do not stop polling. Protocol: API10.3 `ephemeral_message_parameters`, incoming message_id0 plus distinct ephemeral_message_id; non-admin initial reply within15seconds. These IDs may be signed/reused, so never confuse them with ordinary message IDs. Incoming photo-caption+publicreply support is confirmed in official Telegram Desktop; no album support is claimed.
+
+Tests: `ephemeral-routing.test.js`, `ephemeral-transport.test.js`, `ephemeral-command-registration.test.js`, `chat-moderation.test.js`, `private-context.test.js`. Use isolated synthetic data. End-to-end visibility must be checked with sender and another group participant; synthetic tests and getMyCommands do not prove Telegram client rendering.
+
+Ordinary slash commands require an explicit recipient matching the bot's actual `getMe().username` (cached per bot instance): `/mute@Siitch_bot`, `/start@Siitch_bot`, etc. Bare ordinary commands and commands for other bots are ignored before media, memory, or AI processing, including in private/business chats, captions, and replies. Ephemeral owner commands are the narrowly gated exception described above. Matching is case-insensitive. `src/utils/commands.js` owns ordinary recipient validation; `src/core/logic.js` applies it before command handling. Natural-language triggers remain unchanged. All ordinary slash commands listed below require the `@bot_username` suffix.
 
 - `/start` - Bot info
 - `/ban [username]` - Ban user (admin only)
