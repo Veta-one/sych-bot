@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { mergeProfileEvidence } = require('../utils/profile-evidence');
 
 const DEFAULT_DATA_DIR = path.join(__dirname, '../../data');
 const debounce = require('lodash.debounce');
@@ -669,6 +670,7 @@ class StorageService {
     if (!this.profiles[chatId]) this.profiles[chatId] = {};
 
     for (const [userId, data] of Object.entries(updatesMap)) {
+        if (!/^[1-9]\d*$/.test(userId) || !data || typeof data !== 'object' || Array.isArray(data)) continue;
         const forgottenUntil = this.forgottenUntil.get(String(userId)) || 0;
         if (forgottenUntil > Date.now()) {
           console.log(`[PRIVACY] Пропущено устаревшее обновление профиля ${userId} после удаления памяти.`);
@@ -677,16 +679,18 @@ class StorageService {
 
         const current = this.profiles[chatId][userId] || { realName: null, facts: "", attitude: "Нейтральное", relationship: 50 };
 
-        if (data.realName && data.realName !== "Неизвестно") current.realName = data.realName;
-        if (data.facts) current.facts = data.facts;
-        if (data.attitude) current.attitude = data.attitude;
-        if (data.location) current.location = data.location;
+        // Legacy fields remain readable but model prose can no longer overwrite them.
+        // New factual memory consists only of validated quotations with provenance.
+        if (Array.isArray(data.factEvidence)) {
+          current.factEvidence = mergeProfileEvidence(current.factEvidence, data.factEvidence, userId);
+        }
+        if (typeof data.attitude === 'string' && data.attitude.trim()) current.attitude = data.attitude.trim().slice(0, 256);
 
         // Валидация изменения репутации
         if (data.relationship !== undefined) {
           const newScore = parseInt(data.relationship, 10);
           if (!isNaN(newScore)) {
-            const oldScore = current.relationship || 50;
+            const oldScore = current.relationship ?? 50;
             const delta = newScore - oldScore;
 
             // Ограничиваем изменения: +1..+3 за позитив, -5..-10 за негатив

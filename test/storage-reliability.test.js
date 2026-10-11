@@ -29,6 +29,59 @@ test.after(() => {
   }
 });
 
+test('profile updates retain legacy data and merge only evidence owned by the target user', () => {
+  const storage = new StorageService({ dataDir: makeTempDir('sych-profile-evidence-') });
+  storage.profiles = { '-100': { 42: { realName: 'Старое имя', location: 'Старый город', facts: 'Старая память', relationship: 50 } } };
+  storage._applyProfileUpdates('-100', { 42: {
+    realName: 'Выдуманное имя', location: 'Выдуманный город', facts: 'Выдуманные факты', relationship: 51,
+    factEvidence: [
+      { userId: '42', messageId: '11', quote: 'Я люблю шахматы.', date: 1790000000 },
+      { userId: '77', messageId: '12', quote: 'Я живу на Марсе.' },
+    ],
+  } });
+  const profile = storage.getProfile('-100', 42);
+  assert.equal(profile.facts, 'Старая память');
+  assert.equal(profile.realName, 'Старое имя');
+  assert.equal(profile.location, 'Старый город');
+  assert.equal(profile.relationship, 51);
+  assert.equal(profile.factEvidence.length, 1);
+  assert.equal(profile.factEvidence[0].quote, 'Я люблю шахматы.');
+  storage._applyProfileUpdates('-100', { 42: { factEvidence: [
+    { userId: '42', messageId: '11', quote: 'Я люблю шахматы.', date: 1790000000 },
+    { userId: '42', messageId: '13', quote: 'У меня есть кот.' },
+  ] } });
+  assert.equal(profile.factEvidence.length, 2);
+  storage.saveProfilesDebounced.flush();
+  const persisted = JSON.parse(fs.readFileSync(storage.paths.profiles, 'utf8'))['-100']['42'];
+  assert.equal(persisted.factEvidence.length, 2);
+  assert.equal(persisted.facts, 'Старая память');
+});
+
+test('forgetting removes quoted profile evidence from live data and backup snapshots', async () => {
+  const storage = new StorageService({ dataDir: makeTempDir('sych-profile-forget-') });
+  storage.profiles = { '-100': { 42: { factEvidence: [
+    { userId: '42', messageId: '11', quote: 'Личная тестовая информация.' },
+  ] } } };
+  storage._saveProfilesToFile();
+  assert.ok(storage.backupNow());
+  await storage.forgetUser(42);
+  assert.equal(storage.profiles['-100']?.['42'], undefined);
+  for (const backupName of fs.readdirSync(storage.paths.backups)) {
+    const file = path.join(storage.paths.backups, backupName, 'profiles.json');
+    if (fs.existsSync(file)) assert.equal(fs.readFileSync(file, 'utf8').includes('Личная тестовая информация'), false);
+  }
+});
+
+test('zero relationship stays zero on a neutral update and rises by only one on a positive update', () => {
+  const storage = new StorageService({ dataDir: makeTempDir('sych-profile-zero-') });
+  storage.profiles = { '-100': { 42: { relationship: 0 } } };
+  storage._applyProfileUpdates('-100', { 42: { relationship: 0 } });
+  assert.equal(storage.getProfile('-100', 42).relationship, 0);
+  storage._applyProfileUpdates('-100', { 42: { relationship: 1 } });
+  assert.equal(storage.getProfile('-100', 42).relationship, 1);
+  storage.saveProfilesDebounced.flush();
+});
+
 test('storage writes valid JSON atomically without leaving temp files', () => {
   const dataDir = makeTempDir('sych-storage-atomic-');
   const storage = new StorageService({ dataDir });

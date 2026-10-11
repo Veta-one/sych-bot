@@ -12,6 +12,7 @@ function harness(extraDependencies = {}) {
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/core/prompts.js'), 'utf8'), { module: promptsModule, require: () => config });
   const dependencies = {
     '../utils/private-context': require('../src/utils/private-context'),
+    '../utils/profile-evidence': require('../src/utils/profile-evidence'),
     '@google/generative-ai': {}, '../config': config, '../core/prompts': promptsModule.exports,
     axios: {}, openai: {}, '@tavily/core': {},
     './storage': { initGoogleStats() {}, resetStatsIfNeeded: () => false, incrementStat() {}, incrementGoogleStat() {} },

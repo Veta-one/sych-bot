@@ -76,6 +76,10 @@ src/
 
 ### Hybrid AI Model Strategy
 
+Text documents are decoded locally via `services/documents.js` and passed as untrusted textual externalContext, never `image_url`. Encoding support: UTF-8, UTF-16 LE/BE (BOM or conservative detection), Windows-1251 fallback. Known binary signatures/control bytes are rejected; generic MIME uses known text extensions. Text is bounded by `officeTextMaxChars` with coverage/truncation notice. PDF/image/Office paths remain separate.
+
+Profile grounding (1.14.3): immediate analysis receives only the current user's structured message and updates relationship/attitude, never facts. Batch analysis proposes literal quotations tied to source message IDs; `utils/profile-evidence.js` checks author, exact source quotation, forwarding and bounds. Storage appends/deduplicates at most 40 evidence entries and rejects free generated facts/name/location; legacy fields stay intact and are labelled unverified. `getResponse` uses the same labelled context for both providers. Self dossier queries route through the guarded profile writer; a neutral audit/recheck must accept the final answer, otherwise deterministic labelled source quotations are returned. All profile stages have deadlines and suppress payload logs. Quotations establish provenance, not semantic truth/self-disclosure certainty; old memory is not retroactively validated. Tests use synthetic identities and isolated data: profile-evidence/profile-ai, conversation routing and storage reliability.
+
 | Purpose | Model | Usage |
 |---------|-------|-------|
 | Logic/Analysis | `google/gemma-3-27b-it` | Context analysis, decide if response needed, emoji selection |
@@ -121,11 +125,11 @@ See `.env.example` for full configuration template.
 
 Бот запоминает информацию о пользователях в `profiles.json` (изолировано по чатам).
 
-**Поля профиля:** `realName`, `facts`, `attitude`, `relationship` (0-100), `location`
+**Поля профиля:** `factEvidence` (ограниченные цитаты с ID автора/сообщения и датой), `attitude`, `relationship` (0-100). Старые `realName`, `facts`, `location` сохраняются как неперепроверенная память.
 
 **Два механизма обновления:**
-- **Batch (Наблюдатель)**: каждые 20 сообщений анализирует всех участников
-- **Immediate (Рефлекс)**: после каждого ответа бота анализирует собеседника
+- **Batch (Наблюдатель)**: каждые 20 сообщений предлагает сведения с буквальными цитатами; код проверяет автора и исходное сообщение
+- **Immediate (Рефлекс)**: после каждого ответа бота получает только текущее сообщение собеседника и обновляет отношение, без биографических фактов
 
 **Правила репутации:**
 - Позитив к боту: +1..+3 (копить сложно)

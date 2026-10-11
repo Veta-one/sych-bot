@@ -15,10 +15,17 @@ const {
   buildOfficePromptContext,
   extractOfficeText,
   isOfficeDocument,
+  buildTextPromptContext,
+  extractTextDocument,
+  isTextDocument,
 } = require('../services/documents');
 const chatHistory = {};
 const analysisBuffers = {};
 const chatAnalysisBuffers = {}; // Буфер для анализа профиля чата
+const memoryRevisions = new Map();
+const memoryRevision = userId => memoryRevisions.get(String(userId)) || 0;
+const pendingProfileDeletions = new Map();
+const profileDeletionPending = userId => pendingProfileDeletions.has(String(userId));
 const BUFFER_SIZE = 20;
 const CHAT_BUFFER_SIZE = 50; // Анализируем чат каждые 50 сообщений
 // Храним 10 последних активных юзеров для удобного бана
@@ -101,6 +108,7 @@ function addToHistory(chatId, sender, text, userId = null, relatedUserId = null)
 }
 
 function forgetUserFromRuntime(userId) {
+  memoryRevisions.set(String(userId), memoryRevision(userId) + 1);
   handleEphemeral.forgetUser(userId);
   pendingReminders.forgetUser(userId);
   const targetId = String(userId);
@@ -123,6 +131,20 @@ function forgetUserFromRuntime(userId) {
 
   for (let i = recentActiveUsers.length - 1; i >= 0; i--) {
     if (String(recentActiveUsers[i].id) === targetId) recentActiveUsers.splice(i, 1);
+  }
+}
+
+async function forgetPersistentUser(userId, username) {
+  const key = String(userId);
+  pendingProfileDeletions.set(key, (pendingProfileDeletions.get(key) || 0) + 1);
+  forgetUserFromRuntime(userId);
+  try { return await storage.forgetUser(userId, username); }
+  finally {
+    // Clear requests/history which arrived while the persistent queue was busy.
+    forgetUserFromRuntime(userId);
+    const remaining = pendingProfileDeletions.get(key) - 1;
+    if (remaining) pendingProfileDeletions.set(key, remaining);
+    else pendingProfileDeletions.delete(key);
   }
 }
 
@@ -233,8 +255,7 @@ async function processMessage(bot, msg) {
     if (storage.isChatMuted?.(chatId)) {
         // Data deletion remains available while the public chat is silent.
         if (command === '/forget_me' || isForgetMeRequest(text, config.triggerRegex)) {
-            await storage.forgetUser(userId, msg.from.username || '');
-            forgetUserFromRuntime(userId);
+            await forgetPersistentUser(userId, msg.from.username || '');
         }
         return;
     }
@@ -436,8 +457,7 @@ async function processMessage(bot, msg) {
     || isForgetMeRequest(text, config.triggerRegex);
 
   if (forgetMeRequested) {
-      const result = await storage.forgetUser(userId, msg.from.username || '');
-      forgetUserFromRuntime(userId);
+      const result = await forgetPersistentUser(userId, msg.from.username || '');
       stopTyping();
 
       const removed = result.profilesRemoved
@@ -465,7 +485,9 @@ async function processMessage(bot, msg) {
 
   if (!text.startsWith('/')) {
       // Пишем в буфер для анализа профилей юзеров
-      analysisBuffers[chatId].push({ userId, name: displayName, text });
+      analysisBuffers[chatId].push({ userId, name: displayName, text,
+        messageId: msg.message_id, date: msg.date,
+        isForwarded: Boolean(msg.forward_origin || msg.forward_from || msg.forward_from_chat || msg.forward_sender_name) });
 
       // Пишем в буфер для анализа профиля чата
       if (!chatAnalysisBuffers[chatId]) chatAnalysisBuffers[chatId] = [];
@@ -674,6 +696,20 @@ async function processMessage(bot, msg) {
 
 
   // === ФИЧИ ===
+  if (isDirectlyCalled) {
+      const selfProfileQuery = /(?:кто я|расскажи (?:про меня|обо мне)|что ты знаешь обо мне|мо[её] досье|мой профиль)\s*[?!.]*\s*$/i.test(text);
+      if (selfProfileQuery) {
+          if (profileDeletionPending(userId)) { stopTyping(); return; }
+          startTyping();
+          try {
+              const profile = { ...storage.getProfile(chatId, userId), userId };
+              const revision = memoryRevision(userId);
+              const description = await ai.generateProfileDescription(profile, senderName);
+              if (isSilenced() || profileDeletionPending(userId) || memoryRevision(userId) !== revision) return;
+              return await sendRich(bot, chatId, { markdown: normalizeMd(description) }, replyOpts(msg, threadId));
+          } finally { stopTyping(); }
+      }
+  }
   if (hasTriggerWord) {
       // Команда "Сыч, этот чат про..." — используем оригинальный текст (не lowercase)
       const chatTopicMatch = text.match(/(?:этот чат про|чат про|мы тут|здесь мы)\s+([\s\S]+)/i);
@@ -703,6 +739,7 @@ async function processMessage(bot, msg) {
         const targetName = aboutMatch[1].replace(/\?+$/, '').trim();
         const targetProfile = storage.findProfileByQuery(chatId, targetName);
         if (targetProfile) {
+            if (profileDeletionPending(targetProfile.userId)) { stopTyping(); return; }
             startTyping();
             const isTgIdQuery = /^\d+$/.test(targetName);
             const targetLabel = isTgIdQuery
@@ -710,9 +747,10 @@ async function processMessage(bot, msg) {
                     ? `${targetProfile.username} (TGID ${targetProfile.userId})`
                     : `TGID ${targetProfile.userId}`)
                 : targetName;
-            const description = await ai.generateProfileDescription(targetProfile, targetLabel);
+            const revision = memoryRevision(targetProfile.userId);
+            const description = await ai.generateProfileDescription({ ...targetProfile }, targetLabel);
             stopTyping();
-            if (isSilenced()) return;
+            if (isSilenced() || profileDeletionPending(targetProfile.userId) || memoryRevision(targetProfile.userId) !== revision) return;
             try { return await sendRich(bot, chatId, { markdown: normalizeMd(description) }, replyOpts(msg, threadId)); } catch(e){}
         }
         if (shouldHandleProfileQuery(targetName, targetProfile)) {
@@ -839,11 +877,14 @@ async function processMessage(bot, msg) {
         ];
 
         if (doc.file_size > 20 * 1024 * 1024) {
+            stopTyping();
             return sendRich(bot, chatId, { markdown: "🐘 Не, файл тяжелый (больше 20мб). Я пас." }, replyOpts(msg, threadId));
         }
 
         const officeDocument = isOfficeDocument(documentName, documentMime);
-        if (!allowedMimes.includes(documentMime) && !documentMime.startsWith('image/') && !officeDocument) {
+        const textDocument = isTextDocument(documentName, documentMime);
+        if (!allowedMimes.includes(documentMime) && !documentMime.startsWith('image/') && !officeDocument && !textDocument) {
+             stopTyping();
              return sendRich(bot, chatId, {
                  markdown: "🗿 Этот формат пока не читаю. Давай PDF, DOCX, PPTX, XLSX или обычный текст."
              }, replyOpts(msg, threadId));
@@ -864,8 +905,15 @@ async function processMessage(bot, msg) {
                 });
                 externalContext = buildOfficePromptContext(extracted, documentName);
                 console.log(`[DOCUMENT] ${documentName}: ${extracted.kind}, ${extracted.text.length} симв.${extracted.truncated ? ' (сокращено)' : ''}`);
+            } else if (textDocument) {
+                const extracted = extractTextDocument(documentBuffer, {
+                    fileName: documentName, mimeType: documentMime,
+                    maxChars: config.officeTextMaxChars,
+                });
+                externalContext = buildTextPromptContext(extracted, documentName);
+                console.log(`[DOCUMENT] Text decoded (${extracted.encoding}, ${extracted.text.length} chars${extracted.truncated ? ', truncated' : ''})`);
             } else {
-                // PDF, изображения и текстовые документы оставляем Gemini:
+                // PDF и изображения оставляем мультимодальному пути:
                 // модель видит их исходную структуру и визуальный контекст.
                 imageBuffer = documentBuffer;
                 mimeType = documentMime;
@@ -903,7 +951,10 @@ async function processMessage(bot, msg) {
         }
     }
     const instruction = msg.from.username ? storage.getUserInstruction(msg.from.username) : "";
-    const userProfile = storage.getProfile(chatId, userId);
+    const userProfile = { ...storage.getProfile(chatId, userId), userId };
+    const userMemoryRevision = memoryRevision(userId);
+    const isStaleProfileReply = () => profileDeletionPending(userId) || memoryRevision(userId) !== userMemoryRevision;
+    if (isStaleProfileReply()) { stopTyping(); return; }
 
     // === ЛОГИКА ССЫЛОК ===
     let targetLink = null;
@@ -973,7 +1024,7 @@ async function processMessage(bot, msg) {
 
     
     // === ОТПРАВКА (rich markdown + авто-фоллбэк) ===
-    if (isSilenced()) { stopTyping(); return; }
+    if (isSilenced() || isStaleProfileReply()) { stopTyping(); return; }
     // Раньше тут "упрощали" разметку под legacy Markdown. Теперь наоборот — отдаём
     // богатый Markdown как есть, Telegram сам красиво его рисует (sendRichMessage).
     let formattedResponse = aiResponse;
@@ -992,9 +1043,11 @@ async function processMessage(bot, msg) {
         await sendRich(bot, chatId, { markdown: normalizeMd(formattedResponse) }, replyOpts(msg, threadId));
 
         stopTyping(); // <-- Всё, сообщение ушло, выключаем статус
+        if (isSilenced() || isStaleProfileReply()) { stopTyping(); return; }
         addToHistory(chatId, "Сыч", aiResponse, config.botId, userId);
 
     } catch (error) {
+        if (isSilenced() || isStaleProfileReply()) { stopTyping(); return; }
         stopTyping(); // <-- Если ошибка, ОБЯЗАТЕЛЬНО выключаем
         console.error(`[SEND ERROR]: ${error.message}`);
 
@@ -1010,11 +1063,11 @@ async function processMessage(bot, msg) {
         // АВАРИЙНАЯ ОТПРАВКА (Если Markdown сломался или что-то еще)
         // Сохраняем свёрнутые цитаты даже при аварийной отправке.
         try { 
-             if (isSilenced()) return;
+             if (isSilenced() || isStaleProfileReply()) return;
              const rawChunks = quoteFallback({ markdown: aiResponse })
                  || (aiResponse.match(/[\s\S]{1,4000}/g) || [aiResponse]).map(text => ({ text }));
              for (const chunk of rawChunks) {
-                if (isSilenced()) return;
+                if (isSilenced() || isStaleProfileReply()) return;
                 await bot.sendMessage(chatId, chunk.text, {
                     ...(chunk.entities ? { entities: chunk.entities } : {}),
                     ...(threadId ? { message_thread_id: threadId } : {}),
@@ -1025,10 +1078,12 @@ async function processMessage(bot, msg) {
                     },
                 });
              }
+             if (isSilenced() || isStaleProfileReply()) return;
              addToHistory(chatId, "Сыч", aiResponse, config.botId, userId);
         } catch (e2) { console.error("FATAL SEND ERROR (Даже аварийная не ушла):", e2.message); }
     }
 
+    if (isStaleProfileReply()) return;
     // === ПАМЯТЬ О КАРТИНКЕ (variant B) ===
     // Если бот реально посмотрел на изображение — асинхронно получаем его фактическое
     // описание дешёвой нативной моделью и вшиваем прямо в запись истории этого сообщения.
@@ -1045,10 +1100,12 @@ async function processMessage(bot, msg) {
     }
 
     // Рефлекс (Анализ стиля общения и репутации)
-    const contextForAnalysis = chatHistory[chatId].slice(-5).map(m => `${m.role}: ${m.text}`).join('\n');
+    const profileMessage = { userId, messageId: msg.message_id, name: displayName,
+        text, date: msg.date,
+        isForwarded: Boolean(msg.forward_origin || msg.forward_from || msg.forward_from_chat || msg.forward_sender_name) };
     
     // Запускаем анализ
-    ai.analyzeUserImmediate(contextForAnalysis, userProfile).then(updated => {
+    ai.analyzeUserImmediate(profileMessage, userProfile).then(updated => {
         if (updated) {
             // ЛОГИРУЕМ ИЗМЕНЕНИЯ
             if (updated.relationship) {

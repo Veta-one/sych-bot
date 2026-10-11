@@ -70,6 +70,7 @@ function loadAi({ transcript = 'Уточни адрес, пожалуйста.',
   }
   const ai = loadModule('services/ai.js', {
     '../utils/private-context': require('../src/utils/private-context'),
+    '../utils/profile-evidence': require('../src/utils/profile-evidence'),
     '@google/generative-ai': { GoogleGenerativeAI: FakeGoogle, HarmCategory: {}, HarmBlockThreshold: {} },
     '../config': config, '../core/prompts': prompts, axios: {}, openai: FakeOpenAI, '@tavily/core': {},
     './storage': { initGoogleStats() {}, incrementGoogleStat() {}, markGoogleKeyExhausted(index) { exhaustedKeys.push(index); }, incrementStat() {} },
