@@ -11,6 +11,8 @@ const { shouldHandleProfileQuery } = require('../utils/profile-query');
 const { resolveAddressedCommand } = require('../utils/commands');
 const { PendingReminders, reminderConfirmation } = require('../utils/reminders');
 const pendingReminders = new PendingReminders();
+const { ConversationFollowups } = require('../utils/conversation-followups');
+const conversationFollowups = new ConversationFollowups();
 const {
   buildOfficePromptContext,
   extractOfficeText,
@@ -111,6 +113,7 @@ function forgetUserFromRuntime(userId) {
   memoryRevisions.set(String(userId), memoryRevision(userId) + 1);
   handleEphemeral.forgetUser(userId);
   pendingReminders.forgetUser(userId);
+  conversationFollowups.forgetUser(userId);
   const targetId = String(userId);
 
   for (const chatId of Object.keys(chatHistory)) {
@@ -272,8 +275,13 @@ async function processMessage(bot, msg) {
     let cleanText = text.toLowerCase();
     const replyUserId = msg.reply_to_message?.from?.id;
     const isReplyToBot = replyUserId && String(replyUserId) === String(config.botId);
+    const ownQuestionFollowup = conversationFollowups.get(msg, threadId);
     let hasTriggerWord = config.triggerRegex.test(cleanText);
-    let isDirectlyCalled = hasTriggerWord || isReplyToBot;
+    let isDirectlyCalled = hasTriggerWord || isReplyToBot || Boolean(ownQuestionFollowup);
+    const followupToken = conversationFollowups.begin(msg, threadId);
+    const userMemoryRevision = memoryRevision(userId);
+    const isStaleProfileReply = () => profileDeletionPending(userId)
+        || memoryRevision(userId) !== userMemoryRevision || Boolean(followupToken?.cancelled);
 
     // === ЕДИНЫЙ КОНТРОЛЛЕР СТАТУСА "ПЕЧАТАЕТ" ===
     let typingTimer = null;
@@ -316,6 +324,7 @@ async function processMessage(bot, msg) {
     };
 
   
+    try {
     // Определяем красивое имя чата (Название группы или Имя юзера в личке)
     const chatTitle = msg.chat.title || msg.chat.username || msg.chat.first_name || "Unknown";
     // Запоминаем активность для команды /ban (кроме Админа)
@@ -413,14 +422,14 @@ async function processMessage(bot, msg) {
         const userName = msg.from.first_name || "Анон";
 
         const transcription = await ai.transcribeAudio(buffer, userName, mimeType);
-        if (isSilenced()) return;
+        if (isSilenced() || isStaleProfileReply()) return;
         
         if (transcription) {
             text = [text.trim(), transcription.text].filter(Boolean).join('\n');
             msg.text = text;
             cleanText = text.toLowerCase();
             hasTriggerWord = config.triggerRegex.test(cleanText);
-            isDirectlyCalled = hasTriggerWord || isReplyToBot;
+            isDirectlyCalled = hasTriggerWord || isReplyToBot || Boolean(ownQuestionFollowup);
             // The mute may have changed while speech recognition was running.
             if (isSilenced()) return;
             if (!isDirectlyCalled) {
@@ -445,6 +454,7 @@ async function processMessage(bot, msg) {
 }
 
   
+    if (followupToken) followupToken.sourceText = text;
     if (!text && !msg.photo && !msg.sticker && !msg.voice && !msg.audio) return;
 
   if (msg.chat.type === 'private' && !isBusinessMessage) {
@@ -569,6 +579,7 @@ async function processMessage(bot, msg) {
     const helpText = `<h3>🦉 Что я умею</h3>
 <b>Вижу и слышу</b>
 <ul>
+<li>Ответь на сообщение Сыча или на свой вопрос, на который он уже ответил, чтобы продолжить разговор. Реплай на свой вопрос действует 5 минут</li>
 <li>Скажи в <b>голосовом</b> «Сыч, сколько будет два плюс два?» — отвечу как на текст. Голосовым реплаем на мой ответ можно продолжить разговор без имени</li>
 <li>Короткий <b>войс</b> покажу свёрнутой цитатой; длинный перескажу в 2–3 предложениях своим языком. Под кнопкой «Расшифровка» — полный текст, открывается одним нажатием</li>
 <li>Кидай <b>фото/видео</b> — пойму, что там, прокомментирую и запомню для вопросов потом</li>
@@ -613,6 +624,7 @@ async function processMessage(bot, msg) {
   if (command === '/reset') {
     chatHistory[chatId] = [];
     analysisBuffers[chatId] = [];
+    conversationFollowups.forgetChat(chatId);
     return sendRich(bot, chatId, { markdown: "🦉 Окей, всё забыл, ну было и было" }, baseOpts(msg, threadId));
   }
 
@@ -792,7 +804,7 @@ async function processMessage(bot, msg) {
   }
 
   // === РЕШЕНИЕ ОБ ОТВЕТЕ ===
-  // Бот отвечает ТОЛЬКО когда его явно вызвали (тег "сыч/sych") или ответили на его сообщение
+  // Прямой вызов, ответ боту или ограниченное продолжение своего подтверждённого вопроса.
   const shouldAnswer = isDirectlyCalled;
 
   // === ЛОГИКА РЕАКЦИЙ (15%) ===
@@ -952,8 +964,6 @@ async function processMessage(bot, msg) {
     }
     const instruction = msg.from.username ? storage.getUserInstruction(msg.from.username) : "";
     const userProfile = { ...storage.getProfile(chatId, userId), userId };
-    const userMemoryRevision = memoryRevision(userId);
-    const isStaleProfileReply = () => profileDeletionPending(userId) || memoryRevision(userId) !== userMemoryRevision;
     if (isStaleProfileReply()) { stopTyping(); return; }
 
     // === ЛОГИКА ССЫЛОК ===
@@ -988,7 +998,8 @@ async function processMessage(bot, msg) {
 
     try {
     // Вытаскиваем текст реплая для контекста
-    const replyText = msg.reply_to_message ? (msg.reply_to_message.text || msg.reply_to_message.caption || "") : "";
+    const replyText = ownQuestionFollowup?.sourceText
+        || (msg.reply_to_message ? (msg.reply_to_message.text || msg.reply_to_message.caption || "") : "");
 
     aiResponse = await ai.getResponse(
         chatHistory[chatId],
@@ -1040,11 +1051,12 @@ async function processMessage(bot, msg) {
         // Шлём markdown ИИ напрямую — Telegram rich рисует его красивее (в т.ч. таблицы).
         // normalizeMd чинит пустую строку перед таблицей; sendRich сам ретраит без картинок
         // при битом медиа и падает в plain при ошибке парсинга.
-        await sendRich(bot, chatId, { markdown: normalizeMd(formattedResponse) }, replyOpts(msg, threadId));
+        const sent = await sendRich(bot, chatId, { markdown: normalizeMd(formattedResponse) }, replyOpts(msg, threadId));
 
         stopTyping(); // <-- Всё, сообщение ушло, выключаем статус
         if (isSilenced() || isStaleProfileReply()) { stopTyping(); return; }
         addToHistory(chatId, "Сыч", aiResponse, config.botId, userId);
+        if (sent?.ok !== false) conversationFollowups.confirm(followupToken, sent?.messageId);
 
     } catch (error) {
         if (isSilenced() || isStaleProfileReply()) { stopTyping(); return; }
@@ -1066,9 +1078,11 @@ async function processMessage(bot, msg) {
              if (isSilenced() || isStaleProfileReply()) return;
              const rawChunks = quoteFallback({ markdown: aiResponse })
                  || (aiResponse.match(/[\s\S]{1,4000}/g) || [aiResponse]).map(text => ({ text }));
+             let confirmedMessageId = null;
+             let allChunksConfirmed = true;
              for (const chunk of rawChunks) {
                 if (isSilenced() || isStaleProfileReply()) return;
-                await bot.sendMessage(chatId, chunk.text, {
+                const sent = await bot.sendMessage(chatId, chunk.text, {
                     ...(chunk.entities ? { entities: chunk.entities } : {}),
                     ...(threadId ? { message_thread_id: threadId } : {}),
                     ...(msg.business_connection_id ? { business_connection_id: msg.business_connection_id } : {}),
@@ -1077,9 +1091,12 @@ async function processMessage(bot, msg) {
                         allow_sending_without_reply: true,
                     },
                 });
+                if (Number.isSafeInteger(sent?.message_id) && sent.message_id > 0) confirmedMessageId = sent.message_id;
+                else allChunksConfirmed = false;
              }
              if (isSilenced() || isStaleProfileReply()) return;
              addToHistory(chatId, "Сыч", aiResponse, config.botId, userId);
+             if (allChunksConfirmed) conversationFollowups.confirm(followupToken, confirmedMessageId);
         } catch (e2) { console.error("FATAL SEND ERROR (Даже аварийная не ушла):", e2.message); }
     }
 
@@ -1119,6 +1136,10 @@ async function processMessage(bot, msg) {
         }
     }).catch(err => console.error("[RELATIONSHIP ERROR]", err));
   }
+    } finally {
+      conversationFollowups.finish(followupToken);
+      stopTyping();
+    }
 }
 
 module.exports = { processMessage };

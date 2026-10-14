@@ -56,6 +56,7 @@ function loadHandler() {
     '../utils/profile-query': {},
     '../utils/commands': { resolveAddressedCommand },
     '../utils/reminders': require('../src/utils/reminders'),
+    '../utils/conversation-followups': require('../src/utils/conversation-followups'),
     '../services/documents': {},
   };
   const module = { exports: {} };

@@ -6,7 +6,7 @@ const test = require('node:test');
 
 function harness() {
   const state = { sent: [], reminders: [], answers: [], summaries: [], parses: [], immediate: [], profileDescriptions: [], download: Buffer.from('audio'), transcript: 'Обычное сообщение.', muted: false, plan: { kind: 'answer' } };
-  const storage = { isBanned: () => false, hasChat: () => true, updateChatName() {}, trackUser() {},
+  const storage = { isBanned: () => Boolean(state.banned), hasChat: () => true, updateChatName() {}, trackUser() {},
     isTopicMuted: () => state.muted, getProfile: () => ({}), getChatProfile: () => ({ topic: 'test' }),
     getUserInstruction: () => '', addReminder: (...args) => state.reminders.push(args) };
   storage.forgetUser = async () => {
@@ -16,10 +16,11 @@ function harness() {
   };
   storage.findProfileByQuery = () => state.targetProfile || null;
   const ai = {
-    transcribeAudio: async () => ({ text: state.transcript }),
+    transcribeAudio: async () => state.transcriptionResponder ? state.transcriptionResponder() : ({ text: state.transcript }),
     summarizeVoiceTranscript: async text => { state.summaries.push(text); return 'Краткий текст'; },
     getResponse: async (history, input, media, mimeType, instruction, profile, spontaneous, chatProfile, externalContext) => {
-      state.answers.push({ input, history: [...history], media, mimeType, externalContext }); return '4';
+      state.answers.push({ input, history: [...history], media, mimeType, externalContext });
+      return state.answerResponder ? state.answerResponder() : '4';
     },
     analyzeUserImmediate: async input => { state.immediate.push(input); return null; },
     describeImage: async () => null,
@@ -32,7 +33,10 @@ function harness() {
   let messageId = 100;
   const sendRich = async (bot, chatId, content, opts) => {
     const sent = { messageId: ++messageId, chatId, content, opts };
-    if (state.sendResponder) await state.sendResponder(content);
+    if (state.sendResponder) {
+      const result = await state.sendResponder(content, chatId);
+      if (result !== undefined) { state.sent.push(sent); return result; }
+    }
     state.sent.push(sent); return sent;
   };
   const dependencies = {
@@ -42,9 +46,10 @@ function harness() {
     '../config': { adminId: 999, botId: 888, contextSize: 30, triggerRegex: /(?<![а-яёa-z])(сыч|sych)(?![а-яёa-z])/i },
     axios: { get: async () => ({ data: state.download }) }, child_process: {},
     '../utils/rich': { sendRich, escapeHtml: x => String(x), normalizeMd: x => x,
-      formatVoiceMessage: x => ({ html: `VOICE CARD: ${x.text}` }) },
+      quoteFallback: () => null, formatVoiceMessage: x => ({ html: `VOICE CARD: ${x.text}` }) },
     '../utils/privacy': require('../src/utils/privacy'), '../utils/profile-query': require('../src/utils/profile-query'),
-    '../utils/commands': {}, '../services/documents': require('../src/services/documents'), '../utils/reminders': require('../src/utils/reminders'),
+    '../utils/commands': require('../src/utils/commands'), '../services/documents': require('../src/services/documents'), '../utils/reminders': require('../src/utils/reminders'),
+    '../utils/conversation-followups': require('../src/utils/conversation-followups'),
   };
   const box = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/core/logic.js'), 'utf8'), {
@@ -53,7 +58,11 @@ function harness() {
     Math: { random: () => 1 },
   });
   const bot = { getFileLink: async () => 'mock://voice', sendChatAction: async () => {},
-    sendMessage: async (...args) => { (state.legacySends ||= []).push(args); } };
+    getMe: async () => ({ username: 'Siitch_bot' }),
+    sendMessage: async (...args) => {
+      (state.legacySends ||= []).push(args);
+      return state.legacyResponder ? state.legacyResponder(...args) : { message_id: ++messageId };
+    } };
   return { state, async message(overrides) {
     const msg = { message_id: ++messageId, from: { id: 999, first_name: 'Тест' },
       chat: { id: -100, type: 'supergroup' }, is_topic_message: true, message_thread_id: 184, ...overrides };
@@ -273,4 +282,162 @@ test('forgetting while ordinary delivery fails prevents emergency resending of s
   assert.equal(state.legacySends?.length || 0, 0);
   assert.equal(state.sent.length, 1);
   assert.match(state.sent[0].content.markdown, /Готово/);
+});
+
+test('a confirmed ordinary answer permits an explicit reply to the author own question', async () => {
+  const { state, message } = harness();
+  const original = await message({ text: 'Сыч, как работает тестовая лицензия?' });
+  const continuation = await message({ text: 'Проверь подробнее', reply_to_message: original });
+  assert.equal(state.answers.length, 2);
+  assert.equal(state.answers[1].input.replyText, original.text);
+  assert.equal(state.answers[1].history.some(entry => entry.text === '4'), true);
+  await message({ text: 'А теперь сравни', reply_to_message: continuation });
+  assert.equal(state.answers.length, 3, 'confirmed followups can themselves receive a followup');
+});
+
+test('own-question followups require the same sender, chat, topic, business connection and known target', async () => {
+  const { state, message } = harness();
+  const original = await message({ text: 'Сыч, вопрос', business_connection_id: 'business-A' });
+  for (const overrides of [
+    { from: { id: 42, first_name: 'Другой' } },
+    { chat: { id: -101, type: 'supergroup' } },
+    { message_thread_id: 185 },
+    { business_connection_id: 'business-B' },
+    { business_connection_id: undefined },
+    { reply_to_message: { ...original, message_id: 98765 } },
+    { reply_to_message: { ...original, from: { id: 42 } } },
+    { reply_to_message: undefined },
+  ]) {
+    await message({ text: 'Проверь подробнее', business_connection_id: 'business-A', reply_to_message: original, ...overrides });
+  }
+  assert.equal(state.answers.length, 1);
+  await message({ text: 'Проверь подробнее', business_connection_id: 'business-A', reply_to_message: original });
+  assert.equal(state.answers.length, 2);
+});
+
+test('a delivery still awaiting confirmation cannot authorize an own-question followup', async () => {
+  const { state, message } = harness();
+  let finishDelivery;
+  state.sendResponder = (content, chatId) => chatId === -100 && content.markdown === '4'
+    ? new Promise(resolve => { finishDelivery = resolve; }) : undefined;
+  const original = { message_id: 220, from: { id: 999 }, text: 'Сыч, вопрос' };
+  const pending = message(original);
+  await new Promise(resolve => setImmediate(resolve));
+  await message({ text: 'Проверь подробнее', reply_to_message: original });
+  assert.equal(state.answers.length, 1);
+  finishDelivery({ messageId: 221 }); await pending;
+  state.sendResponder = null;
+  await message({ text: 'Проверь подробнее', reply_to_message: original });
+  assert.equal(state.answers.length, 2);
+});
+
+test('missing confirmation and failed or uncertain deliveries never authorize followups', async () => {
+  for (const scenario of ['missing', 'reported-failed', 'failed', 'uncertain', 'partial']) {
+    const { state, message } = harness();
+    state.sendResponder = (content, chatId) => {
+      if (chatId !== -100 || !content.markdown) return;
+      if (scenario === 'missing') return { ok: true };
+      if (scenario === 'reported-failed') return { ok: false, messageId: 221 };
+      throw new Error(scenario === 'uncertain' ? 'ETIMEDOUT ambiguous delivery' : 'Synthetic rejected formatting');
+    };
+    if (scenario === 'partial') state.answerResponder = () => 'x'.repeat(4100);
+    let legacyChunks = 0;
+    state.legacyResponder = () => scenario === 'partial' && ++legacyChunks === 1
+      ? { message_id: 221 } : Promise.reject(new Error('Unconfirmed legacy delivery'));
+    const original = await message({ text: 'Сыч, вопрос' });
+    await message({ text: 'Проверь подробнее', reply_to_message: original });
+    assert.equal(state.answers.length, 1, scenario);
+  }
+});
+
+test('a confirmed emergency plain delivery also permits an own-question followup', async () => {
+  const { state, message } = harness();
+  state.sendResponder = (content, chatId) => {
+    if (chatId === -100 && content.markdown === '4') throw new Error('Synthetic rejected formatting');
+  };
+  const original = await message({ text: 'Сыч, вопрос' });
+  assert.equal(state.legacySends.length, 1);
+  state.sendResponder = null;
+  await message({ text: 'Проверь подробнее', reply_to_message: original });
+  assert.equal(state.answers.length, 2);
+});
+
+test('an approved voice followup survives direct-call recomputation and retains source question text', async () => {
+  const { state, message } = harness();
+  const original = await message({ text: 'Сыч, как это устроено?' });
+  state.transcript = 'А почему?';
+  await message({ voice: { file_id: 'v' }, reply_to_message: { ...original, text: undefined } });
+  assert.equal(state.answers.length, 2);
+  assert.equal(state.answers[1].input.replyText, original.text);
+  assert.equal(state.summaries.length, 0);
+});
+
+test('an answered original voice question retains its recognized text for a later own-question followup', async () => {
+  const { state, message } = harness();
+  state.transcript = 'Сыч, как это устроено?';
+  const original = await message({ voice: { file_id: 'v' } });
+  await message({ text: 'Проверь подробнее', reply_to_message: { ...original, text: undefined } });
+  assert.equal(state.answers.length, 2);
+  assert.equal(state.answers[1].input.replyText, state.transcript);
+});
+
+test('forget user and reset chat remove followups, including late in-flight confirmations', async () => {
+  for (const command of ['Сыч, забудь меня', '/reset@Siitch_bot']) {
+    const { state, message } = harness();
+    const original = await message({ text: 'Сыч, вопрос' });
+    let finishDelivery;
+    state.sendResponder = (content, chatId) => chatId === -100 && content.markdown === '4'
+      ? new Promise(resolve => { finishDelivery = resolve; }) : undefined;
+    const lateSource = { message_id: 230, from: { id: 999 }, text: 'Сыч, новый вопрос' };
+    const pending = message(lateSource);
+    await new Promise(resolve => setImmediate(resolve));
+    await message({ text: command });
+    finishDelivery({ messageId: 231 }); await pending;
+    state.sendResponder = null;
+    await message({ text: 'Проверь подробнее', reply_to_message: original });
+    await message({ text: 'Проверь подробнее', reply_to_message: lateSource });
+    assert.equal(state.answers.length, 2, command);
+  }
+});
+
+test('slash commands, owner ephemeral commands, muted messages and banned users cannot use followups', async () => {
+  const { state, message } = harness();
+  const original = await message({ text: 'Сыч, вопрос' });
+  for (const text of ['/help', '/help@Other_bot', '/ask@Siitch_bot Сыч секрет', '/say@Siitch_bot Сыч секрет']) {
+    await message({ text, reply_to_message: original });
+  }
+  await message({ message_id: 0, ephemeral_message_id: 'private', from: { id: 42 }, text: 'Проверь подробнее', reply_to_message: original });
+  state.muted = true;
+  await message({ text: 'Проверь подробнее', reply_to_message: original });
+  assert.equal(state.answers.length, 1);
+  const bannedCase = harness();
+  const bannedSource = await bannedCase.message({ from: { id: 42 }, text: 'Сыч, вопрос' });
+  bannedCase.state.banned = true;
+  await bannedCase.message({ from: { id: 42 }, text: 'Проверь подробнее', reply_to_message: bannedSource });
+  assert.equal(bannedCase.state.answers.length, 1);
+});
+
+test('forgetting or resetting during followup voice recognition cancels stale continuations', async () => {
+  for (const command of ['Сыч, забудь меня', '/reset@Siitch_bot']) {
+    const { state, message } = harness();
+    const original = await message({ text: 'Сыч, как это устроено?' });
+    let finishTranscription;
+    state.transcriptionResponder = () => new Promise(resolve => { finishTranscription = resolve; });
+    const pending = message({ voice: { file_id: 'v' }, reply_to_message: original });
+    await new Promise(resolve => setImmediate(resolve));
+    await message({ text: command });
+    finishTranscription({ text: 'А почему?' }); await pending;
+    assert.equal(state.answers.length, 1, command);
+    assert.equal(state.summaries.length, 0);
+  }
+});
+
+test('ordinary slash command and profile responses cannot authorize own-question followups', async () => {
+  for (const text of ['/help@Siitch_bot', 'Сыч кто я?']) {
+    const { state, message } = harness();
+    const original = await message({ text });
+    assert.equal(state.sent.length, 1);
+    await message({ text: 'Проверь подробнее', reply_to_message: original });
+    assert.equal(state.answers.length, 0, text);
+  }
 });

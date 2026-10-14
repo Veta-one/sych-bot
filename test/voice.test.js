@@ -397,6 +397,7 @@ test('message handler sends one voice card in the original topic and preserves f
     '../utils/privacy': { isForgetMeRequest: () => false }, '../utils/profile-query': {},
     '../utils/commands': {}, '../services/documents': {},
     '../utils/reminders': require('../src/utils/reminders'),
+    '../utils/conversation-followups': require('../src/utils/conversation-followups'),
   }, { setTimeout, clearTimeout, setInterval, clearInterval, Math: { ...Math, random: () => 1 } });
   const msg = { message_id: 10, from: { id: 999, first_name: 'Имя' },
     chat: { id: -100, type: 'supergroup' }, is_topic_message: true, message_thread_id: 184,

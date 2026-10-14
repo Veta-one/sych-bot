@@ -119,6 +119,7 @@ function harness({ answer, send, download, publish, now, answerTimeoutMs, integr
       '../utils/privacy': { isForgetMeRequest: () => false }, '../utils/profile-query': {},
       '../utils/commands': require('../src/utils/commands'),
       '../utils/reminders': require('../src/utils/reminders'), '../services/documents': {},
+      '../utils/conversation-followups': require('../src/utils/conversation-followups'),
       '../services/publication': { createPublication: (botInstance, msg, target) => ({
         send: text => publishMessage(botInstance, msg, text, target),
       }) },

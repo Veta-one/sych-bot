@@ -4,7 +4,7 @@ const path = require('node:path');
 const vm = require('node:vm');
 const test = require('node:test');
 
-function harness(extraDependencies = {}) {
+function harness(extraDependencies = {}, runtime = {}) {
   const calls = [];
   const notifications = [];
   const config = { geminiKeys: [], searchProvider: 'tavily', mainModel: 'writer', logicModel: 'planner', maxOutputTokens: 1000 };
@@ -24,7 +24,7 @@ function harness(extraDependencies = {}) {
   Object.assign(dependencies, extraDependencies);
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/services/ai.js'), 'utf8'), {
     module: box, require: name => { assert.ok(Object.hasOwn(dependencies, name), name); return dependencies[name]; },
-    console: { log() {}, error() {}, warn() {} }, Buffer, setTimeout, clearTimeout,
+    console: { log() {}, error() {}, warn() {} }, Buffer, setTimeout, clearTimeout, AbortController, ...runtime,
   });
   const ai = box.exports;
   ai.openai = { chat: { completions: { create: async request => { calls.push(request); return { choices: [{ message: { content: 'Ответ Сыча [Источник](https://example.org/countries)' } }] }; } } } };
@@ -161,7 +161,7 @@ test('search outage reaches both writers as missing evidence, never silently as 
   const { ai, calls } = harness();
   ai.performSearch = async () => [];
   const answer = await ai.getResponse([], { text: 'Сыч проверь новость', sender: 'Тест' });
-  assert.match(answer, /Подтвердить это сейчас не удалось/);
+  assert.match(answer, /Подтвердить .*не удалось/);
   assert.equal(calls.length, 0);
 });
 
@@ -228,4 +228,89 @@ test('failed or invalid answer auditing never releases an unchecked draft', asyn
   }
   ai.reviewEvidence = async () => ({ approved: false, answer: 'Один [пост](https://example.org/countries) — ещё не доказательство.' });
   assert.equal(await ai.finalizeResearchedAnswer('Definitely banned!', result), 'Один [пост](https://example.org/countries) — ещё не доказательство.');
+});
+
+function timedHarness() {
+  let now = 0, nextId = 0;
+  const timers = new Map();
+  const setTimer = (fn, delay) => { const id = ++nextId; timers.set(id, { at: now + delay, fn }); return id; };
+  const clearTimer = id => timers.delete(id);
+  class ClockDate extends Date { static now() { return now; } }
+  const asyncBox = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/utils/async.js'), 'utf8'), {
+    module: asyncBox, setTimeout: setTimer, clearTimeout: clearTimer,
+  });
+  const researchBox = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/services/research.js'), 'utf8'), {
+    module: researchBox, URL, Date: ClockDate, console: { log() {} },
+    require: () => asyncBox.exports,
+  });
+  const context = harness({ '../utils/async': asyncBox.exports, './research': researchBox.exports },
+    { Date: ClockDate, setTimeout: setTimer, clearTimeout: clearTimer });
+  context.ai.reviewEvidence = Object.getPrototypeOf(context.ai).reviewEvidence.bind(context.ai);
+  context.ai.keys = ['synthetic'];
+  context.ai.executeNativeWithRetry = fn => fn();
+  context.events = [];
+  context.delay = (ms, signal, value, reject = false) => new Promise((resolve, fail) => {
+    const timer = setTimer(() => reject ? fail(new Error('Request timed out.')) : resolve(value), ms);
+    signal?.addEventListener('abort', () => { clearTimer(timer); fail(new Error('aborted')); }, { once: true });
+  });
+  context.clock = () => now;
+  context.drive = async work => {
+    let complete = false, value, error;
+    work.then(v => { complete = true; value = v; }, e => { complete = true; error = e; });
+    for (let n = 0; n < 80 && !complete; n++) {
+      await new Promise(setImmediate);
+      if (complete) break;
+      const first = [...timers].sort((a,b) => a[1].at - b[1].at)[0];
+      assert.ok(first, 'pending work must have a bounded timer');
+      now = first[1].at; timers.delete(first[0]); first[1].fn();
+    }
+    assert.ok(complete, 'operation must settle within the bounded schedule');
+    if (error) throw error;
+    return value;
+  };
+  return context;
+}
+
+test('a slow primary reviewer leaves time for native evidence and final-answer auditing', async () => {
+  const context = timedHarness();
+  const { ai, events, delay, drive } = context;
+  ai.openai.chat.completions.create = (body, options) => {
+    if (!options) return Promise.resolve({ choices: [{ message: { content: 'Проверенный ответ [Источник](https://example.org/countries)' } }] });
+    events.push({ provider: 'primary', at: context.clock(), timeout: options.timeout, signal: options.signal });
+    return delay(options.timeout, options.signal, null, true);
+  };
+  ai.nativeModel = { generateContent: (request, options) => {
+    events.push({ provider: 'native', at: context.clock(), timeout: options?.timeout, signal: options?.signal });
+    const audit = request.contents[0].parts[0].text.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА');
+    return delay(5000, options?.signal, { response: { text: () => JSON.stringify(audit ? { approved: true } : {
+      claims: [{ claim: 'Kazakhstan supported.', status: 'supported', sourceId: 'S1', quote: 'Kazakhstan is supported for Claude.ai.' }], sufficient: true,
+    }) } });
+  } };
+  const answer = await drive(ai.getResponse([], { text: 'Сыч, проверь актуальную информацию', sender: 'Тест' }));
+  assert.equal(answer, 'Проверенный ответ [Источник](https://example.org/countries)');
+  assert.equal(events.filter(e => e.provider === 'native').length, 2);
+  assert.ok(events.every(e => e.signal instanceof AbortSignal));
+  assert.ok(events.filter(e => e.provider === 'native').every(e => e.timeout >= 15000));
+  assert.ok(context.clock() <= 80000);
+});
+
+test('review deadlines abort both providers and shortened caller budgets preserve a native reserve', async () => {
+  const context = timedHarness();
+  const { ai, events, delay, drive } = context;
+  ai.openai.chat.completions.create = (_, options) => {
+    events.push(options);
+    return delay(100000, options.signal, null);
+  };
+  ai.nativeModel = { generateContent: (_, options = {}) => {
+    events.push(options);
+    return delay(100000, options.signal, null);
+  } };
+  await assert.rejects(drive(ai.reviewEvidence('Synthetic evidence', { timeoutMs: 12000 })), /провер|review/i);
+  assert.equal(context.clock(), 12000);
+  assert.equal(events.length, 2);
+  assert.ok(events[0].timeout <= 5400);
+  assert.ok(events[1].timeout >= 6600);
+  assert.ok(events.every(e => e.signal?.aborted));
 });
