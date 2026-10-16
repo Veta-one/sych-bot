@@ -311,7 +311,7 @@ function timedHarness() {
   const researchBox = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/services/research.js'), 'utf8'), {
     module: researchBox, URL, Date: ClockDate, console: { log() {} },
-    require: () => asyncBox.exports,
+    require: name => name === '../utils/async' ? asyncBox.exports : require(name),
   });
   const context = harness({ '../utils/async': asyncBox.exports, './research': researchBox.exports },
     { Date: ClockDate, setTimeout: setTimer, clearTimeout: clearTimer });

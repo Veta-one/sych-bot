@@ -6,6 +6,42 @@ const page = '# Claude.ai\nSupported countries: Kazakhstan, Armenia, Georgia.\nP
 const source = { id: 'S1', url: 'https://example.org/countries', title: 'Supported countries', pageText: page, level: 'page' };
 const claim = { claim: 'Kazakhstan is supported for Claude.ai.', status: 'supported', sourceId: 'S1', quote: 'Supported countries: Kazakhstan, Armenia, Georgia.', limitation: 'Does not establish payment acceptance.' };
 
+test('quotation matching tolerates only visible Markdown formatting, preserving words, numbers and negation', () => {
+  const formatted = { ...source, pageText: '**[MemHub](https://example.org/memhub)** is a **local-first** app. It does not require 48 GB.' };
+  const check = quote => validateReview({ claims: [{ ...claim, quote }] }, [formatted]).claims.length;
+  assert.equal(check('MemHub is a local-first app.'), 1);
+  assert.equal(check('MemHub is a cloud-first app.'), 0);
+  assert.equal(check('It does require 48 GB.'), 0);
+  assert.equal(check('It does not require 24 GB.'), 0);
+  assert.equal(check('MemHub is a local-first app. It does not require 48 GB.'), 1);
+});
+
+test('page excerpts retain integration links at the end even for questions in another language', () => {
+  const full = 'Memory framework.\n' + 'General introduction and examples. '.repeat(800)
+    + '\n## Integrations\n[AgentBridge plugin](plugins/agentbridge/README.md)\nLicense Apache-2.0.';
+  const excerpt = pageExcerpt(full, 'объясни что это и можно ли запустить локально', 6000);
+  assert.equal(excerpt.truncated, true);
+  assert.ok(excerpt.text.length <= 6000);
+  assert.match(excerpt.text, /Memory framework/);
+  assert.match(excerpt.text, /AgentBridge plugin/);
+});
+
+test('inline Markdown tokens do not insert spaces inside words or numbers', () => {
+  const formatted = { ...source, pageText: 'The Open**Claw** integration has 3**0** billion parameters.\nA line\nbreak remains separated.' };
+  const check = quote => validateReview({ claims: [{ ...claim, quote }] }, [formatted]).claims.length;
+  assert.equal(check('The OpenClaw integration has 30 billion parameters.'), 1);
+  assert.equal(check('The Open Claw integration has 3 0 billion parameters.'), 0);
+  assert.equal(check('A line break remains separated.'), 1);
+});
+
+test('final auditing receives the read source pack even when earlier claims omit an integration', () => {
+  const { answerAuditPrompt } = require('../src/services/research');
+  const prompt = answerAuditPrompt('No integrations are documented.', { question: 'Explain integrations', claims: [claim], gaps: [],
+    sources: [{ ...source, pageText: 'The AgentBridge integration is available.', truncated: true }] });
+  assert.match(prompt, /The AgentBridge integration is available/);
+  assert.match(prompt, /"truncated":true/);
+});
+
 test('URL collection preserves balanced paths, hidden targets and original context over bot answer URLs', () => {
   assert.deepEqual(requestedUrls({ text: 'Read (https://example.org/Function_(math)).',
     replyText: 'Wrong bot answer https://example.org/translator',
@@ -137,7 +173,8 @@ test('weak evidence triggers at most one targeted follow-up without stale news f
   assert.equal(queries[1].q, 'official policy');
   assert.equal(queries[1].opts.timeRange, undefined);
   assert.deepEqual(queries[1].opts.preferredDomains, ['example.org']);
-  assert.equal(reviews, 2);
+  assert.equal(reviews, 1, 'A follow-up returning only the already reviewed URL needs no duplicate review');
+  assert.equal(result.claims[0].claim, claim.claim);
   assert.equal(result.sufficient, false);
 });
 
@@ -167,7 +204,7 @@ test('images are exposed only when explicitly requested', async () => {
 });
 
 test('failed auditing never publishes intermediate model conclusions', () => {
-  const text = conservativeAnswer({ claims: [{ ...claim, url: source.url, status: 'contradicted' }], gaps: [] });
+  const text = conservativeAnswer({ claims: [{ ...claim, url: source.url, status: 'contradicted' }], gaps: [], fallbackStage: 'answer_audit' });
   assert.match(text, /Проверку ответа завершить не удалось/);
   assert.doesNotMatch(text, /Kazakhstan/);
 });

@@ -425,12 +425,13 @@ async finalizeResearchedAnswer(answer, result, responsePolicy = {}) {
   try {
     const audit = await withTimeout(this.reviewEvidence(answerAuditPrompt(answer, result), { timeoutMs: REVIEW_TIMEOUT_MS }), REVIEW_TIMEOUT_MS, 'Проверка готового ответа');
     const subjectConfirmed = !result.requestedSources?.length || audit?.addressesQuestion === true;
+    console.log(`[ANSWER AUDIT] subjectConfirmed=${subjectConfirmed} approved=${audit?.approved === true} corrected=${audit?.approved === false && typeof audit.answer === 'string' && Boolean(audit.answer.trim())}`);
     if (subjectConfirmed && audit?.approved === true) return answer + sourceCoverageNote(result);
     if (subjectConfirmed && audit?.approved === false && typeof audit.answer === 'string' && audit.answer.trim()) return audit.answer.trim() + sourceCoverageNote(result);
   } catch { console.error('[ANSWER AUDIT FAIL] code=VERIFICATION_UNAVAILABLE'); }
   // Failure of the verifier must not release an unchecked confident draft.
   if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
-  return conservativeAnswer({ ...result, verificationFailed: true });
+  return conservativeAnswer({ ...result, verificationFailed: true, fallbackStage: 'answer_audit' });
 }
   
 // === ЧТЕНИЕ СТРАНИЦЫ ПО ССЫЛКЕ (Tavily Extract) ===
@@ -573,7 +574,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       });
       researchContext = evidenceContext(result);
       researchResult = result;
-      console.log(`[RESEARCH] sources=${result.sources.length} claims=${result.claims.length} sufficient=${result.sufficient} errors=${result.errors.length}`);
+      console.log(`[RESEARCH] sources=${result.sources.length} claims=${result.claims.length} sufficient=${result.sufficient} errors=${result.errors.length} recovery=${result.recoveryAttempted === true}`);
       // No evidence means no factual draft to improvise around. This also avoids
       // paying for a writer and another verifier during a search outage.
       if (!result.claims.length && !result.imageUrls.length) {

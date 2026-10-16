@@ -116,7 +116,7 @@ test('a quote hidden in the omitted page remainder cannot validate a claim', asy
 
 test('second-round global packing invalidates quotes in the newly hidden part of an earlier complete page', async () => {
   const hidden = 'Unrelated sentence provides an entirely different observation.';
-  const full = `${'navigation '.repeat(600)}${hidden}`.slice(-(6000));
+  const full = `${'navigation '.repeat(300)}${hidden}${'navigation '.repeat(300)}`.slice(0, 6000);
   assert.equal(full.length, 6000);
   let searches = 0;
   const prompts = [];
@@ -213,7 +213,7 @@ test('invalid claim primitives do not crash or make an empty review sufficient',
   assert.equal(result.claims.length, 0);
 });
 
-test('conservative response distinguishes failed verification, preserves safe reading links and hides unchecked claims', () => {
+test('conservative response distinguishes failed verification without endorsing unverified search links', () => {
   const sources = [
     { url: 'javascript:alert(1)', title: 'inject' },
     ...Array.from({ length: 4 }, (_, i) => ({ url: `https://example.org/${i}`, title: `UNVERIFIED_CLAIM_${i}` })),
@@ -223,8 +223,8 @@ test('conservative response distinguishes failed verification, preserves safe re
   const finalFailure = conservativeAnswer({ claims: [{ claim: 'UNVERIFIED_FINAL_FACT' }], sources, verificationFailed: true });
   assert.match(technical, /техническ/);
   assert.doesNotMatch(noEvidence, /техническ/);
-  assert.match(technical, /Материалы для чтения/);
-  assert.equal((technical.match(/https:\/\/example.org/g) || []).length, 3);
+  assert.doesNotMatch(technical, /Материалы для чтения|https:\/\/example.org/);
+  assert.doesNotMatch(noEvidence, /https:\/\/example.org/);
   for (const text of [technical, noEvidence, finalFailure]) {
     assert.doesNotMatch(text, /UNVERIFIED|javascript|[\u2014\u2015\u2e3a\u2e3b]/);
   }
