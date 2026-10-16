@@ -120,3 +120,102 @@ test('pending work is bounded and is cleaned on finish, expiry, or eviction', ()
   assert.equal(links.confirm(third, 21), false);
   assert.equal(links.pending.size, 0);
 });
+
+test('confirmed public bot replies preserve origin for another author without authorizing other-question triggers', () => {
+  const links = new ConversationFollowups();
+  const post = question({ message_id: 1, from: { id: 43 }, text: undefined,
+    caption: 'SyntheticMemory, SharedMemory и модель. Репозиторий, документация, веса.',
+    caption_entities: [
+      { type: 'text_link', offset: 0, length: 9, url: 'https://github.com/example/memory' },
+      { type: 'text_link', offset: 11, length: 6, url: 'https://github.com/example/memory/docs' },
+      { type: 'text_link', offset: 19, length: 6, url: 'https://huggingface.co/example/memory' },
+    ] });
+  const original = question({ reply_to_message: post });
+  const token = links.begin(original, 184, { botId: 888 });
+  const botReply = question({ message_id: 20, from: { id: 888, is_bot: true }, text: 'Неверный продукт' });
+  const recheck = reply(botReply, { from: { id: 44 } });
+  assert.equal(links.getSource(recheck, 184), null, 'unconfirmed bot answers have no reusable origin');
+  links.confirm(token, 20); links.finish(token);
+  assert.equal(links.get(reply(original, { from: { id: 44 } }), 184), null);
+  const source = links.getSource(recheck, 184);
+  assert.match(source.sourceContext.text, /SyntheticMemory/);
+  assert.equal(source.sourceContext.text.includes(botReply.text), false);
+  assert.deepEqual(source.sourceContext.urls, post.caption_entities.map(entity => entity.url));
+  const next = links.begin(recheck, 184, { botId: 888, inherited: source });
+  assert.deepEqual(next.sourceContext, source.sourceContext);
+  assert.deepEqual(next.sourceUserIds, source.sourceUserIds, 'rechecks do not grow the retained source lineage');
+  links.confirm(next, 21); links.finish(next);
+  links.forgetUser(43);
+  assert.equal(links.entries.size, 0, 'forgetting a source author clears inherited origin too');
+});
+
+test('public bot-origin lookup observes scope, expiry, reset and private boundaries', () => {
+  let now = 1000;
+  const links = new ConversationFollowups({ now: () => now });
+  const token = links.begin(question({ business_connection_id: 'A' }), 184, { botId: 888 });
+  links.confirm(token, 20); links.finish(token);
+  const candidate = reply(question({ message_id: 20, from: { id: 888, is_bot: true } }),
+    { from: { id: 43 }, business_connection_id: 'A' });
+  assert.ok(links.getSource(candidate, 184));
+  for (const [msg, topic] of [
+    [{ ...candidate, chat: { id: -101 } }, 184], [candidate, 185],
+    [{ ...candidate, business_connection_id: 'B' }, 184],
+    [{ ...candidate, ephemeral_message_id: 1 }, 184],
+    [{ ...candidate, reply_to_message: { ...candidate.reply_to_message, ephemeral_message_id: 1 } }, 184],
+    [{ ...candidate, reply_to_message: { ...candidate.reply_to_message, from: { id: 42 } } }, 184],
+  ]) assert.equal(links.getSource(msg, topic), null);
+  now += 5 * 60 * 1000;
+  assert.equal(links.getSource(candidate, 184), null);
+  const fresh = links.begin(question({ business_connection_id: 'A' }), 184, { botId: 888 });
+  links.confirm(fresh, 20); links.finish(fresh);
+  links.forgetChat(-100);
+  assert.equal(links.getSource(candidate, 184), null);
+});
+
+test('source collection bounds text, URLs and reply depth, handles cycles and excludes private or foreign scopes', () => {
+  const { buildSourceContext, MAX_SOURCE_CHARS, MAX_SOURCE_URLS, MAX_REPLY_DEPTH } = require('../src/utils/source-context');
+  const longPost = question({ text: 'Original source ' + 'x'.repeat(12000), entities: Array.from({ length: 80 }, (_, i) =>
+    ({ type: 'text_link', url: `https://source.example/page-${i}` })) });
+  const source = buildSourceContext(question({ text: 'Сыч, исследуй запуск с OpenClaw', reply_to_message: longPost }));
+  assert.ok(source.text.length <= MAX_SOURCE_CHARS);
+  assert.match(source.text, /Original source/);
+  assert.match(source.text, /OpenClaw/);
+  assert.equal(source.urls.length, MAX_SOURCE_URLS);
+  const cyclic = question({ text: 'cycle' });
+  cyclic.reply_to_message = cyclic;
+  assert.equal(buildSourceContext(cyclic).text, 'cycle');
+  let nested = question({ text: 'oldest' });
+  for (let i = 0; i < MAX_REPLY_DEPTH + 3; i++) nested = question({ text: `step-${i}`, reply_to_message: nested });
+  assert.equal(buildSourceContext(nested).text.includes('oldest'), false);
+  for (const blocked of [
+    question({ text: 'private origin', ephemeral_message_id: 1 }),
+    question({ text: 'different chat', chat: { id: -101 } }),
+    question({ text: 'bot guess', from: { id: 888, is_bot: true } }),
+  ]) assert.equal(buildSourceContext(question({ text: 'current', reply_to_message: blocked }), { botId: 888 }).text, 'current');
+  assert.deepEqual(buildSourceContext(question({ text: 'https://source.example/Function_(math) и (https://source.example/page).' })).urls,
+    ['https://source.example/Function_(math)', 'https://source.example/page']);
+});
+
+test('recent public origin reuse requires an explicit short criticism with no new source and the exact scope/TTL', () => {
+  let now = 1000;
+  const links = new ConversationFollowups({ now: () => now });
+  const original = question({ text: 'Сыч, проверь https://source.example/origin', business_connection_id: 'A' });
+  const token = links.begin(original, 184, { botId: 888 });
+  const critique = question({ from: { id: 43 }, text: 'Чет сыч налажал', business_connection_id: 'A' });
+  assert.equal(links.getRecentSource(critique, 184), null);
+  links.confirm(token, 20); links.finish(token);
+  assert.ok(links.getRecentSource(critique, 184));
+  for (const [msg, topic] of [
+    [{ ...critique, text: 'Сыч, расскажи про погоду' }, 184],
+    [{ ...critique, text: 'Сыч, ты ошибся. Расскажи про другую систему.' }, 184],
+    [{ ...critique, text: 'Сыч, перепроверь https://new.example/source' }, 184],
+    [{ ...critique, entities: [{ type: 'text_link', url: 'https://new.example/source' }] }, 184],
+    [{ ...critique, reply_to_message: question() }, 184],
+    [{ ...critique, photo: [{ file_id: 'new' }] }, 184],
+    [{ ...critique, chat: { id: -101 } }, 184], [critique, 185],
+    [{ ...critique, business_connection_id: 'B' }, 184],
+    [{ ...critique, ephemeral_message_id: 1 }, 184],
+  ]) assert.equal(links.getRecentSource(msg, topic), null);
+  now += 5 * 60 * 1000;
+  assert.equal(links.getRecentSource(critique, 184), null);
+});

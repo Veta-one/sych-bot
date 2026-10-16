@@ -228,6 +228,9 @@ async function processMessage(bot, msg) {
         await handleEphemeral(bot, msg);
         return;
     }
+    // An ordinary update must not expose a private replied answer through
+    // public media, replyText, source bindings, observers or delivery.
+    if (msg.reply_to_message?.ephemeral_message_id !== undefined) return;
     const chatId = msg.chat.id;
     const userId = msg.from?.id;
     if (!userId) return;
@@ -276,9 +279,11 @@ async function processMessage(bot, msg) {
     const replyUserId = msg.reply_to_message?.from?.id;
     const isReplyToBot = replyUserId && String(replyUserId) === String(config.botId);
     const ownQuestionFollowup = conversationFollowups.get(msg, threadId);
+    const sourceFollowup = ownQuestionFollowup || (isReplyToBot ? conversationFollowups.getSource(msg, threadId) : null)
+        || conversationFollowups.getRecentSource(msg, threadId);
     let hasTriggerWord = config.triggerRegex.test(cleanText);
     let isDirectlyCalled = hasTriggerWord || isReplyToBot || Boolean(ownQuestionFollowup);
-    const followupToken = conversationFollowups.begin(msg, threadId);
+    const followupToken = conversationFollowups.begin(msg, threadId, { botId: config.botId, inherited: sourceFollowup });
     const userMemoryRevision = memoryRevision(userId);
     const isStaleProfileReply = () => profileDeletionPending(userId)
         || memoryRevision(userId) !== userMemoryRevision || Boolean(followupToken?.cancelled);
@@ -454,7 +459,7 @@ async function processMessage(bot, msg) {
 }
 
   
-    if (followupToken) followupToken.sourceText = text;
+    conversationFollowups.update(followupToken, msg, text);
     if (!text && !msg.photo && !msg.sticker && !msg.voice && !msg.audio) return;
 
   if (msg.chat.type === 'private' && !isBusinessMessage) {
@@ -625,6 +630,7 @@ async function processMessage(bot, msg) {
     chatHistory[chatId] = [];
     analysisBuffers[chatId] = [];
     conversationFollowups.forgetChat(chatId);
+    handleEphemeral.forgetChat(chatId);
     return sendRich(bot, chatId, { markdown: "🦉 Окей, всё забыл, ну было и было" }, baseOpts(msg, threadId));
   }
 
@@ -966,25 +972,6 @@ async function processMessage(bot, msg) {
     const userProfile = { ...storage.getProfile(chatId, userId), userId };
     if (isStaleProfileReply()) { stopTyping(); return; }
 
-    // === ЛОГИКА ССЫЛОК ===
-    let targetLink = null;
-    
-    // Ищем ссылку
-    const linkRegex = /https?:\/\/[^\s]+/;
-    const linkInText = text.match(linkRegex);
-    
-    if (linkInText) {
-        targetLink = linkInText[0];
-    } else if (msg.reply_to_message) {
-        if (msg.reply_to_message.text) {
-             const linkInReply = msg.reply_to_message.text.match(linkRegex);
-             if (linkInReply) targetLink = linkInReply[0];
-        } else if (msg.reply_to_message.caption) {
-             const linkInCaption = msg.reply_to_message.caption.match(linkRegex);
-             if (linkInCaption) targetLink = linkInCaption[0];
-        }
-    }
-
     let aiResponse = "";
 
     // Получаем профиль чата для контекста
@@ -1003,7 +990,7 @@ async function processMessage(bot, msg) {
 
     aiResponse = await ai.getResponse(
         chatHistory[chatId],
-        { sender: senderName, text: text, replyText: replyText },
+        { sender: senderName, text: text, replyText: replyText, sourceContext: followupToken?.sourceContext },
         imageBuffer,
         mimeType,
         instruction,

@@ -1,4 +1,5 @@
 const FIVE_MINUTES = 5 * 60 * 1000;
+const { buildSourceContext, sourceUserIds, isSourceRecheck, MAX_SOURCE_CHARS } = require('./source-context');
 
 function integerId(value, positive = true) {
   if (typeof value !== 'number' && typeof value !== 'string') return null;
@@ -41,19 +42,30 @@ class ConversationFollowups {
     }
   }
 
-  begin(msg, threadId) {
+  begin(msg, threadId, { botId, inherited } = {}) {
     this.prune();
     const identity = scope(msg, threadId);
     const sourceId = integerId(msg?.message_id);
     const sourceText = msg?.text || msg?.caption || '';
-    if (!identity || !sourceId || msg.ephemeral_message_id != null || msg.from.is_bot
+    if (!identity || !sourceId || msg.ephemeral_message_id !== undefined || msg.from.is_bot
         || String(sourceText).trimStart().startsWith('/')) return null;
     while (this.pending.size >= this.maxEntries) {
       const oldest = this.pending.values().next().value;
       oldest.cancelled = true;
       this.pending.delete(oldest);
     }
-    const token = { ...identity, sourceId, sourceText: String(sourceText), expires: this.now() + this.ttlMs, cancelled: false };
+    const sourceContext = buildSourceContext(msg, { botId, inheritedContext: inherited?.sourceContext });
+    // Rechecks preserve the original text, so their authors do not become new
+    // source authors unless they add a retained URL. This also bounds lineage
+    // by the bounded source chain and URL count rather than conversation length.
+    const contributesSource = !inherited?.sourceContext
+      || sourceContext?.urls.some(url => !inherited.sourceContext.urls.includes(url));
+    const token = { ...identity, sourceId, sourceText: String(sourceText).slice(0, MAX_SOURCE_CHARS),
+      botId: integerId(botId), inheritedContext: inherited?.sourceContext,
+      sourceContext,
+      sourceUserIds: [...new Set([...(inherited?.sourceUserIds || []),
+        ...(contributesSource ? [identity.userId, ...sourceUserIds(msg, botId)] : [])])],
+      expires: this.now() + this.ttlMs, cancelled: false };
     this.pending.add(token);
     return token;
   }
@@ -73,9 +85,44 @@ class ConversationFollowups {
     this.prune();
     const identity = scope(msg, threadId);
     const sourceId = integerId(msg?.reply_to_message?.message_id);
-    if (!identity || !sourceId || msg.ephemeral_message_id != null || msg.reply_to_message?.ephemeral_message_id != null
+    if (!identity || !sourceId || msg.ephemeral_message_id !== undefined || msg.reply_to_message?.ephemeral_message_id !== undefined
         || integerId(msg.reply_to_message?.from?.id) !== identity.userId) return null;
     return this.entries.get(key(identity, sourceId)) || null;
+  }
+
+  // This lookup does not trigger a response. It only restores the public source
+  // for an already-addressed reply to a confirmed bot delivery, regardless of
+  // which group participant asks the followup.
+  getSource(msg, threadId) {
+    this.prune();
+    const identity = scope(msg, threadId);
+    const answerId = integerId(msg?.reply_to_message?.message_id);
+    const botId = integerId(msg?.reply_to_message?.from?.id);
+    if (!identity || !answerId || !botId || msg.ephemeral_message_id !== undefined
+      || msg.reply_to_message?.ephemeral_message_id !== undefined) return null;
+    for (const entry of this.entries.values()) {
+      if (entry.chatId === identity.chatId && entry.topic === identity.topic && entry.businessId === identity.businessId
+        && entry.botId === botId && entry.botMessageId === answerId) return entry;
+    }
+    return null;
+  }
+
+  getRecentSource(msg, threadId) {
+    this.prune();
+    const identity = scope(msg, threadId);
+    if (!identity || !isSourceRecheck(msg)) return null;
+    for (const entry of [...this.entries.values()].reverse()) {
+      if (entry.chatId === identity.chatId && entry.topic === identity.topic && entry.businessId === identity.businessId
+        && entry.botId && entry.sourceContext?.urls?.length) return entry;
+    }
+    return null;
+  }
+
+  update(token, msg, text) {
+    if (!token || token.cancelled || !this.pending.has(token)) return;
+    token.sourceText = String(text || '').slice(0, MAX_SOURCE_CHARS);
+    token.sourceContext = buildSourceContext({ ...msg, text }, { botId: token.botId,
+      inheritedContext: token.inheritedContext });
   }
 
   finish(token) {
@@ -93,7 +140,7 @@ class ConversationFollowups {
 
   forgetUser(userId) {
     const normalized = integerId(userId);
-    if (normalized) this.clearWhere(entry => entry.userId === normalized);
+    if (normalized) this.clearWhere(entry => entry.userId === normalized || entry.sourceUserIds?.includes(normalized));
   }
 
   forgetChat(chatId) {

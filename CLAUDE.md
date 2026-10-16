@@ -89,6 +89,10 @@ Profile grounding (1.14.3): immediate analysis receives only the current user's 
 **Fallback chain**: OpenRouter → Google Gemini (rotates through multiple keys) → Admin notification
 
 ### Search Providers (configurable via `SEARCH_PROVIDER` env var)
+
+Supplied source links (1.14.5): `research.requestedUrls()` deduplicates public HTTP URLs from the current request and original source context (fallback: direct reply); Telegram `text_link` targets are carried separately. Generic pages enter the same 90-second research deadline and are read before general search, four at a time, up to eight unique addresses. `requestedSources` records read/unavailable/limit states; excess URL metadata is bounded to 32 entries with an explicit omitted count. Unread URLs always produce a deterministic coverage note after answer auditing, never an inferred 404/nonexistence. Linked-source evidence review and final auditing require `addressesQuestion:true`; conclusions must cite at least one supplied page when supplied pages were read. Existing quote/size/deadline checks remain. This improves grounding, not a proof of semantic correctness. Single-video transcript/native analysis keeps its existing path.
+
+Original source context (1.14.5): `utils/source-context.js` bounds text to 8000 characters, URL targets to 32 and public reply traversal to four messages. Confirmed public deliveries retain the original post/question for five minutes in the existing bounded conversation cache; replies by another participant can recover it within the same chat/topic/business scope without widening triggers. Narrow short standalone rechecks/criticism can recover the most recent URL-bearing public context in that scope. Bot answers are never substituted as the original source. Forget/reset clears inherited bindings and pending work. `/ask` keeps source context only in its own confirmed private dialog cache; `/say` never inherits private source context. Tests extend conversation routing, followups, ephemeral routing, AI and research suites with synthetic sources only.
 - Tavily (default, recommended)
 - Perplexity (via OpenRouter)
 - Google (via Gemini Tools)

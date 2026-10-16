@@ -12,6 +12,21 @@ const CHAT = -100;
 const OTHER = 42;
 const SECRET = 'synthetic-private-request';
 
+test('say reads hidden links in both its current request and the public source without inheriting ask', async () => {
+  const h = harness();
+  await h.handle({ text: '/ask private prior source', entities: [{ type: 'text_link', url: 'https://example.org/private-origin' }] });
+  await h.handle({ text: '/say explain using this documentation',
+    entities: [{ type: 'text_link', url: 'https://example.org/current-documentation' }],
+    reply_to_message: { message_id: 41, from: { id: OTHER }, caption: 'Public source',
+      caption_entities: [{ type: 'text_link', url: 'https://example.org/public-source' }] } });
+  const context = h.state.answers[1].input.sourceContext;
+  assert.ok(context.urls.includes('https://example.org/current-documentation'));
+  assert.ok(context.urls.includes('https://example.org/public-source'));
+  assert.equal(context.urls.includes('https://example.org/private-origin'), false);
+  assert.equal(h.state.publications.length, 1);
+  assert.equal(JSON.stringify(h.state.publicRecorded).includes('private-origin'), false);
+});
+
 function deferred() {
   let resolve;
   let reject;
@@ -200,6 +215,79 @@ test('hidden text/link and image URL use the ordinary AI request while source te
   assert.deepEqual(h.state.downloads, ['https://images.example/picture.png?size=large']);
   assert.deepEqual(call.history, h.publicHistory);
   assertPrivateOnly(h.state);
+});
+
+test('private rechecks retain all public post links in the exact isolated dialog without first-link injection', async () => {
+  const h = harness({ integration: true });
+  const urls = ['https://source.example/repository', 'https://source.example/memhub', 'https://models.example/memory'];
+  await h.process({ text: '/ask проверь все три и запуск с OpenClaw', message_thread_id: 184,
+    reply_to_message: { message_id: 12, from: { id: OTHER }, caption: 'Исходный продукт памяти',
+      caption_entities: urls.map(url => ({ type: 'text_link', offset: 0, length: 7, url })) } });
+  const first = h.state.answers[0];
+  assert.deepEqual(first.input.sourceContext.urls, urls);
+  const reply = { message_id: 0, ephemeral_message_id: h.state.sent.at(-1).opts.ephemeral.editId,
+    date: 1791446400, from: { id: BOT }, text: 'Неверная гипотеза' };
+  await h.process({ text: 'Перепроверь', message_thread_id: 184, reply_to_message: reply });
+  assert.deepEqual(h.state.answers[1].input.sourceContext, first.input.sourceContext);
+  assert.equal(h.state.answers[1].input.sourceContext.text.includes(reply.text), false);
+  await h.process({ ephemeral_message_id: undefined, message_id: 24, text: 'Сыч, публичный вопрос' });
+  assert.equal(JSON.stringify(h.state.answers.at(-1).input).includes(urls[0]), false);
+  await h.process({ text: '/say полезная реплика', reply_to_message: { message_id: 25, from: { id: OTHER }, text: 'Новый публичный контекст' } });
+  assert.equal(JSON.stringify(h.state.answers.at(-1).input).includes(urls[0]), false);
+});
+
+test('private source metadata cannot cross date, topic, chat, business, expiry, forget or reset boundaries', async () => {
+  for (const variant of ['date', 'topic', 'chat', 'business', 'expiry', 'forget', 'reset']) {
+    let now = 1000;
+    const h = harness({ now: () => now });
+    await h.handle({ text: '/ask исследуй OpenClaw', message_thread_id: 184, business_connection_id: 'A',
+      reply_to_message: { message_id: 12, from: { id: OTHER }, text: 'synthetic-source-origin',
+        entities: [{ type: 'text_link', url: 'https://source.example/hidden-origin' }] } });
+    const source = { message_id: 0, ephemeral_message_id: h.state.sent.at(-1).opts.ephemeral.editId,
+      date: 1791446400, from: { id: BOT }, text: 'answer' };
+    const overrides = { text: 'Перепроверь', message_thread_id: 184, business_connection_id: 'A', reply_to_message: source };
+    if (variant === 'date') source.date++;
+    if (variant === 'topic') overrides.message_thread_id = 185;
+    if (variant === 'chat') overrides.chat = { id: -101, type: 'supergroup' };
+    if (variant === 'business') overrides.business_connection_id = 'B';
+    if (variant === 'expiry') now += 30 * 60 * 1000;
+    if (variant === 'forget') h.handler.forgetUser(OWNER);
+    if (variant === 'reset') h.handler.forgetChat(CHAT);
+    await h.handle(overrides);
+    assert.equal(JSON.stringify(h.state.answers.at(-1).input.sourceContext).includes('hidden-origin'), false, variant);
+    assert.equal(JSON.stringify(h.state.answers.at(-1).input.sourceContext).includes('OpenClaw'), false, variant);
+  }
+});
+
+test('public chat reset clears private origins and prevents pending answers from restoring them', async () => {
+  const pendingAnswer = deferred();
+  const h = harness({ integration: true, answer: () => pendingAnswer.promise });
+  const pending = h.process({ text: '/ask synthetic-origin-private-request',
+    reply_to_message: { message_id: 12, from: { id: OTHER }, text: 'https://source.example/before-reset' } });
+  await new Promise(resolve => setImmediate(resolve));
+  await h.process({ ephemeral_message_id: undefined, message_id: 23, text: '/reset@Siitch_bot' });
+  pendingAnswer.resolve('answer'); await pending;
+  const response = h.state.sent.find(call => call.opts.ephemeral?.editId);
+  assert.ok(response);
+  await h.process({ text: 'Перепроверь', reply_to_message: { message_id: 0,
+    ephemeral_message_id: response.opts.ephemeral.editId, date: 1791446400, from: { id: BOT }, text: 'answer' } });
+  const current = h.state.answers.at(-1);
+  assert.equal(JSON.stringify(current.input).includes('before-reset'), false);
+  assert.equal(JSON.stringify(current.history).includes('synthetic-origin-private-request'), false);
+});
+
+test('an unconfirmed private final edit cannot bind origin to the acknowledged message', async () => {
+  for (const result of [undefined, { ok: false }, { ephemeralMessageId: 777 }]) {
+    const h = harness({ send: (call, n) => n === 1
+      ? { ephemeralMessageId: 701, messageDate: 1791446400 }
+      : n === 2 ? result : { ephemeralMessageId: call.opts.ephemeral.editId || 702, messageDate: 1791446400 } });
+    await h.handle({ text: '/ask original-request', reply_to_message: { message_id: 12,
+      from: { id: OTHER }, text: 'https://source.example/unconfirmed' } });
+    await h.handle({ text: 'Перепроверь', reply_to_message: { message_id: 0, ephemeral_message_id: 701,
+      date: 1791446400, from: { id: BOT }, text: 'answer' } });
+    assert.equal(JSON.stringify(h.state.answers.at(-1).input).includes('unconfirmed'), false);
+    assert.equal(JSON.stringify(h.state.answers.at(-1).history).includes('original-request'), false);
+  }
 });
 
 test('acknowledgement completes before any media or AI work, then the same private message is edited', async () => {

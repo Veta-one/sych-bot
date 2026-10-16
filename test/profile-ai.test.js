@@ -12,7 +12,7 @@ function harness({ timeoutCapMs } = {}) {
     '@google/generative-ai': {}, '../config': config, '../core/prompts': prompts.exports,
     axios: {}, openai: {}, '@tavily/core': {},
     './storage': { initGoogleStats() {}, resetStatsIfNeeded: () => false, incrementStat() {}, incrementGoogleStat() {} },
-    '../utils/rich': {}, './youtube': {}, './youtube-gemini': {}, '../utils/content-policy': require('../src/utils/content-policy'), './research': {},
+    '../utils/rich': {}, './youtube': { isYouTubeUrl: () => false }, './youtube-gemini': {}, '../utils/content-policy': require('../src/utils/content-policy'), './research': require('../src/services/research'),
     '../utils/async': { withTimeout: (operation, timeout, label) => require('../src/utils/async').withTimeout(operation,
       timeoutCapMs == null ? timeout : Math.min(timeout, timeoutCapMs), label) }, '../utils/private-context': require('../src/utils/private-context'),
     '../utils/profile-evidence': require('../src/utils/profile-evidence'), '../utils/voice': {}, '../utils/reminders': {},

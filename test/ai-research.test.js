@@ -16,7 +16,7 @@ function harness(extraDependencies = {}, runtime = {}) {
     '@google/generative-ai': {}, '../config': config, '../core/prompts': promptsModule.exports,
     axios: {}, openai: {}, '@tavily/core': {},
     './storage': { initGoogleStats() {}, resetStatsIfNeeded: () => false, incrementStat() {}, incrementGoogleStat() {} },
-    '../utils/rich': { sendRich: async (...args) => { notifications.push(args); } }, './youtube': {}, './youtube-gemini': {},
+    '../utils/rich': { sendRich: async (...args) => { notifications.push(args); } }, './youtube': { isYouTubeUrl: () => false }, './youtube-gemini': {},
     '../utils/content-policy': require('../src/utils/content-policy'), './research': require('../src/services/research'),
     '../utils/async': require('../src/utils/async'), '../utils/voice': {}, '../utils/reminders': {},
   };
@@ -34,6 +34,74 @@ function harness(extraDependencies = {}, runtime = {}) {
   ai.reviewEvidence = async prompt => prompt.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА') ? { approved: true } : ({ claims: [{ claim: 'Kazakhstan supported.', status: 'supported', sourceId: 'S1', quote: 'Kazakhstan is supported for Claude.ai.', limitation: 'No guarantee for a card.' }], sufficient: true });
   return { ai, calls, config, notifications };
 }
+
+test('all links from the replied post are read even if the planner disables search', async () => {
+  const { ai, calls } = harness();
+  const urls = ['https://example.org/framework', 'https://example.org/model'];
+  const reads = [];
+  ai.runLogicModel = async () => ({ needsSearch: false });
+  ai.extractUrl = async url => { reads.push(url); return 'The memory project and model are available.'; };
+  ai.performSearch = async () => { throw Error('Direct sources should be sufficient'); };
+  ai.reviewEvidence = async prompt => prompt.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА')
+    ? { approved: true, addressesQuestion: true }
+    : { claims: [{ claim: 'The memory project is available.', status: 'supported', sourceId: 'S1',
+      quote: 'The memory project and model are available.' }], sufficient: true, addressesQuestion: true };
+  for (const text of ['Сыч глянь все ссылки и дай подробный отчёт', 'Сыч, изучи два документа и сопоставь данные']) {
+    reads.length = 0;
+    await ai.getResponse([], { sender: 'Тест', text, replyText: `${urls[0]}\n${urls[1]}\n${urls[0]}` });
+    assert.deepEqual(reads, urls);
+  }
+  assert.match(calls[0].messages[1].content[0].text, /memory project is available/);
+});
+
+test('a recheck prioritizes the original source context over a wrong previous bot answer', async () => {
+  const { ai } = harness();
+  let planner;
+  const reads = [];
+  ai.runLogicModel = async prompt => { planner = prompt; return { needsSearch: false }; };
+  ai.extractUrl = async url => { reads.push(url); return 'Original memory framework exists.'; };
+  ai.reviewEvidence = async prompt => prompt.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА')
+    ? { approved: true, addressesQuestion: true }
+    : { claims: [{ claim: 'Memory framework exists.', status: 'supported', sourceId: 'S1',
+      quote: 'Original memory framework exists.' }], sufficient: true, addressesQuestion: true };
+  await ai.getResponse([], { sender: 'Тест', text: 'Сыч перепроверь все ссылки', replyText: 'Wrong translator claim.',
+    sourceContext: { text: 'Original memory announcement.', urls: ['https://example.org/original'] } });
+  assert.match(planner, /Original memory announcement/);
+  assert.deepEqual(reads, ['https://example.org/original']);
+});
+
+test('a linked-source audit cannot approve a draft about the wrong product or omit unread links', async () => {
+  const { ai } = harness();
+  const result = { claims: [{ claim: 'The project exists.', url: 'https://example.org/project' }], gaps: [], errors: [],
+    requestedSources: [{ url: 'https://example.org/project', status: 'read' }, { url: 'https://example.org/missing', status: 'unavailable' }] };
+  ai.reviewEvidence = async () => ({ approved: true, addressesQuestion: false });
+  const rejected = await ai.finalizeResearchedAnswer('An unrelated translator.', result);
+  assert.doesNotMatch(rejected, /unrelated translator/);
+  ai.reviewEvidence = async () => ({ approved: true, addressesQuestion: true });
+  const accepted = await ai.finalizeResearchedAnswer('The project exists.', result);
+  assert.match(accepted, /example.org\/missing/);
+  assert.match(accepted, /прочитать/);
+});
+
+test('long original posts keep their initial question in research even with eight long hidden URLs', async () => {
+  const { buildSourceContext } = require('../src/utils/source-context');
+  const { ai } = harness();
+  const sourceContext = buildSourceContext({ from: { id: 1 }, text: 'Сыч, объясни локальный запуск с OpenClaw',
+    reply_to_message: { from: { id: 2 }, caption: 'Исходный пост. ' + 'Подробности '.repeat(1100),
+      caption_entities: Array.from({ length: 8 }, (_, i) => ({ type: 'text_link', url: `https://example.org/${i}/${'a'.repeat(80)}` })) } });
+  const prompts = [];
+  ai.runLogicModel = async () => ({ needsSearch: false });
+  ai.extractUrl = async () => 'The project supports a local server.';
+  ai.reviewEvidence = async prompt => {
+    prompts.push(prompt);
+    return prompt.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА') ? { approved: true, addressesQuestion: true }
+      : { claims: [{ claim: 'A local server is supported.', status: 'supported', sourceId: 'S1',
+        quote: 'The project supports a local server.' }], sufficient: true, addressesQuestion: true };
+  };
+  await ai.getResponse([], { sender: 'Тест', text: 'Сыч, ты уверен?', sourceContext });
+  const evidenceQuestion = JSON.parse(JSON.parse(prompts[0].split('ВОПРОС И КОНТЕКСТ: ')[1].split('\nИСТОЧНИКИ: ')[0]));
+  assert.match(evidenceQuestion.reply, /локальный запуск с OpenClaw/);
+});
 
 test('a private query supplies both labelled images and the replied text to the main model', async () => {
   const { ai, calls } = harness();

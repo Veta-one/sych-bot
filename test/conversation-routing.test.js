@@ -441,3 +441,60 @@ test('ordinary slash command and profile responses cannot authorize own-question
     assert.equal(state.answers.length, 0, text);
   }
 });
+
+test('photo-post links and original request survive a different participant rechecking the public bot answer', async () => {
+  const { state, message } = harness();
+  const urls = ['https://github.com/example/SyntheticMemory', 'https://github.com/example/SyntheticMemory/shared-memory',
+    'https://huggingface.co/example/SyntheticMemory'];
+  const post = { message_id: 10, from: { id: 42 }, caption: 'SyntheticMemory: движок памяти, SharedMemory, модель.',
+    photo: [{ file_id: 'post-image' }], caption_entities: urls.map(url => ({ type: 'text_link', offset: 0, length: 9, url })) };
+  const original = await message({ text: 'Сыч, проверь все ссылки и запуск с OpenClaw', reply_to_message: post });
+  const answer = { message_id: state.sent.at(-1).messageId, from: { id: 888, is_bot: true }, text: 'Ответ о другом продукте' };
+  assert.match(state.answers[0].input.sourceContext.text, /OpenClaw/);
+  assert.deepEqual(Array.from(state.answers[0].input.sourceContext.urls), urls);
+  await message({ from: { id: 43 }, text: 'Перепроверь, ты уверен?', reply_to_message: answer });
+  assert.equal(state.answers.length, 2);
+  assert.match(state.answers[1].input.sourceContext.text, /SyntheticMemory/);
+  assert.match(state.answers[1].input.sourceContext.text, /OpenClaw/);
+  assert.equal(state.answers[1].input.sourceContext.text.includes(answer.text), false);
+  assert.deepEqual(Array.from(state.answers[1].input.sourceContext.urls), urls);
+  await message({ text: 'Проверь ещё раз', reply_to_message: original });
+  assert.deepEqual(Array.from(state.answers[2].input.sourceContext.urls), urls);
+  assert.match(state.answers[2].input.sourceContext.text, /SyntheticMemory/);
+});
+
+test('an unknown bot reply cannot recover another answer origin and ordinary replies to another user stay untriggered', async () => {
+  const { state, message } = harness();
+  const original = await message({ text: 'Сыч, проверь https://source.example/origin' });
+  await message({ from: { id: 43 }, text: 'Перепроверь', reply_to_message: original });
+  assert.equal(state.answers.length, 1);
+  await message({ from: { id: 43 }, text: 'Перепроверь', reply_to_message: { message_id: 987,
+    from: { id: 888 }, text: 'Иной ответ' } });
+  assert.equal(state.answers.length, 2);
+  assert.equal(JSON.stringify(state.answers[1].input.sourceContext).includes('source.example'), false);
+});
+
+test('ordinary replies to private bot messages never expose their contents or authorize public processing', async () => {
+  const { state, message } = harness();
+  await message({ text: 'Сыч, перепроверь', reply_to_message: { message_id: 0, ephemeral_message_id: 32,
+    from: { id: 888 }, text: 'private original https://private.example/source', photo: [{ file_id: 'private-image' }] } });
+  assert.equal(state.answers.length, 0);
+  assert.equal(state.sent.length, 0);
+});
+
+test('standalone short criticism restores the recent public source before another participant rechecks that reply', async () => {
+  const { state, message } = harness();
+  const urls = ['https://github.com/example/memory', 'https://models.example/memory'];
+  await message({ text: 'Сыч, проверь все ссылки и запуск с OpenClaw', reply_to_message: {
+    message_id: 10, from: { id: 42 }, caption: 'SyntheticMemory и SharedMemory',
+    caption_entities: urls.map(url => ({ type: 'text_link', url })) } });
+  await message({ from: { id: 43 }, text: 'Чет сыч налажал' });
+  assert.deepEqual(Array.from(state.answers[1].input.sourceContext.urls), urls);
+  assert.match(state.answers[1].input.sourceContext.text, /OpenClaw/);
+  const defensiveReply = { message_id: state.sent.at(-1).messageId, from: { id: 888 }, text: 'Ошибочная защита ответа' };
+  await message({ from: { id: 44 }, text: 'Перепроверь, ты уверен?', reply_to_message: defensiveReply });
+  assert.deepEqual(Array.from(state.answers[2].input.sourceContext.urls), urls);
+  assert.match(state.answers[2].input.sourceContext.text, /SyntheticMemory/);
+  await message({ text: 'Сыч, расскажи про погоду' });
+  assert.equal(JSON.stringify(state.answers.at(-1).input.sourceContext).includes(urls[0]), false);
+});

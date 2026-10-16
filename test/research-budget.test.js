@@ -1,7 +1,18 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 const { research, conservativeAnswer, validateReview, boundedSources, publicUrl,
-  REVIEW_TIMEOUT_MS, RESEARCH_TIMEOUT_MS } = require('../src/services/research');
+  boundedQuestion, REVIEW_TIMEOUT_MS, RESEARCH_TIMEOUT_MS } = require('../src/services/research');
+
+test('a short recheck retains the original question at the end of a long source post', () => {
+  const { buildSourceContext } = require('../src/utils/source-context');
+  const sourceContext = buildSourceContext({ text: 'Сыч, проверь ссылки и объясни локальный запуск с OpenClaw',
+    from: { id: 1 }, reply_to_message: { from: { id: 2 }, caption: 'Пост о движке памяти. ' + 'Описание '.repeat(1200) } });
+  assert.match(sourceContext.text, /OpenClaw/);
+  const question = boundedQuestion(JSON.stringify({ request: 'Сыч, ты уверен?', reply: sourceContext.text,
+    history: 'Recent discussion '.repeat(200), suppliedMaterial: '' }));
+  assert.ok(question.length <= 8000);
+  assert.match(JSON.parse(question).reply, /локальный запуск с OpenClaw/);
+});
 
 const fact = 'Getty licensed this archive for editorial use.';
 const supported = { claims: [{ claim: fact, status: 'supported', sourceId: 'S1', quote: fact }], sufficient: true };

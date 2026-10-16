@@ -1,10 +1,75 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
-const { pageExcerpt, publicUrl, normalizeSources, validateReview, research, evidenceContext, conservativeAnswer, citedProviderSources } = require('../src/services/research');
+const { pageExcerpt, publicUrl, requestedUrls, normalizeSources, validateReview, research, evidenceContext, conservativeAnswer, citedProviderSources } = require('../src/services/research');
 
 const page = '# Claude.ai\nSupported countries: Kazakhstan, Armenia, Georgia.\nPayments depend on the card issuer.';
 const source = { id: 'S1', url: 'https://example.org/countries', title: 'Supported countries', pageText: page, level: 'page' };
 const claim = { claim: 'Kazakhstan is supported for Claude.ai.', status: 'supported', sourceId: 'S1', quote: 'Supported countries: Kazakhstan, Armenia, Georgia.', limitation: 'Does not establish payment acceptance.' };
+
+test('URL collection preserves balanced paths, hidden targets and original context over bot answer URLs', () => {
+  assert.deepEqual(requestedUrls({ text: 'Read (https://example.org/Function_(math)).',
+    replyText: 'Wrong bot answer https://example.org/translator',
+    sourceContext: { text: 'Original https://example.org/memory#section', urls: ['https://example.org/hidden', 'http://127.0.0.1/'] } }),
+  ['https://example.org/Function_(math)', 'https://example.org/memory', 'https://example.org/hidden']);
+});
+
+test('provided URLs are deduplicated and read before any general search', async () => {
+  const events = [];
+  const urls = ['https://example.org/framework', 'https://example.org/model'];
+  const result = await research({ question: 'Explain the linked memory project', plan: { searchQuery: 'general query' },
+    suppliedUrls: [...urls, urls[0]], search: async () => { events.push('search'); return []; },
+    read: async url => { events.push(url); return page; },
+    review: async () => ({ claims: [claim], sufficient: true, addressesQuestion: true }),
+  });
+  assert.deepEqual(events, urls);
+  assert.equal(result.requestedSources.length, 2);
+  assert.ok(result.requestedSources.every(item => item.status === 'read'));
+  assert.equal(result.sufficient, true);
+});
+
+test('an unread provided URL remains an explicit gap even when the reviewer claims completeness', async () => {
+  const result = await research({ question: 'Read both sources', plan: {},
+    suppliedUrls: [source.url, 'https://example.org/unavailable'], search: async () => [],
+    read: async url => url === source.url ? page : null,
+    review: async () => ({ claims: [claim], sufficient: true, addressesQuestion: true }),
+  });
+  assert.equal(result.sufficient, false);
+  assert.equal(result.requestedSources[1].status, 'unavailable');
+  assert.match(result.gaps.join(' '), /прочитать/);
+  assert.doesNotMatch(result.gaps.join(' '), /404|не существует/);
+});
+
+test('unrelated conclusions cannot pass as an answer about the linked subject', async () => {
+  const result = await research({ question: 'Explain the linked memory project', plan: {},
+    suppliedUrls: [source.url], search: async () => [], read: async () => page,
+    review: async () => ({ claims: [claim], sufficient: true, addressesQuestion: false }),
+  });
+  assert.equal(result.claims.length, 0);
+  assert.equal(result.sufficient, false);
+});
+
+test('provided URLs beyond the read limit are reported rather than silently discarded', async () => {
+  const reads = [];
+  const result = await research({ question: 'Read all links', plan: {},
+    suppliedUrls: Array.from({ length: 10 }, (_, i) => `https://example.org/source-${i}`),
+    search: async () => [], read: async url => { reads.push(url); return page; },
+    review: async () => ({ claims: [claim], sufficient: true, addressesQuestion: true }),
+  });
+  assert.equal(reads.length, 8);
+  assert.equal(result.requestedSources.filter(item => item.status === 'limit').length, 2);
+  assert.equal(result.sufficient, false);
+});
+
+test('search rounds keep distinct source IDs after deduplication against supplied URLs', async () => {
+  let round = 0;
+  const result = await research({ question: 'Compare the project', suppliedUrls: [source.url],
+    plan: { searchQuery: 'first' }, read: async () => page,
+    search: async () => ++round === 1 ? [{ url: source.url }, { url: 'https://example.org/extra' }]
+      : [{ url: 'https://example.org/another' }],
+    review: async () => ({ claims: [claim], sufficient: false, addressesQuestion: true, followUpQuery: 'next' }),
+  });
+  assert.equal(new Set(result.sources.map(item => item.id)).size, result.sources.length);
+});
 
 test('only actual retrieved quotes and source IDs may support a claim', () => {
   const result = validateReview({ claims: [claim, { ...claim, sourceId: 'invented' }, { ...claim, quote: 'All Kazakhstan cards are accepted.' }], sufficient: true }, [source]);

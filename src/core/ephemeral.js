@@ -1,5 +1,6 @@
 const { withTimeout } = require('../utils/async');
 const { runPrivateWork } = require('../utils/private-context');
+const { buildSourceContext } = require('../utils/source-context');
 
 const PRIVATE_TTL_MS = 30 * 60 * 1000;
 const MAX_PRIVATE_DIALOGS = 64;
@@ -25,10 +26,12 @@ function createEphemeralHandler({ config, storage, ai, sendRich, download, getPu
   const inFlight = new Set();
   const identities = new WeakMap();
   const revisions = new Map();
+  const chatRevisions = new Map();
   const publicRequests = new Map();
 
   const threadFor = msg => msg.message_thread_id || msg.reply_to_message?.message_thread_id || 0;
-  const keyFor = (msg, answerId) => `${msg.chat.id}:${msg.from.id}:${threadFor(msg)}:${answerId}`;
+  const keyFor = (msg, answerId) => JSON.stringify([msg.chat.id, msg.from.id, threadFor(msg),
+    msg.business_connection_id || null, answerId]);
   const prune = () => {
     for (const [key, value] of dialogs) if (now() - value.updated >= PRIVATE_TTL_MS) dialogs.delete(key);
     while (dialogs.size > MAX_PRIVATE_DIALOGS) dialogs.delete(dialogs.keys().next().value);
@@ -73,6 +76,9 @@ function createEphemeralHandler({ config, storage, ai, sendRich, download, getPu
     if (inFlight.has(requestKey) || publicRequests.has(requestKey)) return true;
     inFlight.add(requestKey);
     const revision = revisions.get(String(msg.from.id)) || 0;
+    const chatRevision = chatRevisions.get(String(msg.chat.id)) || 0;
+    const isCurrent = () => revision === (revisions.get(String(msg.from.id)) || 0)
+      && chatRevision === (chatRevisions.get(String(msg.chat.id)) || 0);
     const initialOptions = { threadId: threadFor(msg) || null,
       ephemeral: { receiverUserId: msg.from.id, replyToEphemeralId: msg.ephemeral_message_id } };
     let responseId;
@@ -167,8 +173,9 @@ function createEphemeralHandler({ config, storage, ai, sendRich, download, getPu
       const continuation = Boolean(source?.ephemeral_message_id
         && String(source.from?.id) === String(config.botId));
       const cached = continuation ? dialogs.get(keyFor(msg, source.ephemeral_message_id)) : null;
-      const previous = cached && Number.isSafeInteger(source.date) && source.date > 0
-        && cached.messageDate === source.date ? cached.history : [];
+      const confirmedDialog = cached && Number.isSafeInteger(source.date) && source.date > 0
+        && cached.messageDate === source.date ? cached : null;
+      const previous = confirmedDialog?.history || [];
       const hasImage = message => Boolean(message?.photo?.length
         || message?.document?.mime_type?.startsWith('image/')
         || (message?.sticker && !message.sticker.is_animated && !message.sticker.is_video));
@@ -190,6 +197,14 @@ function createEphemeralHandler({ config, storage, ai, sendRich, download, getPu
       ])).filter(Boolean);
       const publicHistory = (getPublicHistory(msg.chat.id) || []).slice(-20).map(entry => ({ ...entry }));
       const input = { sender: msg.from.first_name || 'Владелец', text: text || 'Разбери сообщение или изображение, на которое я ответил.', replyText: sourceText };
+      // Private text never enters the public source cache. A /say request may
+      // read its current public reply, never a previous /ask origin.
+      const sourceContext = buildSourceContext({
+        text, entities: msg.entities, caption_entities: msg.caption_entities, reply_to_message: source,
+        chat: msg.chat, message_thread_id: threadFor(msg), business_connection_id: msg.business_connection_id,
+      }, { botId: config.botId,
+        inheritedContext: isPublic ? undefined : confirmedDialog?.sourceContext });
+      if (sourceContext) input.sourceContext = sourceContext;
       if (isPublic) {
         input.sender = 'Сыч';
         if (source?.from?.first_name) input.text += `\nАвтор исходного сообщения: ${source.from.first_name}.`;
@@ -199,8 +214,6 @@ function createEphemeralHandler({ config, storage, ai, sendRich, download, getPu
           input.text += `\nАдресат обращения: ${target.username ? `@${target.username}` : target.first_name || 'автор исходного сообщения'}. Для обращения к нему используй метку {{recipient}}.`;
         }
       }
-      const sourceUrl = sourceText.match(/https?:\/\/[^\s)]+/)?.[0];
-      if (sourceUrl && !/https?:\/\//.test(input.text)) input.text += `\nСсылка в исходном сообщении: ${sourceUrl}`;
       const answer = await runPrivateWork(() => withTimeout(ai.getResponse(
         isPublic ? publicHistory : [...publicHistory, ...previous], input, images.length ? images : null, 'image/jpeg',
         isPublic ? PUBLIC_COMPOSITION : storage.getUserInstruction(msg.from.username || ''),
@@ -208,7 +221,7 @@ function createEphemeralHandler({ config, storage, ai, sendRich, download, getPu
         false, storage.getChatProfile(msg.chat.id), '', { failOnUnavailable: isPublic }), answerTimeoutMs, 'Private answer'));
       if (typeof answer !== 'string' || !answer.trim()) throw new Error('EMPTY_PRIVATE_ANSWER');
       if (isPublic) {
-        if (isMuted() || revision !== (revisions.get(String(msg.from.id)) || 0)) {
+        if (isMuted() || !isCurrent()) {
           await reply({ markdown: 'Публикация отменена: режим тишины или удаление данных изменились, пока готовился текст.' });
           return true;
         }
@@ -223,14 +236,16 @@ function createEphemeralHandler({ config, storage, ai, sendRich, download, getPu
         await reply({ markdown: '🦉 Написал в общий чат.' });
         return true;
       }
-      await reply({ markdown: answer });
+      const delivered = await reply({ markdown: answer });
+      if (delivered?.ok === false || delivered?.ephemeralMessageId !== responseId) throw new Error('PRIVATE_DELIVERY_UNCONFIRMED');
       const history = [...previous, { role: input.sender, text: [sourceText, input.text].filter(Boolean).join('\n') },
         { role: 'Сыч', text: answer }].slice(-20);
       const dialogKey = keyFor(msg, responseId);
       if (Number.isSafeInteger(responseDate) && responseDate > 0
-        && revision === (revisions.get(String(msg.from.id)) || 0)) {
+        && isCurrent()) {
         dialogs.delete(dialogKey);
-        dialogs.set(dialogKey, { history, messageDate: responseDate, userId: String(msg.from.id), updated: now() });
+        dialogs.set(dialogKey, { history, sourceContext, messageDate: responseDate, userId: String(msg.from.id),
+          chatId: String(msg.chat.id), updated: now() });
       }
       prune();
     } catch (_) {
@@ -248,6 +263,11 @@ function createEphemeralHandler({ config, storage, ai, sendRich, download, getPu
     const id = String(userId);
     revisions.set(id, (revisions.get(id) || 0) + 1);
     for (const [key, dialog] of dialogs) if (dialog.userId === id) dialogs.delete(key);
+  };
+  handle.forgetChat = chatId => {
+    const id = String(chatId);
+    chatRevisions.set(id, (chatRevisions.get(id) || 0) + 1);
+    for (const [key, dialog] of dialogs) if (dialog.chatId === id) dialogs.delete(key);
   };
   return handle;
 }
