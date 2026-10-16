@@ -57,6 +57,7 @@ function loadHandler() {
     '../utils/commands': { resolveAddressedCommand },
     '../utils/reminders': require('../src/utils/reminders'),
     '../utils/conversation-followups': require('../src/utils/conversation-followups'),
+    '../utils/auto-tldr': require('../src/utils/auto-tldr'),
     '../services/documents': {},
   };
   const module = { exports: {} };

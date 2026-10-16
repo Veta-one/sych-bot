@@ -13,6 +13,8 @@ const { PendingReminders, reminderConfirmation } = require('../utils/reminders')
 const pendingReminders = new PendingReminders();
 const { ConversationFollowups } = require('../utils/conversation-followups');
 const conversationFollowups = new ConversationFollowups();
+const { shouldAutoTldr, validTldr, AutoTldrJobs } = require('../utils/auto-tldr');
+const autoTldrJobs = new AutoTldrJobs();
 const {
   buildOfficePromptContext,
   extractOfficeText,
@@ -114,6 +116,7 @@ function forgetUserFromRuntime(userId) {
   handleEphemeral.forgetUser(userId);
   pendingReminders.forgetUser(userId);
   conversationFollowups.forgetUser(userId);
+  autoTldrJobs.forgetUser(userId);
   const targetId = String(userId);
 
   for (const chatId of Object.keys(chatHistory)) {
@@ -587,6 +590,7 @@ async function processMessage(bot, msg) {
 <li>Ответь на сообщение Сыча или на свой вопрос, на который он уже ответил, чтобы продолжить разговор. Реплай на свой вопрос действует 5 минут</li>
 <li>Скажи в <b>голосовом</b> «Сыч, сколько будет два плюс два?» — отвечу как на текст. Голосовым реплаем на мой ответ можно продолжить разговор без имени</li>
 <li>Короткий <b>войс</b> покажу свёрнутой цитатой; длинный перескажу в 2–3 предложениях своим языком. Под кнопкой «Расшифровка» — полный текст, открывается одним нажатием</li>
+<li>Длинный <b>пост в группе</b> от ${config.autoTldrThreshold || 900} значимых символов автоматически перескажу реплаем: один абзац TL;DR с сутью и подсказкой, кому полезен оригинал. Ссылки и код не раздувают порог; при прямом обращении отвечаю на вопрос</li>
 <li>Кидай <b>фото/видео</b> — пойму, что там, прокомментирую и запомню для вопросов потом</li>
 <li>Кидай <b>PDF, DOCX, PPTX, XLSX, TXT или код</b> — прочитаю и отвечу на вопросы</li>
 <li>«Сыч, перескажи [YouTube-ссылка]» — возьму субтитры, а если они закрыты — посмотрю само видео</li>
@@ -630,6 +634,7 @@ async function processMessage(bot, msg) {
     chatHistory[chatId] = [];
     analysisBuffers[chatId] = [];
     conversationFollowups.forgetChat(chatId);
+    autoTldrJobs.forgetChat(chatId);
     handleEphemeral.forgetChat(chatId);
     return sendRich(bot, chatId, { markdown: "🦉 Окей, всё забыл, ну было и было" }, baseOpts(msg, threadId));
   }
@@ -812,6 +817,31 @@ async function processMessage(bot, msg) {
   // === РЕШЕНИЕ ОБ ОТВЕТЕ ===
   // Прямой вызов, ответ боту или ограниченное продолжение своего подтверждённого вопроса.
   const shouldAnswer = isDirectlyCalled;
+
+  if (typeof ai.summarizeLongMessage === 'function' && shouldAutoTldr(msg, {
+    enabled: config.autoTldrEnabled !== false, threshold: config.autoTldrThreshold,
+    directlyCalled: shouldAnswer, botId: config.botId,
+  })) {
+    const current = job => !job.cancelled && !isStaleProfileReply() && !isSilenced()
+      && !storage.isChatMuted?.(chatId);
+    const status = await autoTldrJobs.run(msg, threadId, async job => {
+      if (!current(job)) return false;
+      startTyping();
+      const summary = validTldr(await ai.summarizeLongMessage(text), text);
+      if (!summary || !current(job)) return false;
+      const sent = await sendRich(bot, chatId, {
+        html: `<p><b>🦉 TL;DR:</b> ${escapeHtml(summary)}</p>`,
+      }, { ...replyOpts(msg, threadId), strictDelivery: true, shouldSend: () => current(job) });
+      if (sent?.ok === false || !Number.isSafeInteger(sent?.messageId) || sent.messageId <= 0) return false;
+      if (current(job)) {
+        addToHistory(chatId, 'Сыч', `TL;DR: ${summary}`, config.botId, userId);
+        conversationFollowups.confirm(followupToken, sent.messageId);
+      }
+      return true;
+    });
+    if (status === 'failed' || status === 'capacity') console.warn(`[AUTO TLDR] status=${status}`);
+    return;
+  }
 
   // === ЛОГИКА РЕАКЦИЙ (15%) ===
   if (!shouldAnswer && text.length > 10 && !isReplyToBot && Math.random() < 0.015) {

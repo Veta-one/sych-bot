@@ -188,18 +188,133 @@ async function sendEphemeralRich(chatId, content, opts) {
   }
 }
 
+const safeStrictErrors = new WeakSet();
+
+function strictDeliveryError(code) {
+  // Axios and Telegram errors can carry the bot token and message content.
+  // Only these fresh, payload-free errors may leave the strict path.
+  const messages = {
+    STRICT_DELIVERY_INVALID_OPTIONS: 'sendRich: invalid strict reply options or content',
+    STRICT_DELIVERY_UNCONFIRMED: 'sendRich: strict reply delivery could not be confirmed',
+    STRICT_DELIVERY_REJECTED: 'sendRich: strict Telegram reply was rejected',
+    STRICT_DELIVERY_TEXT_TOO_LONG: 'sendRich: strict reply text fallback exceeds Telegram limits',
+    STRICT_DELIVERY_CANCELLED: 'sendRich: strict reply delivery was cancelled',
+  };
+  const error = new Error(messages[code] || messages.STRICT_DELIVERY_UNCONFIRMED);
+  error.code = code;
+  safeStrictErrors.add(error);
+  return error;
+}
+
+function strictRejection(data, httpStatus) {
+  // Even an error-shaped 5xx body is ambiguous: Telegram may already have sent.
+  if (httpStatus >= 500 || data?.ok !== false) return null;
+  const status = Number(data.error_code || httpStatus);
+  if (!Number.isInteger(status) || status < 400 || status >= 500) return null;
+  return { status, description: typeof data.description === 'string' ? data.description : '' };
+}
+
+function richFallbackAllowed(rejection) {
+  const { status, description } = rejection;
+  // A missing source reply must never turn into a standalone message. Other
+  // authorization, topic, rate-limit and parameter failures are not fallbacks.
+  if (/reply|message to be replied|thread|topic|chat|business|forbidden|too many requests/i.test(description)) return false;
+  if (status === 404) return /not found|unknown method|method.*(?:unsupported|unavailable)/i.test(description);
+  return status === 400 && /rich[_ ]?message|rich formatting|(?:can't|cannot) parse (?:entities|html|markdown)|unsupported (?:parse mode|tag|format)|(?:invalid|unsupported) (?:html|markdown)/i.test(description);
+}
+
+function strictMessageResult(data, mode) {
+  const messageId = data?.result?.message_id;
+  if (data?.ok !== true || !Number.isSafeInteger(messageId) || messageId <= 0) {
+    throw strictDeliveryError('STRICT_DELIVERY_UNCONFIRMED');
+  }
+  return { ok: true, mode, messageId };
+}
+
+function checkStrictDelivery(shouldSend) {
+  if (shouldSend === undefined) return;
+  try {
+    if (shouldSend() === true) return;
+  } catch (_) { /* Cancellation callbacks must not expose their errors. */ }
+  throw strictDeliveryError('STRICT_DELIVERY_CANCELLED');
+}
+
+async function sendStrictRich(chatId, content, opts) {
+  try {
+    const shouldSend = opts.shouldSend;
+    if (!Number.isSafeInteger(opts.replyTo) || opts.replyTo <= 0
+      || (shouldSend !== undefined && typeof shouldSend !== 'function')
+      || !content || (typeof content.html !== 'string' && typeof content.markdown !== 'string')
+      || (content.html != null && content.markdown != null)
+      || (content.fallback != null && typeof content.fallback !== 'string')) {
+      throw strictDeliveryError('STRICT_DELIVERY_INVALID_OPTIONS');
+    }
+    const rich = content.html != null ? { html: collapseHtmlQuotes(content.html) }
+      : { markdown: collapseMarkdownQuotes(content.markdown) };
+    const plain = content.fallback != null ? content.fallback
+      : content.html != null ? htmlToPlain(content.html) : content.markdown;
+    const extra = { reply_parameters: { message_id: opts.replyTo, allow_sending_without_reply: false } };
+    if (opts.threadId) extra.message_thread_id = opts.threadId;
+    if (opts.businessId) extra.business_connection_id = opts.businessId;
+    if (opts.replyMarkup) extra.reply_markup = opts.replyMarkup;
+    if (opts.silent) extra.disable_notification = true;
+
+    let data;
+    let httpStatus;
+    checkStrictDelivery(shouldSend);
+    try {
+      const response = await axios.post(`${API}/sendRichMessage`,
+        { chat_id: chatId, rich_message: rich, ...extra }, { proxy: false, timeout: 10000 });
+      data = response.data;
+      httpStatus = response.status;
+    } catch (error) {
+      data = error.response?.data;
+      httpStatus = error.response?.status;
+      const rejection = strictRejection(data, httpStatus);
+      if (!rejection) throw strictDeliveryError('STRICT_DELIVERY_UNCONFIRMED');
+    }
+
+    const rejection = strictRejection(data, httpStatus);
+    if (!rejection) {
+      if (httpStatus >= 500) throw strictDeliveryError('STRICT_DELIVERY_UNCONFIRMED');
+      return strictMessageResult(data, 'rich');
+    }
+    if (!richFallbackAllowed(rejection)) throw strictDeliveryError('STRICT_DELIVERY_REJECTED');
+    // Exactly one fallback, with no chunking, media retry or Markdown retry.
+    if (!plain.length || plain.length > 4096) throw strictDeliveryError('STRICT_DELIVERY_TEXT_TOO_LONG');
+    checkStrictDelivery(shouldSend);
+    try {
+      const response = await axios.post(`${API}/sendMessage`,
+        { chat_id: chatId, text: plain, link_preview_options: { is_disabled: true }, ...extra },
+        { proxy: false, timeout: 10000 });
+      data = response.data;
+      httpStatus = response.status;
+    } catch (error) {
+      throw strictDeliveryError(strictRejection(error.response?.data, error.response?.status)
+        ? 'STRICT_DELIVERY_REJECTED' : 'STRICT_DELIVERY_UNCONFIRMED');
+    }
+    if (strictRejection(data, httpStatus)) throw strictDeliveryError('STRICT_DELIVERY_REJECTED');
+    if (httpStatus >= 500) throw strictDeliveryError('STRICT_DELIVERY_UNCONFIRMED');
+    return strictMessageResult(data, 'fallback');
+  } catch (error) {
+    if (safeStrictErrors.has(error)) throw error;
+    throw strictDeliveryError('STRICT_DELIVERY_UNCONFIRMED');
+  }
+}
+
 /**
  * Отправляет богатое сообщение с авто-фоллбэком.
  * @param {object} bot — инстанс node-telegram-bot-api (нужен для фоллбэка)
  * @param {number|string} chatId
  * @param {{html?:string, markdown?:string, fallback?:string}} content — ровно одно из html / markdown
- * @param {{replyTo?:number, threadId?:number, businessId?:string, replyMarkup?:object, silent?:boolean, ephemeral?:{receiverUserId:number, replyToEphemeralId?:number, editId?:number}}} [opts]
+ * @param {{replyTo?:number, threadId?:number, businessId?:string, replyMarkup?:object, silent?:boolean, strictDelivery?:boolean, shouldSend?:()=>boolean, ephemeral?:{receiverUserId:number, replyToEphemeralId?:number, editId?:number}}} [opts]
  * @returns {Promise<{ok:boolean, mode:'rich'|'rich-noimg'|'fallback', messageId?:number, ephemeralMessageId?:number, error?:string}>}
  */
 async function sendRich(bot, chatId, content, opts = {}) {
   // Presence rather than truthiness: malformed private options must never
   // accidentally select the ordinary public delivery path.
   if (opts && typeof opts === 'object' && 'ephemeral' in opts) return sendEphemeralRich(chatId, content, opts);
+  if (opts.strictDelivery === true) return sendStrictRich(chatId, content, opts);
   const rich = {};
   if (content.html != null) rich.html = collapseHtmlQuotes(content.html);
   else if (content.markdown != null) rich.markdown = collapseMarkdownQuotes(content.markdown);

@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const test = require('node:test');
 
 function harness() {
-  const state = { sent: [], reminders: [], answers: [], summaries: [], parses: [], immediate: [], profileDescriptions: [], download: Buffer.from('audio'), transcript: 'Обычное сообщение.', muted: false, plan: { kind: 'answer' } };
+  const state = { sent: [], reminders: [], answers: [], summaries: [], tldrSummaries: [], parses: [], immediate: [], profileDescriptions: [], download: Buffer.from('audio'), transcript: 'Обычное сообщение.', muted: false, plan: { kind: 'answer' } };
   const storage = { isBanned: () => Boolean(state.banned), hasChat: () => true, updateChatName() {}, trackUser() {},
     isTopicMuted: () => state.muted, getProfile: () => ({}), getChatProfile: () => ({ topic: 'test' }),
     getUserInstruction: () => '', addReminder: (...args) => state.reminders.push(args) };
@@ -16,6 +16,8 @@ function harness() {
   };
   storage.findProfileByQuery = () => state.targetProfile || null;
   const ai = {
+    summarizeLongMessage: async text => { state.tldrSummaries.push(text); return state.tldrResponder
+      ? state.tldrResponder(text) : 'Автор объясняет устройство нового инструмента. Оригинал полезен тем, кто планирует его подключать.'; },
     transcribeAudio: async () => state.transcriptionResponder ? state.transcriptionResponder() : ({ text: state.transcript }),
     summarizeVoiceTranscript: async text => { state.summaries.push(text); return 'Краткий текст'; },
     getResponse: async (history, input, media, mimeType, instruction, profile, spontaneous, chatProfile, externalContext) => {
@@ -50,11 +52,12 @@ function harness() {
     '../utils/privacy': require('../src/utils/privacy'), '../utils/profile-query': require('../src/utils/profile-query'),
     '../utils/commands': require('../src/utils/commands'), '../services/documents': require('../src/services/documents'), '../utils/reminders': require('../src/utils/reminders'),
     '../utils/conversation-followups': require('../src/utils/conversation-followups'),
+    '../utils/auto-tldr': require('../src/utils/auto-tldr'),
   };
   const box = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/core/logic.js'), 'utf8'), {
     module: box, require: n => { assert.ok(Object.hasOwn(dependencies, n), n); return dependencies[n]; },
-    Buffer, console: { log() {}, error() {} }, setTimeout, clearTimeout, setInterval, clearInterval,
+    Buffer, console: { log() {}, error() {}, warn() {} }, setTimeout, clearTimeout, setInterval, clearInterval,
     Math: { random: () => 1 },
   });
   const bot = { getFileLink: async () => 'mock://voice', sendChatAction: async () => {},
@@ -497,4 +500,81 @@ test('standalone short criticism restores the recent public source before anothe
   assert.match(state.answers[2].input.sourceContext.text, /SyntheticMemory/);
   await message({ text: 'Сыч, расскажи про погоду' });
   assert.equal(JSON.stringify(state.answers.at(-1).input.sourceContext).includes(urls[0]), false);
+});
+
+const longPost = 'В новом инструменте сохраняется исходный контекст задачи. Автор подробно описывает подключение и ограничения работы. '.repeat(12);
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+test('long human posts receive exactly one short TLDR reply without an explicit call or ordinary answer', async () => {
+  const { state, message } = harness();
+  const original = await message({ text: longPost, from: { id: 42, first_name: 'Участник' } });
+  assert.equal(state.tldrSummaries.length, 1);
+  assert.equal(state.tldrSummaries[0], longPost);
+  assert.equal(state.answers.length, 0);
+  assert.equal(state.sent.length, 1);
+  assert.match(state.sent[0].content.html, /TL;DR:/);
+  assert.equal(state.sent[0].opts.replyTo, original.message_id);
+  assert.equal(state.sent[0].opts.threadId, 184);
+  assert.equal(state.sent[0].opts.strictDelivery, true);
+  await message({ text: 'Сыч, проверь источники', reply_to_message: {
+    message_id: state.sent[0].messageId, from: { id: 888, is_bot: true }, text: 'TL;DR: краткий пересказ' } });
+  assert.equal(state.answers.length, 1);
+  assert.equal(state.answers[0].input.sourceContext.text, longPost);
+});
+
+test('forwarded photo captions qualify while short, bot, edited and directly called texts do not auto-summarize', async () => {
+  const photo = harness();
+  await photo.message({ caption: longPost, photo: [{ file_id: 'public-image' }], forward_origin: { type: 'channel' } });
+  assert.equal(photo.state.tldrSummaries.length, 1);
+  for (const overrides of [{ text: 'Короткая реплика.' }, { text: longPost, from: { id: 888, is_bot: true } },
+    { text: longPost, from: { id: 43, is_bot: true } }, { text: longPost, edit_date: 100 }]) {
+    const h = harness(); await h.message(overrides);
+    assert.equal(h.state.tldrSummaries.length, 0);
+    assert.equal(h.state.sent.length, 0);
+  }
+  const called = harness(); await called.message({ text: 'Сыч, объясни этот текст. ' + longPost });
+  assert.equal(called.state.tldrSummaries.length, 0);
+  assert.equal(called.state.answers.length, 1);
+});
+
+test('concurrent redelivery, failed generation and unconfirmed delivery do not duplicate TLDR', async () => {
+  const h = harness();
+  const gate = deferred(); h.state.tldrResponder = () => gate.promise;
+  const input = { message_id: 600, text: longPost };
+  const first = h.message(input);
+  await new Promise(setImmediate);
+  await h.message(input);
+  assert.equal(h.state.tldrSummaries.length, 1);
+  gate.resolve('Автор описывает новый инструмент. Полезно тем, кто планирует подключение.');
+  await first;
+  assert.equal(h.state.sent.length, 1);
+  await h.message(input); assert.equal(h.state.sent.length, 1);
+  for (const invalid of ['', 'x'.repeat(451)]) {
+    const failed = harness(); failed.state.tldrResponder = () => invalid;
+    await failed.message({ text: longPost });
+    assert.equal(failed.state.sent.length, 0);
+  }
+  const ambiguous = harness(); ambiguous.state.sendResponder = () => { throw Error('unknown delivery'); };
+  await ambiguous.message(input); await ambiguous.message(input);
+  assert.equal(ambiguous.state.tldrSummaries.length, 1);
+  assert.equal(ambiguous.state.legacySends, undefined);
+});
+
+test('mute, ban, forget and reset stop late automatic summaries', async () => {
+  for (const change of ['mute', 'ban', 'forget', 'reset']) {
+    const h = harness(); const gate = deferred(); h.state.tldrResponder = () => gate.promise;
+    const work = h.message({ text: longPost, from: { id: 42, first_name: 'Участник' } });
+    await new Promise(setImmediate);
+    if (change === 'mute') h.state.muted = true;
+    if (change === 'ban') h.state.banned = true;
+    if (change === 'forget') await h.message({ text: '/forget_me@Siitch_bot', from: { id: 42 } });
+    if (change === 'reset') await h.message({ text: '/reset@Siitch_bot' });
+    gate.resolve('Автор описывает новый инструмент. Полезно тем, кто планирует подключение.');
+    await work;
+    assert.equal(h.state.sent.some(sent => sent.content.html?.includes('TL;DR:')), false, change);
+  }
 });

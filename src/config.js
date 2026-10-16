@@ -54,6 +54,8 @@ module.exports = {
   googleNativeModel: 'gemini-2.5-flash-lite', 
   voiceFallbackModel: process.env.VOICE_FALLBACK_MODEL || 'gemini-2.5-flash',
   voiceSummaryTimeoutMs: positiveNumber(process.env.VOICE_SUMMARY_TIMEOUT_SECONDS, 45) * 1000,
+  autoTldrEnabled: !/^(?:false|off|0)$/i.test((process.env.AUTO_TLDR_ENABLED || '').trim()),
+  autoTldrThreshold: Math.floor(positiveNumber(process.env.AUTO_TLDR_THRESHOLD, 900)),
   fallbackModelName: 'gemini-2.5-flash-lite',
   contextSize: 30,
 

@@ -35,11 +35,42 @@ const VOICE_TRANSCRIPTION_TIMEOUT_MS = 60000;
 const VOICE_PRIMARY_ATTEMPT_TIMEOUT_MS = 15000;
 const VOICE_FALLBACK_RESERVE_MS = 30000;
 const VOICE_SUMMARY_TIMEOUT_MS = 45000;
+const LONG_MESSAGE_SUMMARY_TIMEOUT_MS = 40000;
+const LONG_MESSAGE_MAX_SOURCE_CHARS = 40000;
+const LONG_MESSAGE_SUMMARY_MAX_CHARS = 450;
 const PROFILE_ANALYSIS_TIMEOUT_MS = 12000;
 const PROFILE_DESCRIPTION_TIMEOUT_MS = 28000;
 const PROFILE_WRITER_TIMEOUT_MS = 12000;
 const PROFILE_AUDIT_TIMEOUT_MS = 8000;
 const PROFILE_ANSWER_MAX_CHARS = 6000;
+
+function longMessageSummaryFields(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || typeof value.summary !== 'string' || typeof value.readingHint !== 'string') return null;
+  const summary = value.summary.trim(), readingHint = value.readingHint.trim();
+  // An oversized draft may be repaired by the independent review, but never
+  // pass unbounded generated material to a second model.
+  if (!summary || !readingHint || [...summary + readingHint].length > 2000) return null;
+  return { summary, readingHint };
+}
+
+function selectLongMessageSummary(sourceLength, value) {
+  if (value?.approved !== true) return '';
+  const fields = longMessageSummaryFields(value);
+  if (!fields) return '';
+  const { summary, readingHint } = fields;
+  const output = `${summary} ${readingHint}`;
+  const length = [...output].length;
+  if (length > LONG_MESSAGE_SUMMARY_MAX_CHARS || length > sourceLength / 2
+    || /[\u0000-\u001f\u007f\u2028\u2029\u2014\u2015\u2e3a\u2e3b]/u.test(output)
+    || /https?:\/\/|www\.|[`*_<>]|\[[^\]]*\]\(/i.test(output)
+    || /^(?:TL[;:]?DR|ТЛДР|Кратко)\s*:/i.test(output)) return '';
+  const sentences = text => (text.match(/[.!?…]+["'»”)]*(?:\s+|$)/gu) || []).length;
+  if (!/[\p{L}]/u.test(summary) || !/[\p{L}]/u.test(readingHint)
+    || !/[.!?…]["'»”)]*$/u.test(summary) || !/[.!?…]["'»”)]*$/u.test(readingHint)
+    || sentences(summary) < 1 || sentences(summary) > 2 || sentences(readingHint) !== 1) return '';
+  return output;
+}
 
 class AiService {
   constructor() {
@@ -996,6 +1027,81 @@ async generateFlavorText(task, result) {
     } catch (error) {
       // The transcript is already usable; a failed optional summary must not lose it.
       console.error(`[VOICE SUMMARY FAIL] ${error.message}`);
+      return '';
+    }
+  }
+
+  async summarizeLongMessage(text) {
+    // Automatic summaries are optional, isolated from normal conversations, and
+    // never silently shorten the source before drafting or checking it.
+    if (typeof text !== 'string' || text.length > LONG_MESSAGE_MAX_SOURCE_CHARS * 2
+      || [...text].length > LONG_MESSAGE_MAX_SOURCE_CHARS) return '';
+    const sourceText = text.trim();
+    if (!sourceText) return '';
+    const sourceLength = [...sourceText].length;
+    const deadline = Date.now() + LONG_MESSAGE_SUMMARY_TIMEOUT_MS;
+    const hasNative = Boolean(this.keys?.length && this.nativeModel);
+    if (!this.openai && !hasNative) return '';
+    const request = async (system, payload, temperature) => {
+      const input = JSON.stringify(payload);
+      const stageDeadline = Math.min(deadline, Date.now() + LONG_MESSAGE_SUMMARY_TIMEOUT_MS / 2);
+      const attempt = async (allowance, generate) => {
+        const timeout = Math.min(allowance, stageDeadline - Date.now());
+        if (timeout <= 0) throw new Error('Long message summary deadline');
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), timeout);
+        try {
+          const result = await withTimeout(generate(controller.signal, timeout), timeout, 'Автопересказ');
+          if (controller.signal.aborted || Date.now() >= stageDeadline) throw new Error('Long message summary deadline');
+          const parsed = parseVoiceJson(result);
+          if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('Invalid long message summary JSON');
+          return parsed;
+        } finally {
+          clearTimeout(timer);
+          // Cancel an SDK operation even when the outer timeout wins the race.
+          controller.abort();
+        }
+      };
+      if (this.openai) {
+        try {
+          const allowance = hasNative ? Math.min(9000, (stageDeadline - Date.now()) * 0.45) : stageDeadline - Date.now();
+          return await attempt(allowance, async (signal, timeout) => {
+            const result = await this.openai.chat.completions.create({
+              model: config.mainModel, temperature, max_tokens: 1200,
+              messages: [{ role: 'system', content: system }, { role: 'user', content: input }],
+              response_format: { type: 'json_object' },
+            }, { timeout, signal, maxRetries: 0 });
+            storage.incrementStat('smart');
+            if (result.choices?.[0]?.finish_reason === 'length') throw new Error('Incomplete long message summary');
+            return result.choices?.[0]?.message?.content;
+          });
+        } catch { /* Native may use the reserve of this same stage deadline. */ }
+      }
+      if (hasNative && Date.now() < stageDeadline) {
+        return attempt(stageDeadline - Date.now(), async (signal, timeout) => {
+          // Do not use the generic retry helper: optional auto replies must not
+          // rotate keys indefinitely, notify the admin, or log provider payloads.
+          storage.incrementGoogleStat(this.keyIndex);
+          const result = await this.nativeModel.generateContent({
+            systemInstruction: { role: 'system', parts: [{ text: system }] },
+            contents: [{ role: 'user', parts: [{ text: input }] }], tools: [],
+            generationConfig: { temperature, responseMimeType: 'application/json', maxOutputTokens: 1200 },
+          }, { timeout, signal });
+          if (result.response.candidates?.[0]?.finishReason === 'MAX_TOKENS') throw new Error('Incomplete long message summary');
+          return result.response.text();
+        });
+      }
+      throw new Error('Long message summary unavailable');
+    };
+    try {
+      const draft = longMessageSummaryFields(await request(prompts.longMessageSummarySystem(), { sourceText }, 0.1));
+      if (!draft || Date.now() >= deadline) return '';
+      const reviewed = await request(prompts.longMessageSummaryReviewSystem(), { sourceText, draft }, 0);
+      // The unreviewed writer output is never a publishable fallback.
+      return Date.now() < deadline ? selectLongMessageSummary(sourceLength, reviewed) : '';
+    } catch {
+      // Failure of an unsolicited optional reply stays quiet. Do not disclose
+      // the original message or raw provider errors in logs or admin messages.
       return '';
     }
   }
