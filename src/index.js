@@ -6,7 +6,8 @@ const axios = require('axios');
 const { sendRich, escapeHtml } = require('./utils/rich');
 const { createReminderDelivery } = require('./services/reminder-delivery');
 const { ensureOwnerEphemeralCommands } = require('./services/ephemeral-commands');
-const { isPrivateWork } = require('./utils/private-context');
+const { isPrivateWork, runPrivateWork } = require('./utils/private-context');
+const { createPrivateBilling } = require('./services/private-billing');
 
 
 const originalLog = console.log;
@@ -30,6 +31,7 @@ console.warn = (...args) => { if (!isPrivateWork()) originalWarn(getTimestamp(),
 // Создаем бота
 const allowedUpdates = [
   'message',
+  'pre_checkout_query',
   'edited_message',
   'callback_query',
   'business_connection',
@@ -44,6 +46,31 @@ const bot = new TelegramBot(config.telegramToken, {
       allowed_updates: allowedUpdates,
     },
   },
+});
+
+let botUsername;
+const paymentSupportUrl = process.env.SYCH_PAYMENT_SUPPORT_URL?.trim();
+const privateChatEnabled = process.env.SYCH_PRIVATE_CHAT_ENABLED === 'true'
+  && /^https:\/\/t\.me\/[a-z0-9_]{5,}(?:\/[0-9]+)?$/i.test(paymentSupportUrl ?? '');
+const privateBilling = createPrivateBilling({
+  bot,
+  file: storage.paths.privateBilling,
+  botUsername: async () => botUsername ??= (await bot.getMe()).username,
+  isBanned: id => storage.isBanned(id, id),
+  processChat: msg => runPrivateWork(() => logic.processMessage(bot, msg, { directChat: true })),
+  async forwardFree(msg) {
+    const sender = msg.from.username ? '@' + msg.from.username : msg.from.first_name || 'Пользователь';
+    const body = msg.text || msg.caption;
+    await sendRich(bot, config.adminId, {
+      html: '<p>📩 <b>ЛС от ' + escapeHtml(sender) + '</b></p>'
+        + (body ? '<blockquote>' + escapeHtml(body) + '</blockquote>' : '<p>📎 [Прислал файл или стикер]</p>')
+    }).catch(() => console.error('[PRIVATE CHAT] Free message forwarding failed'));
+  },
+  supportUrl: paymentSupportUrl
+});
+
+bot.on('pre_checkout_query', query => {
+  privateBilling.handlePreCheckout(query, privateChatEnabled).catch(() => console.error('[PRIVATE BILLING] Checkout response failed'));
 });
 
 const businessConnections = new Map();
@@ -214,6 +241,29 @@ bot.on('edited_business_message', async (msg) => {
 // Единый вход для всех сообщений
 bot.on('message', async (msg) => {
   // Игнорируем сообщения, старше 2 минут (чтобы не отвечать на старое при рестарте)
+  if (msg.chat?.type === 'private' && !msg.business_connection_id && msg.chat.id !== config.adminId) {
+    const isPayment = Boolean(msg.successful_payment || msg.refunded_payment);
+    if (!isPayment && !isFreshMessage(msg)) return;
+    try {
+      if (!isPayment && !privateChatEnabled) {
+        if (!privateBilling.hasPurchased(msg.chat.id)) await logic.processMessage(bot, msg);
+        else if (msg.from?.id === msg.chat.id) {
+          await bot.sendMessage(msg.chat.id, 'Личный чат на паузе. Остаток ответов сохранён.'
+            + (paymentSupportUrl ? '\nПоддержка по оплате: ' + paymentSupportUrl : ''));
+        }
+        return;
+      }
+      // The polling library acknowledges updates without awaiting listeners.
+      // The receipt/refund write must finish before this handler yields.
+      Promise.resolve(privateBilling.handleMessage(msg, privateChatEnabled)).catch(() => {
+        console.error('[PRIVATE CHAT] Request failed');
+      });
+    } catch (error) {
+      console.error('[PRIVATE BILLING] Ledger write failed:', error.code ?? error.name);
+      if (isPayment) process.exit(1);
+    }
+    return;
+  }
   if (!isFreshMessage(msg)) return;
 
   if (msg.ephemeral_message_id !== undefined) {

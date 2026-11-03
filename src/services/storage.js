@@ -59,6 +59,7 @@ class StorageService {
       profiles: path.join(this.dataDir, 'profiles.json'),
       chatProfiles: path.join(this.dataDir, 'chatProfiles.json'),
       stats: path.join(this.dataDir, 'stats.json'),
+      privateBilling: path.join(this.dataDir, 'private-billing.json'),
       backups: path.join(this.dataDir, 'backups'),
     };
     this.backupRetention = Math.max(1, Number(options.backupRetention) || 14);
@@ -322,6 +323,7 @@ class StorageService {
         this.paths.profiles,
         this.paths.chatProfiles,
         this.paths.stats,
+        this.paths.privateBilling,
       ];
 
       for (const source of sourceFiles) {

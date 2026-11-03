@@ -468,7 +468,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   const wantsRead = (requestedUrls({ text: currentMessage.text }).length && requestWithoutUrls.length < 80)
       || /перескаж|статья|статью|ссылк|прочит|разбер|глянь|посмотри|что (там|тут|пишут|по этой|это|за)|открой|резюм|tl;?dr|о чём|кратко|суть/i.test(currentMessage.text || '')
       || (currentMessage.sourceContext && links.length && /налажал|ошиб|невер|неправ|перепровер|ты уверен|точно\?/i.test(currentMessage.text || ''));
-  const youtubeUrl = links.find(url => isYouTubeUrl(url));
+  const youtubeUrl = responsePolicy.skipYoutubeAnalysis ? null : links.find(url => isYouTubeUrl(url));
   const urlM = youtubeUrl ? [youtubeUrl] : null;
   let processedYoutubeUrl = null;
   if (urlM) {
@@ -568,6 +568,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
               history: recentHistory, suppliedMaterial: extractedText.slice(0, 12000) }),
           plan: searchDecision,
           suppliedUrls: shouldReadUrls ? suppliedUrls : [],
+          budgetMs: responsePolicy.researchBudgetMs,
           search: (query, opts) => this.performSearch(query, opts),
           read: url => this.extractUrl(url, { full: true }),
           review: (prompt, options) => this.reviewEvidence(prompt, options),
@@ -632,7 +633,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
           const completion = await this.openai.chat.completions.create({
               model: config.mainModel,
               messages: messages,
-              max_tokens: config.maxOutputTokens,
+              max_tokens: responsePolicy.maxOutputTokens ?? config.maxOutputTokens,
               temperature: 0.9,
           });
 
@@ -702,7 +703,7 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
           // Research has already run (or was deliberately skipped). The writer
           // must not silently replace its evidence with an unreviewed search.
           tools: [],
-          generationConfig: { maxOutputTokens: config.maxOutputTokens, temperature: 0.9 }
+          generationConfig: { maxOutputTokens: responsePolicy.maxOutputTokens ?? config.maxOutputTokens, temperature: 0.9 }
       });
 
       if (result.response.candidates?.[0]?.finishReason === 'MAX_TOKENS') {

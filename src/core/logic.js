@@ -226,7 +226,7 @@ async function initChatProfile(bot, chatId) {
     }
 }
 
-async function processMessage(bot, msg) {
+async function processMessage(bot, msg, { directChat = false } = {}) {
     if (isEphemeralMessage(msg)) {
         await handleEphemeral(bot, msg);
         return;
@@ -235,6 +235,7 @@ async function processMessage(bot, msg) {
     // public media, replyText, source bindings, observers or delivery.
     if (msg.reply_to_message?.ephemeral_message_id !== undefined) return;
     const chatId = msg.chat.id;
+    const historyKey = directChat ? 'direct:' + chatId : chatId;
     const userId = msg.from?.id;
     if (!userId) return;
 
@@ -285,7 +286,7 @@ async function processMessage(bot, msg) {
     const sourceFollowup = ownQuestionFollowup || (isReplyToBot ? conversationFollowups.getSource(msg, threadId) : null)
         || conversationFollowups.getRecentSource(msg, threadId);
     let hasTriggerWord = config.triggerRegex.test(cleanText);
-    let isDirectlyCalled = hasTriggerWord || isReplyToBot || Boolean(ownQuestionFollowup);
+    let isDirectlyCalled = directChat || hasTriggerWord || isReplyToBot || Boolean(ownQuestionFollowup);
     const followupToken = conversationFollowups.begin(msg, threadId, { botId: config.botId, inherited: sourceFollowup });
     const userMemoryRevision = memoryRevision(userId);
     const isStaleProfileReply = () => profileDeletionPending(userId)
@@ -336,7 +337,7 @@ async function processMessage(bot, msg) {
     // Определяем красивое имя чата (Название группы или Имя юзера в личке)
     const chatTitle = msg.chat.title || msg.chat.username || msg.chat.first_name || "Unknown";
     // Запоминаем активность для команды /ban (кроме Админа)
-    if (userId !== config.adminId) {
+    if (!directChat && userId !== config.adminId) {
         const senderInfo = msg.from.username ? `@${msg.from.username}` : msg.from.first_name;
         // Убираем дубли, если юзер уже есть в начале списка
         const existingIndex = recentActiveUsers.findIndex(u => u.id === userId);
@@ -352,7 +353,7 @@ async function processMessage(bot, msg) {
     }
       // === УВЕДОМЛЕНИЕ О НОВОМ ЧАТЕ ===
   // Если чата нет в базе И это не сам админ пишет себе в личку
-  if (!storage.hasChat(chatId) && chatId !== config.adminId) {
+  if (!directChat && !storage.hasChat(chatId) && chatId !== config.adminId) {
     let alertText = `<h4>🔔 Новый контакт</h4><p>📂 Чат: <b>${escapeHtml(chatTitle)}</b><br/>🆔 <code>${chatId}</code></p>`;
     
     const inviter = `@${escapeHtml(msg.from.username || "нет")} (${escapeHtml(msg.from.first_name || "")})`;
@@ -374,10 +375,9 @@ async function processMessage(bot, msg) {
         }
 
         // Сохраняем в базу, чтобы в файлах было видно
-        storage.updateChatName(chatId, chatTitle);
+        if (!directChat) storage.updateChatName(chatId, chatTitle);
 
-        // === ЛИЧКА: ПЕРЕСЫЛКА АДМИНУ И ОТВОРОТ-ПОВОРОТ ===
-    if (!isBusinessMessage && msg.chat.type === 'private' && userId !== config.adminId) {
+    if (!directChat && !isBusinessMessage && msg.chat.type === 'private' && userId !== config.adminId) {
         // 1. Стучим админу о КАЖДОМ сообщении
         const senderInfo = `@${escapeHtml(msg.from.username || "нет")} (${escapeHtml(msg.from.first_name || "")})`;
 
@@ -437,7 +437,7 @@ async function processMessage(bot, msg) {
             msg.text = text;
             cleanText = text.toLowerCase();
             hasTriggerWord = config.triggerRegex.test(cleanText);
-            isDirectlyCalled = hasTriggerWord || isReplyToBot || Boolean(ownQuestionFollowup);
+            isDirectlyCalled = directChat || hasTriggerWord || isReplyToBot || Boolean(ownQuestionFollowup);
             // The mute may have changed while speech recognition was running.
             if (isSilenced()) return;
             if (!isDirectlyCalled) {
@@ -463,10 +463,14 @@ async function processMessage(bot, msg) {
 
   
     conversationFollowups.update(followupToken, msg, text);
-    if (!text && !msg.photo && !msg.sticker && !msg.voice && !msg.audio) return;
+    if (!text && !msg.photo && !msg.sticker && !msg.voice && !msg.audio
+      && !(directChat && (msg.document || msg.video))) {
+      if (directChat) await bot.sendMessage(chatId, 'Могу ответить на текст, голосовое, фото или файл.');
+      return;
+  }
 
   if (msg.chat.type === 'private' && !isBusinessMessage) {
-    if (userId !== config.adminId) return;
+    if (userId !== config.adminId && !directChat) return;
   } else {
     storage.trackUser(chatId, msg.from);
   }
@@ -501,7 +505,7 @@ async function processMessage(bot, msg) {
   const senderUsername = msg.from.username ? `@${msg.from.username}` : "";
   const displayName = senderUsername ? `${senderName} (${senderUsername})` : senderName;
 
-  if (!text.startsWith('/')) {
+  if (!directChat && !text.startsWith('/')) {
       // Пишем в буфер для анализа профилей юзеров
       analysisBuffers[chatId].push({ userId, name: displayName, text,
         messageId: msg.message_id, date: msg.date,
@@ -631,7 +635,7 @@ async function processMessage(bot, msg) {
     return sendRich(bot, chatId, { markdown: nowMuted ? "🦉 Окей молчу" : "🦉 Я тут" }, baseOpts(msg, threadId));
   }
   if (command === '/reset') {
-    chatHistory[chatId] = [];
+    chatHistory[historyKey] = [];
     analysisBuffers[chatId] = [];
     conversationFollowups.forgetChat(chatId);
     autoTldrJobs.forgetChat(chatId);
@@ -659,17 +663,17 @@ async function processMessage(bot, msg) {
     startTyping(); 
   }
 
-  const currentMsgEntry = addToHistory(chatId, senderName, text, userId);
+  const currentMsgEntry = addToHistory(historyKey, senderName, text, userId);
 
   // === СТАТИСТИКА ===
-  if (cleanText === 'сыч стата' || cleanText === 'сыч статистика') {
+  if (!directChat && (cleanText === 'сыч стата' || cleanText === 'сыч статистика')) {
     const report = ai.getStatsReport();
     return sendRich(bot, chatId, { markdown: report }, replyOpts(msg, threadId));
   }
 
   // === НАПОМИНАЛКИ ===
   const pendingReminder = isReplyToBot ? pendingReminders.get(msg, threadId) : null;
-  if (isDirectlyCalled && (pendingReminder || /напомни|напоминай/.test(cleanText))) {
+  if (!directChat && isDirectlyCalled && (pendingReminder || /напомни|напоминай/.test(cleanText))) {
     // Consume before awaiting so concurrent replies cannot complete the same request twice.
     if (pendingReminder) pendingReminders.clear(msg, threadId);
     const request = pendingReminder ? {
@@ -719,7 +723,7 @@ async function processMessage(bot, msg) {
 
 
   // === ФИЧИ ===
-  if (isDirectlyCalled) {
+  if (!directChat && isDirectlyCalled) {
       const selfProfileQuery = /(?:кто я|расскажи (?:про меня|обо мне)|что ты знаешь обо мне|мо[её] досье|мой профиль)\s*[?!.]*\s*$/i.test(text);
       if (selfProfileQuery) {
           if (profileDeletionPending(userId)) { stopTyping(); return; }
@@ -733,7 +737,7 @@ async function processMessage(bot, msg) {
           } finally { stopTyping(); }
       }
   }
-  if (hasTriggerWord) {
+  if (!directChat && hasTriggerWord) {
       // Команда "Сыч, этот чат про..." — используем оригинальный текст (не lowercase)
       const chatTopicMatch = text.match(/(?:этот чат про|чат про|мы тут|здесь мы)\s+([\s\S]+)/i);
       if (chatTopicMatch) {
@@ -834,7 +838,7 @@ async function processMessage(bot, msg) {
       }, { ...replyOpts(msg, threadId), strictDelivery: true, shouldSend: () => current(job) });
       if (sent?.ok === false || !Number.isSafeInteger(sent?.messageId) || sent.messageId <= 0) return false;
       if (current(job)) {
-        addToHistory(chatId, 'Сыч', `TL;DR: ${summary}`, config.botId, userId);
+        addToHistory(historyKey, 'Сыч', `TL;DR: ${summary}`, config.botId, userId);
         conversationFollowups.confirm(followupToken, sent.messageId);
       }
       return true;
@@ -847,7 +851,7 @@ async function processMessage(bot, msg) {
   if (!shouldAnswer && text.length > 10 && !isReplyToBot && Math.random() < 0.015) {
       
     // Берем контекст (последние 10 сообщений), чтобы реакция была в тему
-    const historyBlock = chatHistory[chatId].slice(-15).map(m => `${m.role}: ${m.text}`).join('\n');
+    const historyBlock = chatHistory[historyKey].slice(-15).map(m => `${m.role}: ${m.text}`).join('\n');
     
     // Передаем истории вместе с текущим текстом
     ai.determineReaction(historyBlock + `\nСообщение для реакции: ${text}`).then(async (emoji) => {
@@ -978,7 +982,7 @@ async function processMessage(bot, msg) {
 
     // 5. ССЫЛКА (если ничего другого нет)
     // 5. ССЫЛКА (ищем в текущем тексте ИЛИ в реплае)
-    else if (!imageBuffer) {
+    else if (!directChat && !imageBuffer) {
         // Сначала ищем в том, что ты написал
         let urlMatch = text.match(/https?:\/\/[^\s]+?\.(jpg|jpeg|png|webp|gif|bmp)/i);
         
@@ -998,17 +1002,21 @@ async function processMessage(bot, msg) {
             } catch(e) {}
         }
     }
-    const instruction = msg.from.username ? storage.getUserInstruction(msg.from.username) : "";
-    const userProfile = { ...storage.getProfile(chatId, userId), userId };
+    const instruction = directChat
+        ? 'Ты отвечаешь в личном чате. Игры, случайные розыгрыши и напоминания здесь недоступны. Не обещай выполнить такие действия.'
+        : (msg.from.username ? storage.getUserInstruction(msg.from.username) : "");
+    const userProfile = directChat ? { userId } : { ...storage.getProfile(chatId, userId), userId };
     if (isStaleProfileReply()) { stopTyping(); return; }
 
     let aiResponse = "";
+    let answerAvailable = true;
+    let answerDelivered = false;
 
     // Получаем профиль чата для контекста
-    let chatProfile = storage.getChatProfile(chatId);
+    const chatProfile = directChat ? {} : storage.getChatProfile(chatId);
 
     // Если профиль чата пустой и есть достаточно истории — пробуем инициализировать
-    if (!chatProfile.topic && chatHistory[chatId] && chatHistory[chatId].length >= 10) {
+    if (!directChat && !chatProfile.topic && chatHistory[historyKey] && chatHistory[historyKey].length >= 10) {
         console.log(`[CHAT PROFILE] Профиль пуст, запускаю инициализацию для ${chatId}`);
         initChatProfile(bot, chatId); // Асинхронно, не блокируем ответ
     }
@@ -1019,7 +1027,7 @@ async function processMessage(bot, msg) {
         || (msg.reply_to_message ? (msg.reply_to_message.text || msg.reply_to_message.caption || "") : "");
 
     aiResponse = await ai.getResponse(
-        chatHistory[chatId],
+        chatHistory[historyKey],
         { sender: senderName, text: text, replyText: replyText, sourceContext: followupToken?.sourceContext },
         imageBuffer,
         mimeType,
@@ -1027,14 +1035,16 @@ async function processMessage(bot, msg) {
         userProfile,
         !isDirectlyCalled,
         chatProfile, // <--- Передаём профиль чата
-        externalContext
+        externalContext,
+        directChat ? { failOnUnavailable: true, skipYoutubeAnalysis: true, maxOutputTokens: 2048, researchBudgetMs: 35000 } : undefined
     );
 
     console.log(`[DEBUG] 2. Ответ от AI получен! Длина: ${aiResponse ? aiResponse.length : "PUSTO"}`);
     
     if (!aiResponse) {
         console.log(`[DEBUG] 🚨 ОШИБКА: AI вернул пустоту!`);
-        sendRich(bot, config.adminId, { html: `<p>⚠️ <b>ALARM:</b> Gemini вернула пустую строку!</p><p>📂 Чат: <b>${escapeHtml(chatTitle)}</b></p>` }).catch(() => {});
+        if (!directChat) sendRich(bot, config.adminId, { html: `<p>⚠️ <b>ALARM:</b> Gemini вернула пустую строку!</p><p>📂 Чат: <b>${escapeHtml(chatTitle)}</b></p>` }).catch(() => {});
+        answerAvailable = false;
         aiResponse = getSychErrorReply("503 overloaded");
 
     }
@@ -1043,10 +1053,11 @@ async function processMessage(bot, msg) {
         console.error("[CRITICAL AI ERROR]:", err.message);
         
         // 1. ШЛЕМ ТЕХНИЧЕСКИЙ РЕПОРТ АДМИНУ (В личку)
-        sendRich(bot, config.adminId, { html: `<h4>🔥 Gemini упала!</h4><p>Чат: <b>${escapeHtml(chatTitle)}</b></p><pre><code>${escapeHtml(err.message)}</code></pre>` }).catch(() => {});
+        if (!directChat) sendRich(bot, config.adminId, { html: `<h4>🔥 Gemini упала!</h4><p>Чат: <b>${escapeHtml(chatTitle)}</b></p><pre><code>${escapeHtml(err.message)}</code></pre>` }).catch(() => {});
 
         // 2. ГЕНЕРИРУЕМ СМЕШНОЙ ОТВЕТ ДЛЯ ЧАТА
         // Передаем текст ошибки в нашу новую функцию
+        answerAvailable = false;
         aiResponse = getSychErrorReply(err.message);
     }
 
@@ -1068,11 +1079,14 @@ async function processMessage(bot, msg) {
         // Шлём markdown ИИ напрямую — Telegram rich рисует его красивее (в т.ч. таблицы).
         // normalizeMd чинит пустую строку перед таблицей; sendRich сам ретраит без картинок
         // при битом медиа и падает в plain при ошибке парсинга.
-        const sent = await sendRich(bot, chatId, { markdown: normalizeMd(formattedResponse) }, replyOpts(msg, threadId));
+        const sent = await sendRich(bot, chatId, { markdown: normalizeMd(formattedResponse) }, {
+            ...replyOpts(msg, threadId), ...(directChat ? { strictDelivery: true, shouldSend: () => !isSilenced() && !isStaleProfileReply() } : {})
+        });
 
+        answerDelivered = Number.isSafeInteger(sent?.messageId) && sent.messageId > 0;
         stopTyping(); // <-- Всё, сообщение ушло, выключаем статус
-        if (isSilenced() || isStaleProfileReply()) { stopTyping(); return; }
-        addToHistory(chatId, "Сыч", aiResponse, config.botId, userId);
+        if (isSilenced() || isStaleProfileReply()) return directChat ? answerAvailable && answerDelivered : undefined;
+        addToHistory(historyKey, "Сыч", aiResponse, config.botId, userId);
         if (sent?.ok !== false) conversationFollowups.confirm(followupToken, sent?.messageId);
 
     } catch (error) {
@@ -1086,8 +1100,10 @@ async function processMessage(bot, msg) {
             return;
         }
 
+        if (directChat) return false;
+
         // Отчет админу
-        sendRich(bot, config.adminId, { html: `<p>⚠️ <b>Ошибка отправки:</b></p><pre><code>${escapeHtml(error.message)}</code></pre><p>📂 Чат: <b>${escapeHtml(chatTitle)}</b> · 🆔 <code>${chatId}</code></p>` }).catch(() => {});
+        if (!directChat) sendRich(bot, config.adminId, { html: `<p>⚠️ <b>Ошибка отправки:</b></p><pre><code>${escapeHtml(error.message)}</code></pre><p>📂 Чат: <b>${escapeHtml(chatTitle)}</b> · 🆔 <code>${chatId}</code></p>` }).catch(() => {});
 
         // АВАРИЙНАЯ ОТПРАВКА (Если Markdown сломался или что-то еще)
         // Сохраняем свёрнутые цитаты даже при аварийной отправке.
@@ -1112,11 +1128,12 @@ async function processMessage(bot, msg) {
                 else allChunksConfirmed = false;
              }
              if (isSilenced() || isStaleProfileReply()) return;
-             addToHistory(chatId, "Сыч", aiResponse, config.botId, userId);
+             addToHistory(historyKey, "Сыч", aiResponse, config.botId, userId);
              if (allChunksConfirmed) conversationFollowups.confirm(followupToken, confirmedMessageId);
         } catch (e2) { console.error("FATAL SEND ERROR (Даже аварийная не ушла):", e2.message); }
     }
 
+    if (directChat) return answerAvailable && answerDelivered;
     if (isStaleProfileReply()) return;
     // === ПАМЯТЬ О КАРТИНКЕ (variant B) ===
     // Если бот реально посмотрел на изображение — асинхронно получаем его фактическое

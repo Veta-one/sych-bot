@@ -240,3 +240,7 @@ Ordinary slash commands require an explicit recipient matching the bot's actual 
 - `Сыч, этот чат про [тема]` - Set chat topic manually
 
 Quote presentation: src/utils/quotes.js normalizes HTML and Markdown quotes centrally in sendRich. Quotes are expandable by default, except inside a closed details block or another quote. Code examples remain literal. Voice cards use an expandable quote at <=700 characters and a closed details disclosure above that threshold, even when summary generation fails. Legacy delivery uses expandable_blockquote entities with UTF-16 offsets and lossless chunks. See test/quotes.test.js. Summary generation policy is described above.
+
+## Платная личка
+
+Прямая личка сторонних пользователей проходит через `private-billing.js`. Группы, комментарии и Business используют прежние маршруты. Для включения нужны `SYCH_PRIVATE_CHAT_ENABLED=true` и публичная Telegram-ссылка поддержки. Платёжный реестр сохраняется отдельно и входит в резервные снимки. При откате сохраняй реестр и запрет пересылки для уже плативших пользователей.
