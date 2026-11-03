@@ -9,7 +9,6 @@ const INVOICE_TTL = 30 * 60 * 1000;
 const RECENT_REPLIES = 32;
 const MAX_PENDING = 100;
 const TERMS = 'В пилоте отвечаю на текст. Первые 10 ответов бесплатны.\n\n100 ответов стоят 50 ⭐. Это разовая покупка. Ответ с обычным поиском расходует один ответ из пакета. Остаток сохраняется, его можно посмотреть через /balance. Если ответ не пришёл, он не списывается. Вопросы по оплате и возвратам: /paysupport.';
-const SALES_PAUSED = 'Покупки пока на паузе. Остаток ответов сохранён. По оплате и возвратам: /paysupport.';
 const BUY_CALLBACK = 'sych-buy:';
 const EMPTY_ACCOUNT = { freeUsed: 0, charges: [], replied: [] };
 
@@ -34,7 +33,7 @@ function matchesPackage(payment) {
     && /^sych-chat-v1-[a-f0-9]{32}$/.test(payment.invoice_payload ?? '');
 }
 
-function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, botUsername, support, supportUrl, canPurchase = () => true }) {
+function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, botUsername, support, supportUrl }) {
   let ledger;
   const queues = new Map();
   const pending = new Map();
@@ -81,18 +80,6 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
     map.set(userId, { ...entry, expires: Date.now() + INVOICE_TTL });
   }
 
-  function outstandingReplies() {
-    const { charges, orders } = getLedger();
-    const paid = Object.values(charges).reduce((sum, charge) => sum + charge.remaining, 0);
-    const pendingCheckouts = Object.values(orders).filter(order =>
-      order.checkoutId && !order.chargeKey).length;
-    return paid + pendingCheckouts * PACKAGE_REPLIES;
-  }
-
-  function salesAvailable() {
-    return canPurchase(outstandingReplies() + PACKAGE_REPLIES);
-  }
-
   function sendInvoice(userId) {
     const now = Date.now();
     const existing = Object.entries(getLedger().orders).find(([, order]) =>
@@ -122,7 +109,7 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
       const order = enabled && matchesPackage(query) && getLedger().orders[query.invoice_payload];
       if (order && Number.isSafeInteger(userId) && order.userId === userId && !order.chargeKey
         && !isBanned(userId)
-        && (order.checkoutId === query.id || (!order.checkoutId && order.expires > Date.now() && salesAvailable()))) {
+        && (order.checkoutId === query.id || (!order.checkoutId && order.expires > Date.now()))) {
         if (!order.checkoutId) {
           commit(next => { next.orders[query.invoice_payload].checkoutId = query.id; });
         }
@@ -174,7 +161,7 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
         console.error('[PRIVATE BILLING] Could not forward a free request');
       }
     }
-    if (await processChat(msg, { floorReplies: () => Math.max(0, outstandingReplies() - (paidCharge ? 1 : 0)) }) !== true) return;
+    if (await processChat(msg) !== true) return;
     commit(next => {
       const current = accountForEdit(next, userId);
       if (paidCharge) {
@@ -213,7 +200,6 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
     if (isBanned(userId)) return;
     if (name === '/balance') return bot.sendMessage(userId, balanceText(userId) + '\nПакет из 100 ответов за 50 ⭐: /buy.');
     if (name === '/buy') {
-      if (!salesAvailable()) return bot.sendMessage(userId, SALES_PAUSED);
       const data = BUY_CALLBACK + randomBytes(12).toString('hex');
       remember(offers, userId, { data });
       return bot.sendMessage(userId, TERMS, {
@@ -243,10 +229,8 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
     if (!enabled || isBanned(userId) || offer?.data !== query.data || offer.expires <= Date.now()) {
       return bot.answerCallbackQuery(query.id, { text: 'Кнопка устарела. Открой новый счёт через /buy.' });
     }
-    if (!salesAvailable()) return bot.answerCallbackQuery(query.id, { text: SALES_PAUSED });
     offers.delete(userId);
     await bot.answerCallbackQuery(query.id);
-    if (!salesAvailable()) return bot.sendMessage(userId, SALES_PAUSED);
     return sendInvoice(userId);
   }
 

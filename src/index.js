@@ -8,7 +8,7 @@ const { createReminderDelivery } = require('./services/reminder-delivery');
 const { ensureOwnerEphemeralCommands } = require('./services/ephemeral-commands');
 const { isPrivateWork, runPrivateWork } = require('./utils/private-context');
 const { createPrivateBilling } = require('./services/private-billing');
-const { createPrivateBudget } = require('./services/private-budget');
+
 
 
 const originalLog = console.log;
@@ -51,21 +51,14 @@ const bot = new TelegramBot(config.telegramToken, {
 
 let botUsername;
 const paymentSupportUrl = process.env.SYCH_PAYMENT_SUPPORT_URL?.trim();
-const privateBudget = createPrivateBudget({
-  file: storage.paths.privateBudget,
-  limitUsd: 10
-});
 const privateChatEnabled = process.env.SYCH_PRIVATE_CHAT_ENABLED === 'true'
-  && Boolean(config.aiKey) && config.aiBaseUrl.replace(/\/$/, '') === 'https://openrouter.ai/api/v1'
   && /^https:\/\/t\.me\/[a-z0-9_]{5,}(?:\/[0-9]+)?$/i.test(paymentSupportUrl ?? '');
 const privateBilling = createPrivateBilling({
   bot,
   file: storage.paths.privateBilling,
   botUsername: async () => botUsername ??= (await bot.getMe()).username,
   isBanned: id => storage.isBanned(id, id),
-  processChat: (msg, { floorReplies } = {}) => runPrivateWork(() =>
-    logic.processMessage(bot, msg, { directChat: true, privateBudget, floorReplies })),
-  canPurchase: replies => privateBudget.canPurchase(replies),
+  processChat: msg => runPrivateWork(() => logic.processMessage(bot, msg, { directChat: true })),
   async forwardFree(msg) {
     const sender = msg.from.username ? '@' + msg.from.username : msg.from.first_name || 'Пользователь';
     const body = msg.text || msg.caption;
