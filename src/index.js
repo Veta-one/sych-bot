@@ -58,6 +58,7 @@ storage.data.groupExitNotices ||= {};
 storage.data.groupDeparted ||= {};
 const observedGroupNames = new Map();
 const groupAccess = createGroupAccess(bot, config.adminId, {
+  botId: config.botId,
   pending: storage.data.groupExitPending,
   notices: storage.data.groupExitNotices,
   departed: storage.data.groupDeparted,

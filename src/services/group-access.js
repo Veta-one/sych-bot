@@ -1,6 +1,6 @@
 const { withTimeout } = require('../utils/async');
 
-function createGroupAccess(bot, ownerId, { pending = {}, notices = {}, departed = {},
+function createGroupAccess(bot, ownerId, { pending = {}, notices = {}, departed = {}, botId,
   save = () => {}, notify = async () => {}, chatName = () => '', now = Date.now,
   timeoutMs = 10000, logger = console } = {}) {
   const blocked = new Set([...Object.keys(pending), ...Object.keys(departed)]);
@@ -57,13 +57,27 @@ function createGroupAccess(bot, ownerId, { pending = {}, notices = {}, departed 
         logger.log(`[GROUP ACCESS] LEFT chat=${key}`);
       } catch (error) {
         const description = error.response?.body?.description || error.message || '';
-        if (/bot is not a member|bot was kicked/i.test(description)) {
+        const deactivated = /chat is deactivated/i.test(description);
+        let alreadyOut = /bot is not a member|bot was kicked/i.test(description);
+        // Old basic groups can reject leaveChat even though the bot has already left.
+        // A deactivated/inaccessible chat alone is not proof of non-membership.
+        if (!alreadyOut && deactivated && Number.isSafeInteger(botId) && botId > 0) {
+          try {
+            const self = await withTimeout(bot.getChatMember(Number(chatId), botId),
+              timeoutMs, 'getChatMember self');
+            alreadyOut = ['left', 'kicked'].includes(self?.status)
+              || (self?.status === 'restricted' && self.is_member === false);
+          } catch (_) { /* Keep the exit pending when the self-check is inconclusive. */ }
+        }
+        if (alreadyOut) {
           confirmedExit(key, record, 'already_out');
           logger.log(`[GROUP ACCESS] ALREADY_OUT chat=${key}`);
         } else {
           const retryAfter = Number(error.response?.body?.parameters?.retry_after) || 0;
           record.retryAt = now() + Math.max(30000, retryAfter * 1000);
-          logger.error(`[GROUP ACCESS] LEAVE_RETRY chat=${key} retryAt=${record.retryAt}`);
+          const reason = deactivated ? 'CHAT_DEACTIVATED'
+            : /chat not found/i.test(description) ? 'CHAT_NOT_FOUND' : 'OTHER';
+          logger.error(`[GROUP ACCESS] LEAVE_RETRY chat=${key} reason=${reason} retryAt=${record.retryAt}`);
         }
       } finally {
         persist();

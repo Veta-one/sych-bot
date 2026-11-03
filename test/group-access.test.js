@@ -264,6 +264,47 @@ test('already exited groups do not generate repeated exit notices after restart'
   assert.equal(await access.check(-123), false);
 });
 
+test('a deactivated chat is retired only after Telegram confirms the bot itself has left', async () => {
+  const f = loadIndex();
+  const lookedUp = [];
+  f.bot.leaveChat = async () => { throw new Error('ETELEGRAM: 400 Bad Request: chat is deactivated'); };
+  f.bot.getChatMember = async (chatId, userId) => {
+    lookedUp.push(userId);
+    if (userId === 1) throw new Error('CHAT_ADMIN_REQUIRED');
+    assert.equal(userId, 99, 'confirm the bot, not the owner');
+    return { status: 'left' };
+  };
+  await f.handlers.message(f.message());
+  assert.deepEqual(lookedUp, [1, 99]);
+  assert.equal(f.storage.data.groupDeparted['-123'], true);
+  assert.equal(Object.keys(f.storage.data.groupExitPending).length, 0);
+  assert.equal(f.calls.notices.length, 1);
+  assert.match(f.calls.notices[0].text, /Подтверждено отсутствие бота/);
+  await f.handlers.message(f.message());
+  await f.calls.timers[0]();
+  assert.equal(f.calls.notices.length, 1);
+  assert.equal(f.calls.processed.length, 0);
+  await assert.rejects(f.bot._request('sendMessage', { form: { chat_id: -123 } }),
+    { code: 'GROUP_ACCESS_DENIED' });
+});
+
+test('inaccessible or unconfirmed deactivated chats stay blocked and pending without false notices', async () => {
+  for (const description of ['Bad Request: chat not found', 'Bad Request: chat is deactivated']) {
+    for (const result of [{ status: 'member' }, {}, null, new Error('lookup failed')]) {
+      const pending = {};
+      let notices = 0;
+      const access = createGroupAccess({
+        async leaveChat() { throw new Error(description); },
+        async getChatMember() { if (result instanceof Error) throw result; return result; },
+      }, 1, { botId: 99, pending, logger: quiet, notify: async () => { notices++; } });
+      await access.deny(-123, 'OWNER_CHECK_FAILED');
+      assert.ok(pending['-123']);
+      assert.equal(notices, 0);
+      assert.equal(await access.check(-123), false);
+    }
+  }
+});
+
 test('unconfirmed and hanging exits remain in the retry queue', async () => {
   for (const leaveChat of [async () => false, () => new Promise(() => {})]) {
     const pending = {};
