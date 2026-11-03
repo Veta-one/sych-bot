@@ -9,6 +9,7 @@ function createReminderDelivery(bot, storage, send = sendRich) {
       if (inFlight.has(task.id)) continue;
       inFlight.add(task.id);
       try {
+        if (Number(task.chatId) < 0) await bot.requireGroupAccess?.(task.chatId);
         const html = `⏰ <b>${escapeHtml(task.username || '')}</b>, напоминаю!`
           + (task.text ? `<blockquote>${escapeHtml(task.text)}</blockquote>` : '');
         await send(bot, task.chatId, { html }, {

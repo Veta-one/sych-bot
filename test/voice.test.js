@@ -395,7 +395,7 @@ test('message handler sends one voice card in the original topic and preserves f
     axios: { get: async () => ({ data: Buffer.from('audio') }) }, child_process: {},
     '../utils/rich': { ...rich, sendRich: async (...args) => { sent.push(args); } },
     '../utils/privacy': { isForgetMeRequest: () => false }, '../utils/profile-query': {},
-    '../utils/commands': {}, '../services/documents': {},
+    '../utils/help': require('../src/utils/help'), '../utils/commands': {}, '../services/documents': {},
     '../utils/reminders': require('../src/utils/reminders'),
     '../utils/conversation-followups': require('../src/utils/conversation-followups'),
     '../utils/auto-tldr': require('../src/utils/auto-tldr'),

@@ -54,7 +54,7 @@ function loadHandler() {
     '../utils/rich': { sendRich: async () => { effects.push('sent'); } },
     '../utils/privacy': { isForgetMeRequest: () => false },
     '../utils/profile-query': {},
-    '../utils/commands': { resolveAddressedCommand },
+    '../utils/help': require('../src/utils/help'), '../utils/commands': { resolveAddressedCommand },
     '../utils/reminders': require('../src/utils/reminders'),
     '../utils/conversation-followups': require('../src/utils/conversation-followups'),
     '../utils/auto-tldr': require('../src/utils/auto-tldr'),

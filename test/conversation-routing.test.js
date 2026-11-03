@@ -50,7 +50,7 @@ function harness() {
     '../utils/rich': { sendRich, escapeHtml: x => String(x), normalizeMd: x => x,
       quoteFallback: () => null, formatVoiceMessage: x => ({ html: `VOICE CARD: ${x.text}` }) },
     '../utils/privacy': require('../src/utils/privacy'), '../utils/profile-query': require('../src/utils/profile-query'),
-    '../utils/commands': require('../src/utils/commands'), '../services/documents': require('../src/services/documents'), '../utils/reminders': require('../src/utils/reminders'),
+    '../utils/help': require('../src/utils/help'), '../utils/commands': require('../src/utils/commands'), '../services/documents': require('../src/services/documents'), '../utils/reminders': require('../src/utils/reminders'),
     '../utils/conversation-followups': require('../src/utils/conversation-followups'),
     '../utils/auto-tldr': require('../src/utils/auto-tldr'),
   };

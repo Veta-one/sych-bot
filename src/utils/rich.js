@@ -14,6 +14,15 @@ const { collapseHtmlQuotes, collapseMarkdownQuotes, quoteFallback } = require('.
 
 const API = `https://api.telegram.org/bot${config.telegramToken}`;
 
+async function postRich(bot, url, payload, options, shouldSend) {
+  if (Number(payload.chat_id) < 0 && typeof bot.requireGroupAccess === 'function') {
+    await bot.requireGroupAccess(payload.chat_id);
+    if (shouldSend !== undefined) checkStrictDelivery(shouldSend);
+  }
+  return axios.post(url, payload, options);
+}
+
+
 // Экранирование для вставки динамического текста в HTML-разметку.
 function escapeHtml(text = '') {
   return String(text)
@@ -93,10 +102,10 @@ function ephemeralError(code) {
 
 // A timeout or an unexpected success body might mean Telegram already sent the
 // message. Retry only a confirmed API rejection, never an ambiguous response.
-async function ephemeralRequest(method, payload) {
+async function ephemeralRequest(bot, method, payload) {
   let data;
   try {
-    const response = await axios.post(`${API}/${method}`, payload, { proxy: false, timeout: 10000 });
+    const response = await postRich(bot, `${API}/${method}`, payload, { proxy: false, timeout: 10000 });
     data = response.data;
   } catch (error) {
     if (error.response?.data?.ok !== false) throw ephemeralError('EPHEMERAL_UNCONFIRMED');
@@ -123,7 +132,7 @@ function ephemeralResult(response, receiverUserId, editId, mode) {
     messageDate: Number.isSafeInteger(result.date) && result.date > 0 ? result.date : undefined };
 }
 
-async function sendEphemeralRich(chatId, content, opts) {
+async function sendEphemeralRich(bot, chatId, content, opts) {
   try {
     const ephemeral = opts.ephemeral;
     const validId = value => Number.isSafeInteger(value) && value !== 0;
@@ -158,7 +167,7 @@ async function sendEphemeralRich(chatId, content, opts) {
       extra.ephemeral_message_id = editId;
     }
     const method = editId === undefined ? 'sendRichMessage' : 'editEphemeralMessageText';
-    const send = richMessage => ephemeralRequest(method, { chat_id: chatId, rich_message: richMessage, ...extra });
+    const send = richMessage => ephemeralRequest(bot, method, { chat_id: chatId, rich_message: richMessage, ...extra });
     let response = await send(rich);
     if (!response.rejected) return ephemeralResult(response, receiverUserId, editId, 'rich');
 
@@ -176,7 +185,7 @@ async function sendEphemeralRich(chatId, content, opts) {
     // A rich message may exceed sendMessage/edit text limits. Keep the full
     // answer or fail; slicing/replacing a placeholder repeatedly loses content.
     if (!plain.length || plain.length > 4096) throw ephemeralError('EPHEMERAL_TEXT_TOO_LONG');
-    response = await ephemeralRequest(editId === undefined ? 'sendMessage' : method, {
+    response = await ephemeralRequest(bot, editId === undefined ? 'sendMessage' : method, {
       chat_id: chatId, text: plain, link_preview_options: { is_disabled: true }, ...extra,
     });
     if (response.rejected) throw ephemeralError('EPHEMERAL_REJECTED');
@@ -239,7 +248,7 @@ function checkStrictDelivery(shouldSend) {
   throw strictDeliveryError('STRICT_DELIVERY_CANCELLED');
 }
 
-async function sendStrictRich(chatId, content, opts) {
+async function sendStrictRich(bot, chatId, content, opts) {
   try {
     const shouldSend = opts.shouldSend;
     if (!Number.isSafeInteger(opts.replyTo) || opts.replyTo <= 0
@@ -263,11 +272,12 @@ async function sendStrictRich(chatId, content, opts) {
     let httpStatus;
     checkStrictDelivery(shouldSend);
     try {
-      const response = await axios.post(`${API}/sendRichMessage`,
-        { chat_id: chatId, rich_message: rich, ...extra }, { proxy: false, timeout: 10000 });
+      const response = await postRich(bot, `${API}/sendRichMessage`,
+        { chat_id: chatId, rich_message: rich, ...extra }, { proxy: false, timeout: 10000 }, shouldSend);
       data = response.data;
       httpStatus = response.status;
     } catch (error) {
+      if (safeStrictErrors.has(error)) throw error;
       data = error.response?.data;
       httpStatus = error.response?.status;
       const rejection = strictRejection(data, httpStatus);
@@ -284,12 +294,13 @@ async function sendStrictRich(chatId, content, opts) {
     if (!plain.length || plain.length > 4096) throw strictDeliveryError('STRICT_DELIVERY_TEXT_TOO_LONG');
     checkStrictDelivery(shouldSend);
     try {
-      const response = await axios.post(`${API}/sendMessage`,
+      const response = await postRich(bot, `${API}/sendMessage`,
         { chat_id: chatId, text: plain, link_preview_options: { is_disabled: true }, ...extra },
-        { proxy: false, timeout: 10000 });
+        { proxy: false, timeout: 10000 }, shouldSend);
       data = response.data;
       httpStatus = response.status;
     } catch (error) {
+      if (safeStrictErrors.has(error)) throw error;
       throw strictDeliveryError(strictRejection(error.response?.data, error.response?.status)
         ? 'STRICT_DELIVERY_REJECTED' : 'STRICT_DELIVERY_UNCONFIRMED');
     }
@@ -311,10 +322,11 @@ async function sendStrictRich(chatId, content, opts) {
  * @returns {Promise<{ok:boolean, mode:'rich'|'rich-noimg'|'fallback', messageId?:number, ephemeralMessageId?:number, error?:string}>}
  */
 async function sendRich(bot, chatId, content, opts = {}) {
+  if (Number(chatId) < 0 && typeof bot.requireGroupAccess === 'function') await bot.requireGroupAccess(chatId);
   // Presence rather than truthiness: malformed private options must never
   // accidentally select the ordinary public delivery path.
-  if (opts && typeof opts === 'object' && 'ephemeral' in opts) return sendEphemeralRich(chatId, content, opts);
-  if (opts.strictDelivery === true) return sendStrictRich(chatId, content, opts);
+  if (opts && typeof opts === 'object' && 'ephemeral' in opts) return sendEphemeralRich(bot, chatId, content, opts);
+  if (opts.strictDelivery === true) return sendStrictRich(bot, chatId, content, opts);
   const rich = {};
   if (content.html != null) rich.html = collapseHtmlQuotes(content.html);
   else if (content.markdown != null) rich.markdown = collapseMarkdownQuotes(content.markdown);
@@ -332,7 +344,7 @@ async function sendRich(bot, chatId, content, opts = {}) {
   // proxy:false — чтобы axios шёл напрямую (как node-telegram-bot-api), игнорируя
   // переменные окружения HTTP(S)_PROXY (иначе локальный прокси ломает запрос).
   try {
-    const response = await axios.post(`${API}/sendRichMessage`, { chat_id: chatId, rich_message: rich, ...extra }, { proxy: false });
+    const response = await postRich(bot, `${API}/sendRichMessage`, { chat_id: chatId, rich_message: rich, ...extra }, { proxy: false });
     return { ok: true, mode: 'rich', messageId: response.data?.result?.message_id };
   } catch (e) {
     const desc = e.response?.data?.description || e.message;
@@ -346,7 +358,7 @@ async function sendRich(bot, chatId, content, opts = {}) {
       if (rich.markdown != null) noImg.markdown = rich.markdown.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/<img[^>]*>/gi, '').replace(/\n{3,}/g, '\n\n').trim();
       if (rich.html != null) noImg.html = rich.html.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/<img[^>]*>/gi, '');
       try {
-        const response = await axios.post(`${API}/sendRichMessage`, { chat_id: chatId, rich_message: noImg, ...extra }, { proxy: false });
+        const response = await postRich(bot, `${API}/sendRichMessage`, { chat_id: chatId, rich_message: noImg, ...extra }, { proxy: false });
         console.error(`[RICH] медиа не прошло, отправил без картинок: ${desc}`);
         return { ok: true, mode: 'rich-noimg', messageId: response.data?.result?.message_id };
       } catch (_) { /* падаем в общий фоллбэк ниже */ }

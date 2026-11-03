@@ -132,7 +132,7 @@ function harness({ answer, send, download, publish, now, answerTimeoutMs, integr
       axios: { get: async url => ({ data: await get(url) }) }, child_process: {},
       '../utils/rich': { sendRich, escapeHtml: value => String(value), normalizeMd: value => value },
       '../utils/privacy': { isForgetMeRequest: () => false }, '../utils/profile-query': {},
-      '../utils/commands': require('../src/utils/commands'),
+      '../utils/help': require('../src/utils/help'), '../utils/commands': require('../src/utils/commands'),
       '../utils/reminders': require('../src/utils/reminders'), '../services/documents': {},
       '../utils/conversation-followups': require('../src/utils/conversation-followups'),
       '../utils/auto-tldr': require('../src/utils/auto-tldr'),

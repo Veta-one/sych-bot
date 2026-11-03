@@ -8,6 +8,7 @@ const { sendRich, escapeHtml } = require('./utils/rich');
 const { createReminderDelivery } = require('./services/reminder-delivery');
 const { ensureOwnerEphemeralCommands } = require('./services/ephemeral-commands');
 const { isPrivateWork, runPrivateWork } = require('./utils/private-context');
+const { createGroupAccess } = require('./services/group-access');
 const { createPrivateBilling } = require('./services/private-billing');
 
 
@@ -33,6 +34,7 @@ console.warn = (...args) => { if (!isPrivateWork()) originalWarn(getTimestamp(),
 // Создаем бота
 const allowedUpdates = [
   'message',
+  'my_chat_member',
   'pre_checkout_query',
   'edited_message',
   'callback_query',
@@ -49,6 +51,46 @@ const bot = new TelegramBot(config.telegramToken, {
     },
   },
 });
+
+// Pending exits survive restarts. Group work requires a successful owner check.
+storage.data.groupExitPending ||= {};
+storage.data.groupExitNotices ||= {};
+storage.data.groupDeparted ||= {};
+const observedGroupNames = new Map();
+const groupAccess = createGroupAccess(bot, config.adminId, {
+  pending: storage.data.groupExitPending,
+  notices: storage.data.groupExitNotices,
+  departed: storage.data.groupDeparted,
+  chatName: chatId => observedGroupNames.get(String(chatId))
+    || storage.data.chats[chatId]?.chatName || 'Название неизвестно',
+  async notify(chatId, notice) {
+    const action = notice.result === 'left' ? 'Вышел из группы' : 'Подтверждено отсутствие бота в группе';
+    const reason = notice.reason === 'OWNER_CHECK_FAILED'
+      ? 'Не удалось подтвердить присутствие владельца.'
+      : 'Владелец отсутствует в группе.';
+    await bot.sendMessage(config.adminId,
+      action + '\n' + String(notice.name || 'Название неизвестно').slice(0, 256)
+      + '\nID ' + chatId + '\n' + reason);
+  },
+  save: () => storage.forceSave(),
+});
+bot.requireGroupAccess = groupAccess.requireAccess;
+const originalRequest = bot._request.bind(bot);
+bot._request = async (method, options = {}) => {
+  if (/^(send|editMessage|forwardMessage|copyMessage|setMessageReaction)/.test(method)
+    && Number(options.form?.chat_id) < 0) {
+    await groupAccess.requireAccess(options.form.chat_id);
+  }
+  return originalRequest(method, options);
+};
+bot.on('my_chat_member', update => {
+  if (update.chat?.title) observedGroupNames.set(String(update.chat.id), update.chat.title);
+  return groupAccess.membership(update)
+    .catch(() => console.error('[GROUP ACCESS] Membership handling failed'));
+});
+setInterval(() => groupAccess.retryExits()
+  .catch(() => console.error('[GROUP ACCESS] Exit retry failed')), 30000);
+groupAccess.retryExits().catch(() => console.error('[GROUP ACCESS] Exit recovery failed'));
 
 let botUsername;
 const paymentSupportUrl = process.env.SYCH_PAYMENT_SUPPORT_URL?.trim();
@@ -217,7 +259,9 @@ bot.getMe().then((me) => {
 // Refresh only the owner's group menu. Do not delay incoming private requests.
 async function registerKnownGroupCommands() {
   for (const chatId of Object.keys(storage.data.chats).filter(id => Number(id) < 0)) {
-    await ensureOwnerEphemeralCommands(bot, Number(chatId), config.adminId).catch(() => {});
+    if (await groupAccess.check(Number(chatId))) {
+      await ensureOwnerEphemeralCommands(bot, Number(chatId), config.adminId).catch(() => {});
+    }
     await new Promise(resolve => setTimeout(resolve, 150));
   }
 }
@@ -280,58 +324,18 @@ bot.on('message', async (msg) => {
   }
   if (!isFreshMessage(msg)) return;
 
+  const chatId = msg.chat.id;
+  if (msg.chat.title) observedGroupNames.set(String(chatId), msg.chat.title);
+  if (msg.chat.type !== 'private') {
+    if (msg.left_chat_member?.id === config.adminId) {
+      await groupAccess.deny(chatId, 'OWNER_LEFT');
+      return;
+    }
+    if (!(await groupAccess.check(chatId))) return;
+  }
+
   if (msg.ephemeral_message_id !== undefined) {
     await logic.processMessage(bot, msg);
-    return;
-  }
-
-  const chatId = msg.chat.id;
-  const chatTitle = msg.chat.title || "Личка";
-
-  // === 🛡 SECURITY PROTOCOL: "ВЕРНЫЙ ОРУЖЕНОСЕЦ" ===
-  // Проверяем наличие Админа в ЛЮБОМ групповом чате при ЛЮБОМ сообщении
-  if (msg.chat.type !== 'private') {
-      try {
-          // 1. Проверяем статус Админа в этом чате
-          const adminMember = await bot.getChatMember(chatId, config.adminId);
-          const allowedStatuses = ['creator', 'administrator', 'member'];
-
-          // 2. Если Админа нет (left, kicked) или он не участник
-          if (!allowedStatuses.includes(adminMember.status)) {
-            console.log(`[SECURITY] ⛔ Обнаружен чат без Админа...`);
-            
-            // ВОТ ТУТ МЕНЯЕМ СООБЩЕНИЕ
-            const phrases = [
-                "Так, стопэ. Админа не вижу. Благотворительности не будет, я уёбываю!",
-                "Опа, куда это меня занесло? Бати рядом нет, так что я уёбываю!",
-                "Вы че думали, украли бота? Я не работаю в беспризорных приютах. Я уёбываю!",
-                "⚠️ ERROR: ADMIN NOT FOUND. Включаю протокол самоуважения. Я уёбываю!",
-                "Не, ну вы видели? Затащили без спроса. Ну вас нахер, я уёбываю!"
-            ];
-            const randomPhrase = phrases[Math.floor(Math.random() * phrases.length)];
-
-            await sendRich(bot, chatId, { markdown: randomPhrase }).catch(() => {});
-            await bot.leaveChat(chatId).catch(() => {});
-            return; 
-        }
-      } catch (e) {
-        // Если ошибка проверки прав
-        console.error(`[SECURITY ERROR] Ошибка проверки прав в "${chatTitle}": ${e.message}`);
-        
-        // ВЫХОДИМ ТОЛЬКО ЕСЛИ ЧАТА БОЛЬШЕ НЕТ ИЛИ БОТА КИКНУЛИ
-        // При обычных сетевых ошибках (ETIMEDOUT, 502 и т.д.) - ОСТАЕМСЯ
-        if (e.message.includes('chat not found') || e.message.includes('kicked') || e.message.includes('Forbidden')) {
-           bot.leaveChat(chatId).catch(() => {});
-        } 
-        // Во всех остальных случаях (лаг API) — просто игнорируем и работаем дальше
-    }
-  }
-
-  // === ЛОГИКА ВЫХОДА ВСЛЕД ЗА АДМИНОМ (ХАТИКО) ===
-  if (msg.left_chat_member && msg.left_chat_member.id === config.adminId) {
-    console.log(`[SECURITY] Админ вышел из чата "${chatTitle}". Ухожу следом.`);
-    await sendRich(bot, chatId, { markdown: "Батя ушел, и я сваливаю." });
-    await bot.leaveChat(chatId);
     return;
   }
 

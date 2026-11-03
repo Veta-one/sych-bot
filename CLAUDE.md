@@ -244,3 +244,8 @@ Quote presentation: src/utils/quotes.js normalizes HTML and Markdown quotes cent
 ## Платная личка
 
 Прямая личка сторонних пользователей проходит через `private-billing.js`. Группы, комментарии и Business используют прежние маршруты. Для включения нужны `SYCH_PRIVATE_CHAT_ENABLED=true` и публичная Telegram-ссылка поддержки. Платёжный реестр сохраняется отдельно и входит в резервные снимки. При откате сохраняй реестр и запрет пересылки для уже плативших пользователей.
+
+
+## Group owner access (1.15.5)
+
+services/group-access.js gates ordinary and hidden group inputs and outgoing messages. Any failed owner lookup, including CHAT_ADMIN_REQUIRED or timeout, blocks the group and initiates leaveChat. Restricted owners with is_member=true are accepted. Startup checks saved groups and my_chat_member checks invitations. Pending exits, exit notices and completed exits persist in db.json. Failed exits and owner notices retry at least every 30 seconds, respecting retry_after. Successful exits notify ADMIN_USER_ID with the group name and ID. Rich raw HTTP and SDK sends are guarded, including fallbacks. Keep the working .env and data during upgrades. Strict checks can leave authorized groups during transient Telegram outages. Bot API cannot enumerate unknown groups; those are checked on their next event. Regression suite: test/group-access.test.js.
