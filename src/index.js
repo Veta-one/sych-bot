@@ -1,3 +1,4 @@
+const { buildHelp } = require('./utils/help');
 const { TelegramBot } = require('node-telegram-bot-api');
 const config = require('./config');
 const logic = require('./core/logic');
@@ -59,6 +60,14 @@ const privateBilling = createPrivateBilling({
   botUsername: async () => botUsername ??= (await bot.getMe()).username,
   isBanned: id => storage.isBanned(id, id),
   processChat: msg => runPrivateWork(() => logic.processMessage(bot, msg, { directChat: true })),
+  sendHelp: async (userId, balance) => sendRich(bot, userId, {
+    html: buildHelp({
+      version: config.version,
+      autoTldrThreshold: config.autoTldrThreshold || 900,
+      commandSuffix: '@' + escapeHtml(botUsername ??= (await bot.getMe()).username),
+      privateChat: balance
+    })
+  }),
   async forwardFree(msg) {
     const sender = msg.from.username ? '@' + msg.from.username : msg.from.first_name || 'Пользователь';
     const body = msg.text || msg.caption;

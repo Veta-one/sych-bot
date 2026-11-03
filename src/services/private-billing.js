@@ -33,7 +33,7 @@ function matchesPackage(payment) {
     && /^sych-chat-v1-[a-f0-9]{32}$/.test(payment.invoice_payload ?? '');
 }
 
-function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, botUsername, support, supportUrl }) {
+function createPrivateBilling({ bot, file, processChat, sendHelp, forwardFree, isBanned, botUsername, support, supportUrl }) {
   let ledger;
   const queues = new Map();
   const pending = new Map();
@@ -67,10 +67,15 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
     });
   }
 
-  function balanceText(userId) {
+  function balance(userId) {
     const account = getAccount(userId);
     const free = Math.max(0, FREE_REPLIES - account.freeUsed);
     const paid = account.charges.reduce((sum, key) => sum + getLedger().charges[key].remaining, 0);
+    return { free, paid };
+  }
+
+  function balanceText(userId) {
+    const { free, paid } = balance(userId);
     return 'Осталось бесплатных ответов: ' + free + '.\nОтветов из пакетов: ' + paid + '.';
   }
 
@@ -206,7 +211,10 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
         reply_markup: { inline_keyboard: [[{ text: 'Купить за 50 ⭐', callback_data: data }]] }
       });
     }
-    if (name === '/start' || name === '/help') {
+    if (name === '/help') return sendHelp(userId, {
+      ...balance(userId), trialSize: FREE_REPLIES, packageSize: PACKAGE_REPLIES, packagePrice: PACKAGE_STARS
+    });
+    if (name === '/start') {
       return bot.sendMessage(userId, 'Я Сыч. Напиши вопрос или продолжи разговор обычным сообщением.\n\n' + balanceText(userId)
         + '\nУсловия: /terms. Пополнить баланс: /buy. Поддержка по оплате: /paysupport.');
     }

@@ -23,6 +23,8 @@ function fixture(t, options = {}) {
     file,
     botUsername: 'Sych_Test_Bot',
     isBanned: () => false,
+    sendHelp: async (userId, privateChat) => bot.sendMessage(userId,
+      require('../src/utils/help').buildHelp({ version: 'test', commandSuffix: '@Sych_Test_Bot', privateChat })),
     forwardFree: async msg => { forwarded.push(msg.message_id); },
     processChat: async msg => {
       handled.push(msg.message_id);
@@ -222,4 +224,16 @@ test('buy button only opens one invoice for the intended user', async t => {
   assert.equal(f.output.filter(o => o.invoice).length, 0);
   await Promise.all([f.tap(data), f.tap(data)]);
   assert.equal(f.output.filter(o => o.invoice).length, 1);
+});
+
+test('private help includes shared features and the current reply balance', async t => {
+  const f = fixture(t);
+  await f.send('question');
+  await f.send('/help');
+  const help = f.output.at(-1).message[1];
+  assert.match(help, /Что я умею/);
+  assert.match(help, /Развлекуха/);
+  assert.match(help, /Осталось бесплатных ответов: 9/);
+  assert.match(help, /Купить 100 ответов за 50 ⭐/);
+  assert.equal(f.ledger().accounts['42'].freeUsed, 1);
 });
