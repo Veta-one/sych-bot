@@ -458,6 +458,30 @@ async extractUrl(url, { full = false } = {}) {
 // === ОСНОВНОЙ ОТВЕТ ===
 async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image/jpeg", userInstruction = "", userProfile = null, isSpontaneous = false, chatProfile = null, externalContext = "", responsePolicy = {}) {
   this.resetStatsIfNeeded();
+  if (responsePolicy.privateBudget) {
+      if (imageBuffer || config.aiBaseUrl?.replace(/\/$/, '') !== 'https://openrouter.ai/api/v1') {
+          throw Object.assign(new Error('Private chat model unavailable'), { code: 'PRIVATE_BUDGET_UNAVAILABLE' });
+      }
+      const question = String(currentMessage.text || '').slice(0, 4000);
+      const prior = (history || []).slice(-9, -1).map(entry => ({
+          role: String(entry.userId) === String(config.botId) ? 'assistant' : 'user',
+          content: String(entry.text || '').slice(0, 2000),
+      })).filter(entry => entry.content);
+      const userContext = [question, String(currentMessage.replyText || '').slice(0, 4000),
+          String(externalContext || '').slice(0, 8000)].filter(Boolean).join('\n\n');
+      const search = isVerificationRequest(question) || requestedUrls(currentMessage).length > 0
+          || /(?:сегодня|сейчас|актуальн|последние новости|курс валют|погода|latest|current news)/i.test(question);
+      return responsePolicy.privateBudget.complete({
+          apiKey: config.aiKey,
+          floorReplies: responsePolicy.privateBudgetFloorReplies,
+          search,
+          messages: [
+              { role: 'system', content: prompts.system() + '\n\n' + userInstruction },
+              ...prior,
+              { role: 'user', content: userContext },
+          ],
+      });
+  }
   console.log(`[DEBUG AI] getResponse вызван.`);
 
   // 0. ЧТЕНИЕ СТРАНИЦЫ ПО ССЫЛКЕ (если в сообщении есть не-картиночный URL и видно намерение «прочитать»)

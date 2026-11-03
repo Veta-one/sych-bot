@@ -194,3 +194,25 @@ test('pausing sales rejects new payments but keeps purchased accounts private', 
   f.restart();
   assert.equal(f.hasPurchased(42), true);
 });
+
+test('checkout preserves capacity for previously accepted invoices and paid replies', async t => {
+  let capacity = 150;
+  const f = fixture(t, { canPurchase: replies => replies <= capacity });
+  const first = await f.invoice(42);
+  const second = await f.invoice(43);
+  await f.checkout(first, 42, 'first');
+  assert.equal(f.output.at(-1).checkout[1], true);
+  await f.checkout(second, 43, 'second');
+  assert.equal(f.output.at(-1).checkout[1], false);
+
+  await f.receipt(f.payment(first), 'successful_payment', 42);
+  await f.checkout(second, 43, 'second');
+  assert.equal(f.output.at(-1).checkout[1], false);
+  capacity = 200;
+  await f.checkout(second, 43, 'second');
+  assert.equal(f.output.at(-1).checkout[1], true);
+
+  capacity = 0;
+  await f.send('/buy', 44);
+  assert.match(f.output.at(-1).message[1], /покупки пока на паузе/i);
+});

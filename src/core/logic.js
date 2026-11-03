@@ -226,7 +226,7 @@ async function initChatProfile(bot, chatId) {
     }
 }
 
-async function processMessage(bot, msg, { directChat = false } = {}) {
+async function processMessage(bot, msg, { directChat = false, privateBudget, floorReplies } = {}) {
     if (isEphemeralMessage(msg)) {
         await handleEphemeral(bot, msg);
         return;
@@ -238,6 +238,10 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     const historyKey = directChat ? 'direct:' + chatId : chatId;
     const userId = msg.from?.id;
     if (!userId) return;
+    if (privateBudget && (!msg.text || msg.voice || msg.audio || msg.photo || msg.video || msg.document || msg.sticker)) {
+        await bot.sendMessage(chatId, 'В пилоте личного чата я отвечаю на текстовые сообщения.');
+        return false;
+    }
 
     let text = msg.text || msg.caption || "";
     let addressedCommand = null;
@@ -887,7 +891,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     }
 
     // 2. ФОТО (обычное или реплай)
-    else if (msg.photo || (msg.reply_to_message && msg.reply_to_message.photo)) {
+    else if (!privateBudget && (msg.photo || (msg.reply_to_message && msg.reply_to_message.photo))) {
        try {
          const photoObj = msg.photo ? msg.photo[msg.photo.length-1] : msg.reply_to_message.photo[msg.reply_to_message.photo.length-1];
          const link = await bot.getFileLink(photoObj.file_id);
@@ -899,7 +903,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     }
 
     // 3. ВИДЕО
-    else if (msg.video || (msg.reply_to_message && msg.reply_to_message.video)) {
+    else if (!privateBudget && (msg.video || (msg.reply_to_message && msg.reply_to_message.video))) {
         const vid = msg.video || msg.reply_to_message.video;
         // Лимит 20 МБ (Telegram API limit for getFile)
         if (vid.file_size > 20 * 1024 * 1024) {
@@ -916,7 +920,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     }
 
     // 4. ДОКУМЕНТЫ (PDF, TXT, CSV...)
-    else if (msg.document || (msg.reply_to_message && msg.reply_to_message.document)) {
+    else if (!privateBudget && (msg.document || (msg.reply_to_message && msg.reply_to_message.document))) {
         const doc = msg.document || msg.reply_to_message.document;
         const documentMime = String(doc.mime_type || 'application/octet-stream').toLowerCase();
         const documentName = doc.file_name || 'document';
@@ -1036,7 +1040,8 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
         !isDirectlyCalled,
         chatProfile, // <--- Передаём профиль чата
         externalContext,
-        directChat ? { failOnUnavailable: true, skipYoutubeAnalysis: true, maxOutputTokens: 2048, researchBudgetMs: 35000 } : undefined
+        directChat ? { failOnUnavailable: true, skipYoutubeAnalysis: true, maxOutputTokens: 2048, researchBudgetMs: 35000,
+          privateBudget, privateBudgetFloorReplies: floorReplies } : undefined
     );
 
     console.log(`[DEBUG] 2. Ответ от AI получен! Длина: ${aiResponse ? aiResponse.length : "PUSTO"}`);
@@ -1058,7 +1063,9 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
         // 2. ГЕНЕРИРУЕМ СМЕШНОЙ ОТВЕТ ДЛЯ ЧАТА
         // Передаем текст ошибки в нашу новую функцию
         answerAvailable = false;
-        aiResponse = getSychErrorReply(err.message);
+        aiResponse = err.code === 'PRIVATE_BUDGET_UNAVAILABLE'
+            ? 'Личный чат сейчас на паузе. Ответ не списан. По вопросам оплаты: /paysupport.'
+            : getSychErrorReply(err.message);
     }
 
     
