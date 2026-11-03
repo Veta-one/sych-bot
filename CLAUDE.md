@@ -253,3 +253,8 @@ services/group-access.js gates ordinary and hidden group inputs and outgoing mes
 Group-access persistence schedules storage.save() before forceSave(), since forceSave only flushes pending debounced writes. The regression suite uses a real StorageService and reloads db.json to verify exit and notification queues survive restarts.
 
 For deactivated chats, confirm the bot itself has left via getChatMember(botId) before completing the exit. chat not found stays blocked and pending; queue size is not a membership count. Retry logs use fixed reason codes without raw Telegram payloads.
+
+
+## Voice providers (1.16.0)
+
+VOICE_TRANSCRIPTION_PROVIDER accepts google (default), openrouter or off. Existing Google transcription stays unchanged. OpenRouter reuses the text client/key, requires its HTTPS base URL, uses google/gemini-2.5-flash-lite with input_audio and strict JSON, and has no native fallback. Input is bounded at20MiB, completion8192 tokens, deadline60s with cancellation and no SDK retries; truncated/malformed results are rejected. Fixed reason codes avoid logging payloads. Silent off filters input before private billing/business side effects and in logic, while groupAccess still runs. Text replies to audio and payments stay available. Help reflects off. Paid direct chat remains text-only, and hidden commands do not gain ASR. Setup: docs/voice-setup.md. Tests: voice-provider and voice-routing plus existing voice/group-access suites.

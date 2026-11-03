@@ -228,6 +228,7 @@ async function initChatProfile(bot, chatId) {
 }
 
 async function processMessage(bot, msg, { directChat = false } = {}) {
+    if (config.voiceTranscriptionProvider === 'off' && (msg.voice || msg.audio)) return;
     if (isEphemeralMessage(msg)) {
         await handleEphemeral(bot, msg);
         return;
@@ -594,7 +595,8 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
 
   if (command === '/help' || command === '/start') {
     const helpText = buildHelp({
-      version: config.version, autoTldrThreshold: config.autoTldrThreshold || 900, commandSuffix
+      version: config.version, autoTldrThreshold: config.autoTldrThreshold || 900, commandSuffix,
+      voiceTranscriptionProvider: config.voiceTranscriptionProvider
     });
     try { return await sendRich(bot, chatId, { html: helpText }, baseOpts(msg, threadId)); } catch (e) {}
 }

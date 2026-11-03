@@ -32,6 +32,15 @@ const YOUTUBE_TRANSCRIPT_TIMEOUT_MS = 25000;
 const TAVILY_EXTRACT_TIMEOUT_MS = 12000;
 const TAVILY_SEARCH_TIMEOUT_MS = 20000;
 const VOICE_TRANSCRIPTION_TIMEOUT_MS = 60000;
+const VOICE_OPENROUTER_MODEL = 'google/gemini-2.5-flash-lite';
+const VOICE_MAX_AUDIO_BYTES = 20 * 1024 * 1024;
+const VOICE_AUDIO_FORMATS = new Map([
+  ['audio/ogg', 'ogg'], ['application/ogg', 'ogg'], ['audio/opus', 'ogg'],
+  ['audio/wav', 'wav'], ['audio/x-wav', 'wav'], ['audio/wave', 'wav'],
+  ['audio/mpeg', 'mp3'], ['audio/mp3', 'mp3'],
+  ['audio/mp4', 'm4a'], ['audio/m4a', 'm4a'], ['audio/x-m4a', 'm4a'],
+  ['audio/flac', 'flac'], ['audio/x-flac', 'flac'], ['audio/aac', 'aac'], ['audio/webm', 'webm'],
+]);
 const VOICE_PRIMARY_ATTEMPT_TIMEOUT_MS = 15000;
 const VOICE_FALLBACK_RESERVE_MS = 30000;
 const VOICE_SUMMARY_TIMEOUT_MS = 45000;
@@ -933,7 +942,11 @@ async generateFlavorText(task, result) {
 
   // === ТРАНСКРИБАЦИЯ ===
   async transcribeAudio(audioBuffer, userName, mimeType) {
-    // Только Native поддерживает загрузку файлов из буфера так легко и бесплатно
+    if (config.voiceTranscriptionProvider === 'off') return null;
+    if (config.voiceTranscriptionProvider === 'openrouter') {
+      return this.transcribeAudioOpenRouter(audioBuffer, userName, mimeType);
+    }
+    // Native Google keeps its existing key rotation and retry behavior.
     if (!this.keys || this.keys.length === 0) {
         console.warn("[AI WARN] Получено голосовое, но нет ключей Google для расшифровки. Пропускаю.");
         return null;
@@ -991,6 +1004,66 @@ async generateFlavorText(task, result) {
     } catch (e) {
         console.error(`[TRANSCRIPTION FAIL] ${e.message}`);
         return null;
+    }
+  }
+
+  async transcribeAudioOpenRouter(audioBuffer, userName, mimeType) {
+    const deadline = Date.now() + VOICE_TRANSCRIPTION_TIMEOUT_MS;
+    if (!Buffer.isBuffer(audioBuffer) || !audioBuffer.length || audioBuffer.length > VOICE_MAX_AUDIO_BYTES) {
+      console.warn('[TRANSCRIPTION OPENROUTER] INVALID_INPUT');
+      return null;
+    }
+    const mime = typeof mimeType === 'string' ? mimeType.split(';', 1)[0].trim().toLowerCase() : '';
+    const format = VOICE_AUDIO_FORMATS.get(mime);
+    if (!format) {
+      console.warn('[TRANSCRIPTION OPENROUTER] UNSUPPORTED_FORMAT');
+      return null;
+    }
+    if (!this.openai) {
+      console.warn('[TRANSCRIPTION OPENROUTER] UNAVAILABLE');
+      return null;
+    }
+    const controller = new AbortController();
+    let failure = 'REQUEST_FAILED';
+    try {
+      const body = {
+        model: VOICE_OPENROUTER_MODEL,
+        messages: [
+          { role: 'system', content: prompts.voiceTranscriptionSystem() },
+          { role: 'user', content: [
+            { type: 'input_audio', input_audio: { data: audioBuffer.toString('base64'), format } },
+            { type: 'text', text: prompts.transcription(userName) },
+          ] },
+        ],
+        temperature: 0,
+        max_tokens: 8192,
+        reasoning: { enabled: false },
+        response_format: { type: 'json_schema', json_schema: {
+          name: 'transcript', strict: true,
+          schema: { type: 'object', properties: { text: { type: 'string' } }, required: ['text'], additionalProperties: false },
+        } },
+      };
+      const timeout = deadline - Date.now();
+      if (timeout <= 0) throw Object.assign(new Error('Transcription timeout'), { code: 'ETIMEDOUT' });
+      const result = await withTimeout(this.openai.chat.completions.create(body, {
+        timeout, maxRetries: 0, signal: controller.signal,
+      }), timeout, 'Расшифровка OpenRouter');
+      storage.incrementStat('smart');
+      if (Date.now() >= deadline) throw Object.assign(new Error('Transcription timeout'), { code: 'ETIMEDOUT' });
+      const choice = result?.choices?.[0];
+      failure = choice?.finish_reason === 'length' ? 'TRUNCATED' : 'INVALID_RESPONSE';
+      if (result?.error || choice?.finish_reason !== 'stop' || choice.message?.refusal
+        || typeof choice.message?.content !== 'string') throw new Error('Invalid transcription response');
+      return { text: readTranscript(choice.message.content) };
+    } catch (error) {
+      if (error?.code === 'ETIMEDOUT' || ['AbortError', 'APIUserAbortError', 'APIConnectionTimeoutError'].includes(error?.name)) failure = 'TIMEOUT';
+      const status = Number.isInteger(error?.status) && error.status >= 400 && error.status <= 599
+        ? ` status=${error.status}` : '';
+      console.warn(`[TRANSCRIPTION OPENROUTER] ${failure}${status}`);
+      return null;
+    } finally {
+      // The outer deadline also cancels SDK work that has not settled yet.
+      controller.abort();
     }
   }
 

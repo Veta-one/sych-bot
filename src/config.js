@@ -6,6 +6,25 @@ function positiveNumber(value, fallback) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
+const voiceTranscriptionProvider = (process.env.VOICE_TRANSCRIPTION_PROVIDER || 'google').trim().toLowerCase();
+if (!['google', 'openrouter', 'off'].includes(voiceTranscriptionProvider)) {
+  throw new Error('VOICE_TRANSCRIPTION_PROVIDER: допустимы google, openrouter или off');
+}
+const aiBaseUrl = process.env.AI_BASE_URL || 'https://openrouter.ai/api/v1';
+const aiKey = process.env.OPENROUTER_API_KEY || process.env.AI_API_KEY;
+if (voiceTranscriptionProvider === 'openrouter') {
+  if (!aiKey?.trim()) {
+    throw new Error('VOICE_TRANSCRIPTION_PROVIDER=openrouter требует OPENROUTER_API_KEY или AI_API_KEY');
+  }
+  let endpoint;
+  try { endpoint = new URL(aiBaseUrl); } catch {}
+  if (!endpoint || endpoint.protocol !== 'https:' || endpoint.hostname !== 'openrouter.ai'
+    || endpoint.port || endpoint.username || endpoint.password || endpoint.search || endpoint.hash
+    || !['/api/v1', '/api/v1/'].includes(endpoint.pathname)) {
+    throw new Error('VOICE_TRANSCRIPTION_PROVIDER=openrouter требует AI_BASE_URL=https://openrouter.ai/api/v1');
+  }
+}
+
 // Собираем ключи для Native Google (Fallback или Search)
 const geminiKeys = [];
 if (process.env.GOOGLE_GEMINI_API_KEY) geminiKeys.push(process.env.GOOGLE_GEMINI_API_KEY);
@@ -25,8 +44,8 @@ module.exports = {
   adminId: parseInt(process.env.ADMIN_USER_ID, 10),
   
   // === OPENROUTER / API (Основной канал) ===
-  aiBaseUrl: process.env.AI_BASE_URL || "https://openrouter.ai/api/v1",
-  aiKey: process.env.OPENROUTER_API_KEY || process.env.AI_API_KEY, 
+  aiBaseUrl,
+  aiKey,
 
   // === АКТУАЛЬНЫЕ МОДЕЛИ (АВГУСТ 2026) ===
 
@@ -52,6 +71,7 @@ module.exports = {
   // === GEMINI NATIVE (FALLBACK / SEARCH) ===
   geminiKeys: geminiKeys,
   googleNativeModel: 'gemini-2.5-flash-lite', 
+  voiceTranscriptionProvider,
   voiceFallbackModel: process.env.VOICE_FALLBACK_MODEL || 'gemini-2.5-flash',
   voiceSummaryTimeoutMs: positiveNumber(process.env.VOICE_SUMMARY_TIMEOUT_SECONDS, 45) * 1000,
   autoTldrEnabled: !/^(?:false|off|0)$/i.test((process.env.AUTO_TLDR_ENABLED || '').trim()),

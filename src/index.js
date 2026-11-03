@@ -110,6 +110,7 @@ const privateBilling = createPrivateBilling({
     html: buildHelp({
       version: config.version,
       autoTldrThreshold: config.autoTldrThreshold || 900,
+      voiceTranscriptionProvider: config.voiceTranscriptionProvider,
       commandSuffix: '@' + escapeHtml(botUsername ??= (await bot.getMe()).username),
       privateChat: balance
     })
@@ -237,11 +238,16 @@ async function shouldProcessBusinessMessage(msg) {
 }
 
 async function handleBusinessMessage(msg) {
+  if (shouldIgnoreAudio(msg)) return;
   if (!isFreshMessage(msg)) return;
   if (!(await shouldProcessBusinessMessage(msg))) return;
 
   const scopedBot = withBusinessConnection(bot, msg);
   await logic.processMessage(scopedBot, msg);
+}
+
+function shouldIgnoreAudio(msg) {
+  return config.voiceTranscriptionProvider === 'off' && Boolean(msg.voice || msg.audio);
 }
 
 // Передаем бота в AI-сервис для уведомлений
@@ -250,6 +256,7 @@ ai.setBot(bot);
 
 console.log("Сыч запущен и готов пояснять за жизнь.");
 console.log(`Admin ID: ${config.adminId}`);
+console.log(`[VOICE] provider=${config.voiceTranscriptionProvider || 'google'}`);
 
 storage.backupRetention = config.backupRetention;
 storage.startAutomaticBackups(config.backupIntervalMs);
@@ -307,6 +314,7 @@ bot.on('message', async (msg) => {
   // Игнорируем сообщения, старше 2 минут (чтобы не отвечать на старое при рестарте)
   if (msg.chat?.type === 'private' && !msg.business_connection_id && msg.chat.id !== config.adminId) {
     const isPayment = Boolean(msg.successful_payment || msg.refunded_payment);
+    if (!isPayment && shouldIgnoreAudio(msg)) return;
     if (!isPayment && !isFreshMessage(msg)) return;
     try {
       if (!isPayment && !privateChatEnabled) {
@@ -339,6 +347,9 @@ bot.on('message', async (msg) => {
     }
     if (!(await groupAccess.check(chatId))) return;
   }
+
+  // Preserve group security checks even when audio processing is disabled.
+  if (shouldIgnoreAudio(msg)) return;
 
   if (msg.ephemeral_message_id !== undefined) {
     await logic.processMessage(bot, msg);
