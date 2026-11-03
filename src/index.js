@@ -77,6 +77,10 @@ const privateBilling = createPrivateBilling({
   supportUrl: paymentSupportUrl
 });
 
+bot.on('callback_query', query => {
+  privateBilling.handleBuyCallback(query, privateChatEnabled).catch(() => console.error('[PRIVATE BILLING] Buy button failed'));
+});
+
 bot.on('pre_checkout_query', query => {
   privateBilling.handlePreCheckout(query, privateChatEnabled).catch(() => console.error('[PRIVATE BILLING] Checkout response failed'));
 });

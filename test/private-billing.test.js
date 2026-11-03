@@ -15,6 +15,7 @@ function fixture(t, options = {}) {
   const bot = {
     sendMessage: async (...args) => output.push({ message: args }),
     sendInvoice: async (...args) => output.push({ invoice: args }),
+    answerCallbackQuery: async (...args) => output.push({ callback: args }),
     answerPreCheckoutQuery: async (...args) => output.push({ checkout: args })
   };
   const billingOptions = {
@@ -40,9 +41,13 @@ function fixture(t, options = {}) {
   const send = (text, userId) => billing.handleMessage(message(text, userId));
   const ledger = () => JSON.parse(readFileSync(file, 'utf8'));
 
+  const tap = (data, userId = 42, chatId = userId) => billing.handleBuyCallback({
+    id: 'tap', data, from: { id: userId }, message: { chat: { id: chatId, type: 'private' } }
+  });
+
   async function invoice(userId = 42) {
     await send('/buy', userId);
-    await send('/buy confirm', userId);
+    await tap(output.at(-1).message[2].reply_markup.inline_keyboard[0][0].callback_data, userId);
     const args = output.filter(o => o.invoice).at(-1).invoice;
     assert.deepEqual([args[0], ...args.slice(4, 7)], [userId, '', 'XTR', [{ label: '100 ответов', amount: 50 }]]);
     return args[3];
@@ -59,7 +64,7 @@ function fixture(t, options = {}) {
 
   return {
     file, output, forwarded, handled, message, send, ledger, invoice, payment, receipt, checkout,
-    handleMessage: msg => billing.handleMessage(msg),
+    tap, handleMessage: msg => billing.handleMessage(msg),
     hasPurchased: id => billing.hasPurchased(id),
     restart: () => { billing = createPrivateBilling(billingOptions); }
   };
@@ -226,5 +231,17 @@ test('trial welcome and ordinary messages do not send a separate forwarding noti
   assert.equal(f.output.length, before);
   assert.equal(f.forwarded.length, 1);
   await f.send('/terms');
-  assert.match(f.output.at(-1).message[1], /копии обращений/i);
+  assert.doesNotMatch(f.output.at(-1).message[1], /копии обращений/i);
+});
+
+test('buy button only opens one invoice for the intended user', async t => {
+  const f = fixture(t);
+  await f.send('/buy');
+  const offer = f.output.at(-1).message;
+  assert.doesNotMatch(offer[1], /пересыл|копии обращений|buy confirm/i);
+  const data = offer[2].reply_markup.inline_keyboard[0][0].callback_data;
+  await f.tap(data, 43, 42);
+  assert.equal(f.output.filter(o => o.invoice).length, 0);
+  await Promise.all([f.tap(data), f.tap(data)]);
+  assert.equal(f.output.filter(o => o.invoice).length, 1);
 });

@@ -8,9 +8,9 @@ const PACKAGE_STARS = 50;
 const INVOICE_TTL = 30 * 60 * 1000;
 const RECENT_REPLIES = 32;
 const MAX_PENDING = 100;
-const TERMS = 'В пилоте отвечаю на текст. Первые 10 ответов бесплатны. В бесплатной личке владелец Сыча получает копии обращений. После первой покупки Сыч перестаёт пересылать ему сообщения.\n\n100 ответов стоят 50 ⭐. Это разовая покупка. Ответ с обычным поиском расходует один ответ из пакета. Остаток сохраняется, его можно посмотреть через /balance. Если ответ не пришёл, он не списывается. Вопросы по оплате и возвратам: /paysupport.';
+const TERMS = 'В пилоте отвечаю на текст. Первые 10 ответов бесплатны.\n\n100 ответов стоят 50 ⭐. Это разовая покупка. Ответ с обычным поиском расходует один ответ из пакета. Остаток сохраняется, его можно посмотреть через /balance. Если ответ не пришёл, он не списывается. Вопросы по оплате и возвратам: /paysupport.';
 const SALES_PAUSED = 'Покупки пока на паузе. Остаток ответов сохранён. По оплате и возвратам: /paysupport.';
-const OFFER = '100 ответов за 50 ⭐. Разовая покупка.\n\n' + TERMS + '\n\nЕсли условия подходят, отправь /buy confirm.';
+const BUY_CALLBACK = 'sych-buy:';
 const EMPTY_ACCOUNT = { freeUsed: 0, charges: [], replied: [] };
 
 function readLedger(file) {
@@ -214,13 +214,11 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
     if (name === '/balance') return bot.sendMessage(userId, balanceText(userId) + '\nПакет из 100 ответов за 50 ⭐: /buy.');
     if (name === '/buy') {
       if (!salesAvailable()) return bot.sendMessage(userId, SALES_PAUSED);
-      if (args === 'confirm' && offers.get(userId)?.expires > Date.now()) {
-        offers.delete(userId);
-        return sendInvoice(userId);
-      }
-      await bot.sendMessage(userId, OFFER);
-      remember(offers, userId, {});
-      return;
+      const data = BUY_CALLBACK + randomBytes(12).toString('hex');
+      remember(offers, userId, { data });
+      return bot.sendMessage(userId, TERMS, {
+        reply_markup: { inline_keyboard: [[{ text: 'Купить за 50 ⭐', callback_data: data }]] }
+      });
     }
     if (name === '/start' || name === '/help') {
       return bot.sendMessage(userId, 'Я Сыч. Напиши вопрос или продолжи разговор обычным сообщением.\n\n' + balanceText(userId)
@@ -232,6 +230,24 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
     }
     if (name) return bot.sendMessage(userId, 'В личке можно просто написать вопрос. Доступные команды: /help.');
     return answer(userId, msg);
+  }
+
+  async function handleBuyCallback(query, enabled = true) {
+    if (!query?.data?.startsWith(BUY_CALLBACK)) return;
+    const userId = query.from?.id;
+    if (!Number.isSafeInteger(userId) || query.message?.chat?.type !== 'private'
+      || query.message.chat.id !== userId) {
+      return bot.answerCallbackQuery(query.id, { text: 'Открой покупку в личке через /buy.' });
+    }
+    const offer = offers.get(userId);
+    if (!enabled || isBanned(userId) || offer?.data !== query.data || offer.expires <= Date.now()) {
+      return bot.answerCallbackQuery(query.id, { text: 'Кнопка устарела. Открой новый счёт через /buy.' });
+    }
+    if (!salesAvailable()) return bot.answerCallbackQuery(query.id, { text: SALES_PAUSED });
+    offers.delete(userId);
+    await bot.answerCallbackQuery(query.id);
+    if (!salesAvailable()) return bot.sendMessage(userId, SALES_PAUSED);
+    return sendInvoice(userId);
   }
 
   function handleMessage(msg, enabled = true) {
@@ -259,7 +275,7 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
     if (enabled) return serialize(userId, () => handleConversation(userId, msg));
   }
 
-  return { handleMessage, handlePreCheckout, hasPurchased };
+  return { handleMessage, handleBuyCallback, handlePreCheckout, hasPurchased };
 }
 
 module.exports = { createPrivateBilling };
