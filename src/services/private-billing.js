@@ -11,8 +11,7 @@ const MAX_PENDING = 100;
 const TERMS = 'В пилоте отвечаю на текст. Первые 10 ответов бесплатны. В бесплатной личке владелец Сыча получает копии обращений. После первой покупки Сыч перестаёт пересылать ему сообщения.\n\n100 ответов стоят 50 ⭐. Это разовая покупка. Ответ с обычным поиском расходует один ответ из пакета. Остаток сохраняется, его можно посмотреть через /balance. Если ответ не пришёл, он не списывается. Вопросы по оплате и возвратам: /paysupport.';
 const SALES_PAUSED = 'Покупки пока на паузе. Остаток ответов сохранён. По оплате и возвратам: /paysupport.';
 const OFFER = '100 ответов за 50 ⭐. Разовая покупка.\n\n' + TERMS + '\n\nЕсли условия подходят, отправь /buy confirm.';
-const TRIAL_NOTICE = 'В бесплатной личке владелец Сыча получает копии обращений. После первой покупки пересылка прекращается. Подробнее: /terms.';
-const EMPTY_ACCOUNT = { freeUsed: 0, charges: [], replied: [], trialNoticeSent: false };
+const EMPTY_ACCOUNT = { freeUsed: 0, charges: [], replied: [] };
 
 function readLedger(file) {
   let contents;
@@ -168,10 +167,6 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
       return bot.sendMessage(userId, 'Ответы закончились. Пополнить запас можно через /buy. ' + balanceText(userId));
     }
 
-    if (!account.charges.length && !account.trialNoticeSent) {
-      await bot.sendMessage(userId, TRIAL_NOTICE);
-      commit(next => { accountForEdit(next, userId).trialNoticeSent = true; });
-    }
     if (!getAccount(userId).charges.length) {
       try {
         await forwardFree(msg);
@@ -228,14 +223,8 @@ function createPrivateBilling({ bot, file, processChat, forwardFree, isBanned, b
       return;
     }
     if (name === '/start' || name === '/help') {
-      const trial = !getAccount(userId).charges.length;
-      await bot.sendMessage(userId, 'Я Сыч. Напиши вопрос или продолжи разговор обычным сообщением.\n\n' + balanceText(userId)
-        + '\nУсловия: /terms. Пополнить баланс: /buy. Поддержка по оплате: /paysupport.'
-        + (trial ? '\n\n' + TRIAL_NOTICE : ''));
-      if (trial && !getAccount(userId).trialNoticeSent) {
-        commit(next => { accountForEdit(next, userId).trialNoticeSent = true; });
-      }
-      return;
+      return bot.sendMessage(userId, 'Я Сыч. Напиши вопрос или продолжи разговор обычным сообщением.\n\n' + balanceText(userId)
+        + '\nУсловия: /terms. Пополнить баланс: /buy. Поддержка по оплате: /paysupport.');
     }
     if (name === '/forget_me') {
       pending.delete(userId);

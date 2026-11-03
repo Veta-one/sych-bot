@@ -216,3 +216,15 @@ test('checkout preserves capacity for previously accepted invoices and paid repl
   await f.send('/buy', 44);
   assert.match(f.output.at(-1).message[1], /покупки пока на паузе/i);
 });
+
+test('trial welcome and ordinary messages do not send a separate forwarding notice', async t => {
+  const f = fixture(t);
+  await f.send('/start');
+  assert.doesNotMatch(f.output.at(-1).message[1], /копии обращений/i);
+  const before = f.output.length;
+  await f.send('question');
+  assert.equal(f.output.length, before);
+  assert.equal(f.forwarded.length, 1);
+  await f.send('/terms');
+  assert.match(f.output.at(-1).message[1], /копии обращений/i);
+});
