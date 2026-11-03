@@ -5,7 +5,7 @@ const vm = require('node:vm');
 const test = require('node:test');
 process.env.TELEGRAM_BOT_TOKEN = '99:synthetic';
 
-function loadIndex({ member = { status: 'member' }, error, knownChats = {} } = {}) {
+function loadIndex({ member = { status: 'member' }, error, knownChats = {}, storageOverride } = {}) {
   const calls = { processed: [], left: [], requests: [], notices: [], timers: [] };
   const handlers = {};
   let options;
@@ -17,9 +17,9 @@ function loadIndex({ member = { status: 'member' }, error, knownChats = {} } = {
     async leaveChat(chatId) { calls.left.push(chatId); return true; },
     async _request(method, args) { calls.requests.push({ method, args }); return true; },
   };
-  const storage = {
+  const storage = storageOverride || {
     paths: {}, data: { chats: knownChats }, startAutomaticBackups() {},
-    stopAutomaticBackups() {}, forceSave() {}, getPendingReminders() { return []; },
+    stopAutomaticBackups() {}, save() {}, forceSave() {}, getPendingReminders() { return []; },
   };
   const dependencies = {
     'node-telegram-bot-api': { TelegramBot: function (token, settings) { options = settings; return bot; } },
@@ -300,4 +300,40 @@ test('a block between Rich attempts prevents ordinary, strict and hidden HTTP fa
       assert.equal(requests, 1);
     }
   } finally { axios.post = originalPost; }
+});
+
+test('index persists exit and notification queues through the real debounced storage', async t => {
+  const os = require('node:os');
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sych-group-persistence-'));
+  process.env.SYCH_DATA_DIR = directory;
+  const { StorageService } = require('../src/services/storage');
+  const storage = new StorageService({ dataDir: directory });
+  storage.startAutomaticBackups = () => {};
+  t.after(() => {
+    storage.stopAutomaticBackups();
+    storage.forceSave();
+    if (path.resolve(directory).startsWith(path.resolve(os.tmpdir()) + path.sep)) {
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  });
+  const f = loadIndex({ member: { status: 'left' }, storageOverride: storage });
+  f.bot.leaveChat = async () => { throw new Error('temporary failure'); };
+  await f.handlers.message(f.message());
+  const disk = () => JSON.parse(fs.readFileSync(storage.paths.db, 'utf8'));
+  assert.ok(disk().groupExitPending?.['-123'], 'pending exit must reach disk before restart');
+
+  f.bot.leaveChat = async () => true;
+  f.bot.sendMessage = async () => { throw new Error('temporary notice failure'); };
+  storage.data.groupExitPending['-123'].retryAt = 0;
+  await f.calls.timers[0]();
+  assert.equal(disk().groupDeparted['-123'], true);
+  assert.ok(disk().groupExitNotices['-123']);
+  assert.deepEqual(disk().groupExitPending, {});
+
+  f.bot.sendMessage = async () => ({ message_id: 1 });
+  storage.data.groupExitNotices['-123'].retryAt = 0;
+  await f.calls.timers[0]();
+  const reloaded = new StorageService({ dataDir: directory });
+  assert.equal(reloaded.data.groupDeparted['-123'], true);
+  assert.deepEqual(reloaded.data.groupExitNotices, {});
 });

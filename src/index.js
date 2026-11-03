@@ -72,7 +72,10 @@ const groupAccess = createGroupAccess(bot, config.adminId, {
       action + '\n' + String(notice.name || 'Название неизвестно').slice(0, 256)
       + '\nID ' + chatId + '\n' + reason);
   },
-  save: () => storage.forceSave(),
+  save: () => {
+    storage.save();
+    storage.forceSave();
+  },
 });
 bot.requireGroupAccess = groupAccess.requireAccess;
 const originalRequest = bot._request.bind(bot);
@@ -258,12 +261,14 @@ bot.getMe().then((me) => {
 
 // Refresh only the owner's group menu. Do not delay incoming private requests.
 async function registerKnownGroupCommands() {
-  for (const chatId of Object.keys(storage.data.chats).filter(id => Number(id) < 0)) {
+  const chatIds = Object.keys(storage.data.chats).filter(id => Number(id) < 0);
+  for (const chatId of chatIds) {
     if (await groupAccess.check(Number(chatId))) {
       await ensureOwnerEphemeralCommands(bot, Number(chatId), config.adminId).catch(() => {});
     }
     await new Promise(resolve => setTimeout(resolve, 150));
   }
+  console.log('[GROUP ACCESS] STARTUP_CHECKED groups=' + chatIds.length);
 }
 registerKnownGroupCommands().catch(() => console.error('[COMMANDS] Owner menu registration incomplete.'));
 
