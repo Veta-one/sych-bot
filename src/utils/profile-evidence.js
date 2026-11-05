@@ -47,13 +47,13 @@ function normalizeProfileMessages(messages) {
   return selected;
 }
 
-function relationshipUpdate(value) {
-  const update = {};
-  if (!record(value)) return update;
-  if (typeof value.relationship === 'number' && Number.isFinite(value.relationship)
-      && value.relationship >= 0 && value.relationship <= 100) update.relationship = value.relationship;
-  if (typeof value.attitude === 'string' && value.attitude.trim() && value.attitude.length <= 400) update.attitude = value.attitude.trim();
-  return update;
+function relationshipUpdate(value, messageId) {
+  const eventId = Number(id(messageId));
+  if (!record(value) || !Number.isSafeInteger(eventId) || eventId <= 0
+    || !Number.isInteger(value.relationshipDelta) || value.relationshipDelta < -3 || value.relationshipDelta > 3) return {};
+  const event = { messageId: eventId, delta: value.relationshipDelta };
+  if (typeof value.attitude === 'string' && value.attitude.trim() && value.attitude.length <= 400) event.attitude = value.attitude.trim();
+  return { relationshipEvent: event };
 }
 
 function cleanEvidence(entry, expectedUserId) {
@@ -95,7 +95,7 @@ function validateProfileUpdates(modelUpdates, inputMessages) {
   const result = {};
   for (const [userId, candidate] of Object.entries(modelUpdates).slice(0, MAX_MESSAGES)) {
     if (!id(userId) || !owners.has(userId) || !record(candidate)) continue;
-    const update = relationshipUpdate(candidate);
+    const update = {};
     const factEvidence = [];
     for (const entry of (Array.isArray(candidate.evidence) ? candidate.evidence : []).slice(0, MAX_EVIDENCE)) {
       if (!record(entry)) continue;

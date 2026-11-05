@@ -19,7 +19,7 @@ test('batch accepts only exact quotations owned by the target and strips invente
     ] },
     999: { relationship: 10, evidence: [{ messageId: 11, quote: 'Я люблю шахматы.' }] },
   }, messages, { 1: { relationship: 50 } });
-  assert.deepEqual(result, { 1: { relationship: 52, factEvidence: [
+  assert.deepEqual(result, { 1: { factEvidence: [
     { userId: '1', messageId: '11', quote: 'Я люблю шахматы.', date: 1791700000 },
   ] } });
 });

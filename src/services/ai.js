@@ -873,12 +873,12 @@ async runLogicText(promptText) {
 
 async analyzeUserImmediate(input, currentProfile) {
     const [message] = normalizeProfileMessages([input]);
-    if (!message || message.isForwarded) return null;
+    if (!message || message.isForwarded || !Number.isSafeInteger(Number(message.messageId))) return null;
     try {
         const result = await withTimeout(this.runLogicModel(prompts.analyzeImmediate(
             { relationship: profileSourceData(currentProfile).relationship }, message),
             { temperature: 0, timeoutMs: PROFILE_ANALYSIS_TIMEOUT_MS }), PROFILE_ANALYSIS_TIMEOUT_MS, 'Обновление отношения');
-        const update = relationshipUpdate(result);
+        const update = relationshipUpdate(result, message.messageId);
         return Object.keys(update).length ? update : null;
     } catch (_) { return null; }
 }
@@ -921,24 +921,25 @@ async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', s
 async analyzeBatch(messagesBatch, currentProfiles) {
     const messages = normalizeProfileMessages(messagesBatch);
     if (!messages.length) return {};
-    const profiles = currentProfiles && typeof currentProfiles === 'object' ? currentProfiles : {};
     // Existing quotations and legacy biographies need no model rewrite: storage
-    // merges new evidence. Sending only relationship keeps a batch bounded and
-    // avoids reintroducing old inventions as fresh evidence.
-    const knownInfo = [...new Set(messages.map(message => message.userId))].map(userId => ({
-        userId, relationship: profileSourceData(profiles[userId]).relationship,
-    }));
+    // merges new evidence. Batch analysis has no authority over relationships.
+    const knownInfo = [...new Set(messages.map(message => message.userId))];
     try {
         const result = await withTimeout(this.runLogicModel(prompts.analyzeBatch(JSON.stringify(knownInfo), JSON.stringify(messages)),
             { temperature: 0, timeoutMs: PROFILE_ANALYSIS_TIMEOUT_MS }), PROFILE_ANALYSIS_TIMEOUT_MS, 'Обновление профилей');
+        if (!result || typeof result !== 'object' || Array.isArray(result)) return null;
         return validateProfileUpdates(result, messages);
-    } catch (_) { return {}; }
+    } catch (_) { return null; }
 }
 
 // Анализ профиля чата (каждые 50 сообщений)
 async analyzeChatProfile(messagesBatch, currentProfile) {
     const messagesText = messagesBatch.map(m => `${m.name}: ${m.text}`).join('\n');
-    return this.runLogicModel(prompts.analyzeChatProfile(currentProfile, messagesText));
+    try {
+        const result = await withTimeout(this.runLogicModel(prompts.analyzeChatProfile(currentProfile, messagesText),
+            { timeoutMs: PROFILE_ANALYSIS_TIMEOUT_MS }), PROFILE_ANALYSIS_TIMEOUT_MS, 'Обновление профиля чата');
+        return result && typeof result === 'object' && !Array.isArray(result) ? result : null;
+    } catch (_) { return null; }
 }
 
 // Обработка ручного описания чата (команда "Сыч, этот чат про...")

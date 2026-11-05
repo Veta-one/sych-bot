@@ -33,7 +33,8 @@ test('profile updates retain legacy data and merge only evidence owned by the ta
   const storage = new StorageService({ dataDir: makeTempDir('sych-profile-evidence-') });
   storage.profiles = { '-100': { 42: { realName: 'Старое имя', location: 'Старый город', facts: 'Старая память', relationship: 50 } } };
   storage._applyProfileUpdates('-100', { 42: {
-    realName: 'Выдуманное имя', location: 'Выдуманный город', facts: 'Выдуманные факты', relationship: 51,
+    realName: 'Выдуманное имя', location: 'Выдуманный город', facts: 'Выдуманные факты', relationship: 0,
+    relationshipEvent: { messageId: 11, delta: 1 },
     factEvidence: [
       { userId: '42', messageId: '11', quote: 'Я люблю шахматы.', date: 1790000000 },
       { userId: '77', messageId: '12', quote: 'Я живу на Марсе.' },
@@ -75,9 +76,9 @@ test('forgetting removes quoted profile evidence from live data and backup snaps
 test('zero relationship stays zero on a neutral update and rises by only one on a positive update', () => {
   const storage = new StorageService({ dataDir: makeTempDir('sych-profile-zero-') });
   storage.profiles = { '-100': { 42: { relationship: 0 } } };
-  storage._applyProfileUpdates('-100', { 42: { relationship: 0 } });
+  storage._applyProfileUpdates('-100', { 42: { relationshipEvent: { messageId: 1, delta: 0 } } });
   assert.equal(storage.getProfile('-100', 42).relationship, 0);
-  storage._applyProfileUpdates('-100', { 42: { relationship: 1 } });
+  storage._applyProfileUpdates('-100', { 42: { relationshipEvent: { messageId: 2, delta: 1 } } });
   assert.equal(storage.getProfile('-100', 42).relationship, 1);
   storage.saveProfilesDebounced.flush();
 });

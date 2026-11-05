@@ -4,6 +4,8 @@ const { mergeProfileEvidence } = require('../utils/profile-evidence');
 
 const DEFAULT_DATA_DIR = path.join(__dirname, '../../data');
 const debounce = require('lodash.debounce');
+const MAX_RELATIONSHIP_EVENTS = 256;
+const validMessageId = value => Number.isSafeInteger(value) && value > 0;
 
 function cloneDefault(value) {
   return JSON.parse(JSON.stringify(value));
@@ -660,21 +662,23 @@ class StorageService {
   }
 
   // Массовое обновление (после анализа) с очередью для предотвращения race condition
-  bulkUpdateProfiles(chatId, updatesMap) {
+  bulkUpdateProfiles(chatId, updatesMap, { isCurrent = () => true } = {}) {
     // Добавляем обновление в очередь, чтобы избежать одновременных изменений
     this.profileUpdateQueue = this.profileUpdateQueue.then(() => {
-      this._applyProfileUpdates(chatId, updatesMap);
-    }).catch(err => {
-      console.error("[PROFILE UPDATE ERROR]", err);
+      this._applyProfileUpdates(chatId, updatesMap, isCurrent);
+    }).catch(() => {
+      console.error('[PROFILE UPDATE] FAILED');
     });
+    return this.profileUpdateQueue;
   }
 
   // Внутренний метод применения обновлений
-  _applyProfileUpdates(chatId, updatesMap) {
+  _applyProfileUpdates(chatId, updatesMap, isCurrent = () => true) {
     if (!this.profiles[chatId]) this.profiles[chatId] = {};
 
     for (const [userId, data] of Object.entries(updatesMap)) {
         if (!/^[1-9]\d*$/.test(userId) || !data || typeof data !== 'object' || Array.isArray(data)) continue;
+        if (!isCurrent(userId)) continue;
         const forgottenUntil = this.forgottenUntil.get(String(userId)) || 0;
         if (forgottenUntil > Date.now()) {
           console.log(`[PRIVACY] Пропущено устаревшее обновление профиля ${userId} после удаления памяти.`);
@@ -682,40 +686,41 @@ class StorageService {
         }
 
         const current = this.profiles[chatId][userId] || { realName: null, facts: "", attitude: "Нейтральное", relationship: 50 };
+        let changed = false;
 
         // Legacy fields remain readable but model prose can no longer overwrite them.
         // New factual memory consists only of validated quotations with provenance.
         if (Array.isArray(data.factEvidence)) {
-          current.factEvidence = mergeProfileEvidence(current.factEvidence, data.factEvidence, userId);
+          const merged = mergeProfileEvidence(current.factEvidence, data.factEvidence, userId);
+          if (merged.length) { current.factEvidence = merged; changed = true; }
         }
-        if (typeof data.attitude === 'string' && data.attitude.trim()) current.attitude = data.attitude.trim().slice(0, 256);
-
-        // Валидация изменения репутации
-        if (data.relationship !== undefined) {
-          const newScore = parseInt(data.relationship, 10);
-          if (!isNaN(newScore)) {
-            const oldScore = current.relationship ?? 50;
-            const delta = newScore - oldScore;
-
-            // Ограничиваем изменения: +1..+3 за позитив, -5..-10 за негатив
-            let clampedDelta = delta;
-            if (delta > 0) {
-              clampedDelta = Math.min(delta, 3); // Максимум +3
-            } else if (delta < 0) {
-              clampedDelta = Math.max(delta, -10); // Максимум -10
-              if (clampedDelta > -5 && clampedDelta < 0) clampedDelta = -5; // Минимум -5 если негатив
+        // Absolute model scores and bare attitudes are deliberately ignored.
+        // Each immediate message contributes one bounded delta to current state.
+        const event = data.relationshipEvent;
+        if (event && typeof event === 'object' && !Array.isArray(event)
+          && validMessageId(event.messageId) && Number.isInteger(event.delta) && event.delta >= -3 && event.delta <= 3) {
+          const ledger = current.relationshipEvents || {};
+          let floor = Number.isSafeInteger(ledger.floor) && ledger.floor >= 0 ? ledger.floor : 0;
+          const ids = [...new Set((Array.isArray(ledger.ids) ? ledger.ids : []).filter(id => validMessageId(id) && id > floor))].sort((a, b) => a - b);
+          if (ids.length > MAX_RELATIONSHIP_EVENTS) floor = ids.splice(0, ids.length - MAX_RELATIONSHIP_EVENTS).at(-1);
+          const latestId = ids.at(-1) || floor;
+          if (event.messageId > floor && !ids.includes(event.messageId)) {
+            const before = typeof current.relationship === 'number' && Number.isFinite(current.relationship)
+              ? Math.max(0, Math.min(100, current.relationship)) : 50;
+            const after = Math.max(0, Math.min(100, before + event.delta));
+            current.relationship = after;
+            if (event.messageId > latestId && typeof event.attitude === 'string' && event.attitude.trim() && event.attitude.length <= 400) {
+              current.attitude = event.attitude.trim();
             }
-
-            // Применяем изменение с ограничением 0-100
-            current.relationship = Math.max(0, Math.min(100, oldScore + clampedDelta));
-
-            if (delta !== clampedDelta) {
-              console.log(`[RELATIONSHIP CLAMP] ${userId}: AI хотел ${delta > 0 ? '+' : ''}${delta}, применено ${clampedDelta > 0 ? '+' : ''}${clampedDelta}`);
-            }
+            ids.push(event.messageId); ids.sort((a, b) => a - b);
+            if (ids.length > MAX_RELATIONSHIP_EVENTS) floor = ids.shift();
+            current.relationshipEvents = { ids, floor };
+            changed = true;
+            console.log(`[RELATIONSHIP] before=${before} delta=${after - before} after=${after}`);
           }
         }
 
-        this.profiles[chatId][userId] = current;
+        if (changed) this.profiles[chatId][userId] = current;
     }
     this.saveProfiles();
   }

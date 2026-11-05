@@ -4,11 +4,36 @@ const path = require('node:path');
 const vm = require('node:vm');
 const test = require('node:test');
 
+let chatProfileMethods;
+function useRealChatProfiles(h) {
+  if (!chatProfileMethods) {
+    const os = require('node:os');
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'sych-init-regression-'));
+    const original = process.env.SYCH_DATA_DIR;
+    try {
+      process.env.SYCH_DATA_DIR = directory;
+      chatProfileMethods = require('../src/services/storage').StorageService.prototype;
+    } finally {
+      if (original === undefined) delete process.env.SYCH_DATA_DIR;
+      else process.env.SYCH_DATA_DIR = original;
+      assert.ok(path.resolve(directory).startsWith(path.resolve(os.tmpdir()) + path.sep));
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+  h.storage.chatProfiles = {};
+  h.storage.chatProfilesBlockedUntil = new Map();
+  h.storage.saveChatProfiles = () => {};
+  h.storage.getChatProfile = chatProfileMethods.getChatProfile;
+  h.storage.updateChatProfile = chatProfileMethods.updateChatProfile;
+}
+
 function harness() {
   const state = { sent: [], reminders: [], answers: [], summaries: [], tldrSummaries: [], parses: [], immediate: [], profileDescriptions: [], download: Buffer.from('audio'), transcript: 'Обычное сообщение.', muted: false, plan: { kind: 'answer' } };
   const storage = { isBanned: () => Boolean(state.banned), hasChat: () => true, updateChatName() {}, trackUser() {},
     isTopicMuted: () => state.muted, getProfile: () => ({}), getChatProfile: () => ({ topic: 'test' }),
-    getUserInstruction: () => '', addReminder: (...args) => state.reminders.push(args) };
+    getUserInstruction: () => '', addReminder: (...args) => state.reminders.push(args),
+    getProfilesForUsers: () => ({}), bulkUpdateProfiles: (...args) => (state.profileWrites ||= []).push(args),
+    updateChatProfile: (...args) => (state.chatProfileWrites ||= []).push(args) };
   storage.forgetUser = async () => {
     if (state.forgetResponder) await state.forgetResponder();
     return { profilesRemoved: 1, chatReferencesRemoved: 0, remindersRemoved: 0,
@@ -25,6 +50,7 @@ function harness() {
       return state.answerResponder ? state.answerResponder() : '4';
     },
     analyzeUserImmediate: async input => { state.immediate.push(input); return null; },
+    analyzeBatch: async () => ({}), analyzeChatProfile: async () => ({}),
     describeImage: async () => null,
     generateProfileDescription: async (profile, targetName) => {
       state.profileDescriptions.push({ profile, targetName });
@@ -66,12 +92,204 @@ function harness() {
       (state.legacySends ||= []).push(args);
       return state.legacyResponder ? state.legacyResponder(...args) : { message_id: ++messageId };
     } };
-  return { state, async message(overrides) {
+  return { state, ai, storage, async message(overrides) {
     const msg = { message_id: ++messageId, from: { id: 999, first_name: 'Тест' },
       chat: { id: -100, type: 'supergroup' }, is_topic_message: true, message_thread_id: 184, ...overrides };
     await box.exports.processMessage(bot, msg); return msg;
   } };
 }
+
+test('observer detaches twenty messages once and retains message22 for the next nonoverlapping batch', async () => {
+  const { message, ai, storage } = harness();
+  storage.getProfilesForUsers = () => ({});
+  storage.bulkUpdateProfiles = () => {};
+  const batches = [];
+  ai.analyzeBatch = messages => new Promise(resolve => batches.push({ ids: messages.map(m => m.messageId), resolve }));
+  for (let id = 1; id <= 21; id++) await message({ message_id: id, text: 'Обычная реплика' });
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].ids.length, 20);
+  await message({ message_id: 22, text: 'Новая реплика' });
+  batches[0].resolve({}); await new Promise(setImmediate);
+  for (let id = 23; id <= 40; id++) await message({ message_id: id, text: 'Обычная реплика' });
+  assert.equal(batches.length, 2);
+  assert.deepEqual([...batches[1].ids], Array.from({ length: 20 }, (_, i) => i + 21));
+  batches[1].resolve({}); await new Promise(setImmediate);
+});
+
+test('observer drains accumulated batches sequentially and preserves new input after technical failure', async () => {
+  for (const failed of [false, true]) {
+    const { message, ai } = harness();
+    const batches = [];
+    ai.analyzeBatch = messages => new Promise(resolve => batches.push({ ids: messages.map(m => m.messageId), resolve }));
+    for (let id = 1; id <= 41; id++) await message({ message_id: id, text: 'Реплика' });
+    assert.equal(batches.length, 1);
+    batches[0].resolve(failed ? null : {}); await new Promise(setImmediate);
+    if (failed) {
+      assert.equal(batches.length, 1, 'An unavailable batch is not retried in a loop');
+      await message({ message_id: 42, text: 'Новая реплика' });
+      assert.equal(batches.length, 2);
+      assert.deepEqual([...batches[1].ids], Array.from({ length: 20 }, (_, i) => i + 1));
+      batches[1].resolve({}); await new Promise(setImmediate);
+    }
+    const next = batches[failed ? 2 : 1];
+    assert.ok(next, 'A full backlog drains without another incoming message');
+    assert.deepEqual([...next.ids], Array.from({ length: 20 }, (_, i) => i + 21));
+    next.resolve({}); await new Promise(setImmediate);
+    for (let id = failed ? 43 : 42; id <= 60; id++) await message({ message_id: id, text: 'Реплика' });
+    assert.deepEqual([...batches.at(-1).ids], Array.from({ length: 20 }, (_, i) => i + 41));
+    batches.at(-1).resolve({}); await new Promise(setImmediate);
+  }
+});
+
+test('one answered message can collect batch facts but only immediate supplies its relationship event', async () => {
+  const { message, ai, state } = harness();
+  let finishBatch;
+  ai.analyzeBatch = () => new Promise(resolve => { finishBatch = resolve; });
+  ai.analyzeUserImmediate = async input => ({ relationshipEvent: { messageId: input.messageId, delta: 1 } });
+  for (let id = 1; id <= 19; id++) await message({ message_id: id, text: 'Реплика' });
+  let finishAnswer;
+  state.answerResponder = () => new Promise(resolve => { finishAnswer = resolve; });
+  const answer = message({ message_id: 20, text: 'Сыч, спасибо' }); await new Promise(setImmediate);
+  finishBatch({ 999: { relationship: 53, attitude: 'Недопустимое мнение batch', relationshipEvent: { messageId: 20, delta: 3 },
+    factEvidence: [{ userId: '999', messageId: '20', quote: 'Сыч, спасибо' }] } });
+  await new Promise(setImmediate);
+  finishAnswer('Пожалуйста'); await answer; await new Promise(setImmediate);
+  const updates = state.profileWrites.map(call => call[1]['999']);
+  assert.equal(updates.length, 2);
+  assert.deepEqual(Object.keys(updates[0]), ['factEvidence']);
+  assert.deepEqual(JSON.parse(JSON.stringify(updates[1])), { relationshipEvent: { messageId: 20, delta: 1 } });
+});
+
+test('forgotten in-flight batch results and failed-batch requeue cannot resurrect that user', async () => {
+  for (const failed of [false, true]) {
+    const { message, ai, state } = harness();
+    const batches = [];
+    ai.analyzeBatch = messages => new Promise(resolve => batches.push({ messages, resolve }));
+    for (let id = 1; id <= 20; id++) await message({ message_id: id, from: { id: id <= 10 ? 42 : 999 }, text: 'Реплика' });
+    await message({ text: 'Сыч, забудь меня', from: { id: 42 } });
+    batches[0].resolve(failed ? null : {
+      42: { factEvidence: [{ userId: '42', messageId: '1', quote: 'Удалённые слова' }] },
+      999: { factEvidence: [{ userId: '999', messageId: '11', quote: 'Реплика' }] },
+    });
+    await new Promise(setImmediate);
+    assert.ok(!(state.profileWrites || []).some(call => call[1]['42']));
+    for (let id = 21; id <= (failed ? 30 : 40); id++) await message({ message_id: id, text: 'Новая реплика' });
+    assert.equal(batches.length, 2);
+    assert.ok(batches[1].messages.every(message => message.userId === 999));
+    batches[1].resolve({}); await new Promise(setImmediate);
+  }
+});
+
+test('forget/reset invalidates late immediate results and queued profile writes', async () => {
+  for (const command of ['Сыч, забудь меня', '/reset@Siitch_bot']) {
+    const h = harness();
+    let finish;
+    h.ai.analyzeUserImmediate = () => new Promise(resolve => { finish = resolve; });
+    await h.message({ message_id: 10, text: 'Сыч, привет' });
+    await h.message({ text: command });
+    finish({ relationshipEvent: { messageId: 10, delta: 3 } }); await new Promise(setImmediate);
+    assert.equal(h.state.profileWrites?.length || 0, 0);
+
+    h.ai.analyzeUserImmediate = async () => ({ relationshipEvent: { messageId: 11, delta: 1 } });
+    await h.message({ message_id: 11, text: 'Сыч, привет' }); await new Promise(setImmediate);
+    const guard = h.state.profileWrites.at(-1)[2].isCurrent;
+    assert.equal(guard(999), true);
+    await h.message({ text: command });
+    assert.equal(guard(999), false, 'The actual storage queue must be able to reject a write after a later reset');
+  }
+});
+
+test('chat profile drain also detaches its batch and preserves message51; reset cancels in-flight output', async () => {
+  const h = harness(), batches = [];
+  h.ai.analyzeChatProfile = messages => new Promise(resolve => batches.push({ ids: messages.map(message => message.messageId), resolve }));
+  for (let id = 1; id <= 51; id++) await h.message({ message_id: id, text: 'Реплика' });
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].ids.length, 50);
+  batches[0].resolve({ topic: 'Синтетическая тема' }); await new Promise(setImmediate);
+  for (let id = 52; id <= 100; id++) await h.message({ message_id: id, text: 'Реплика' });
+  assert.equal(batches.length, 2);
+  assert.deepEqual([...batches[1].ids], Array.from({ length: 50 }, (_, i) => i + 51));
+  await h.message({ text: '/reset@Siitch_bot' });
+  batches[1].resolve({ topic: 'Удалённая тема' }); await new Promise(setImmediate);
+  assert.equal(h.state.chatProfileWrites.length, 1);
+});
+
+test('chat analysis timeout releases its drain for a later input without losing the detached batch', async () => {
+  const h = harness(), batches = [];
+  h.ai.analyzeChatProfile = messages => new Promise(resolve => batches.push({ ids: messages.map(message => message.messageId), resolve }));
+  for (let id = 1; id <= 51; id++) await h.message({ message_id: id, text: 'Реплика' });
+  batches[0].resolve(null); await new Promise(setImmediate);
+  assert.equal(batches.length, 1, 'No autonomous retry loop after a technical failure');
+  await h.message({ message_id: 52, text: 'Новая реплика' });
+  assert.equal(batches.length, 2);
+  assert.deepEqual([...batches[1].ids], Array.from({ length: 50 }, (_, i) => i + 1));
+  batches[1].resolve({}); await new Promise(setImmediate);
+  for (let id = 53; id <= 100; id++) await h.message({ message_id: id, text: 'Реплика' });
+  assert.deepEqual([...batches[2].ids], Array.from({ length: 50 }, (_, i) => i + 51));
+  batches[2].resolve({}); await new Promise(setImmediate);
+});
+
+test('pending deletion excludes newly buffered user messages and stale results while preserving other users', async () => {
+  const h = harness(), batches = [];
+  h.ai.analyzeBatch = messages => new Promise(resolve => batches.push({ messages, resolve }));
+  for (let id = 1; id <= 20; id++) await h.message({ message_id: id, from: { id: id <= 10 ? 42 : 999 }, text: 'Реплика' });
+  let finishDeletion;
+  h.state.forgetResponder = () => new Promise(resolve => { finishDeletion = resolve; });
+  const deletion = h.message({ text: 'Сыч, забудь меня', from: { id: 42 } }); await new Promise(setImmediate);
+  await h.message({ message_id: 21, from: { id: 42 }, text: 'Сообщение во время удаления' });
+  batches[0].resolve(null); await new Promise(setImmediate);
+  for (let id = 22; id <= 31; id++) await h.message({ message_id: id, text: 'Реплика' });
+  assert.equal(batches.length, 2);
+  assert.ok(batches[1].messages.every(message => message.userId === 999));
+  finishDeletion(); await deletion;
+  batches[1].resolve({ 42: { factEvidence: [{ userId: '42', messageId: '21', quote: 'Сообщение во время удаления' }] } });
+  await new Promise(setImmediate);
+  assert.ok(!(h.state.profileWrites || []).some(call => call[1]['42']));
+});
+
+test('empty chat profile initialization cannot overlap another initialization or publish after reset', async () => {
+  const h = harness(), calls = [];
+  useRealChatProfiles(h);
+  h.ai.analyzeChatProfile = messages => new Promise(resolve => calls.push({ messages, resolve }));
+  for (let id = 1; id <= 9; id++) await h.message({ message_id: id, text: 'Реплика', is_topic_message: false });
+  await h.message({ message_id: 10, text: 'Сыч, привет', is_topic_message: false });
+  await h.message({ message_id: 11, text: 'Сыч, привет снова', is_topic_message: false });
+  const count = calls.length;
+  await h.message({ message_id: 12, text: '/reset@Siitch_bot', is_topic_message: false });
+  for (const call of calls) call.resolve({ topic: 'OLD_TOPIC_BEFORE_RESET' });
+  await new Promise(setImmediate);
+  assert.equal(h.storage.getChatProfile(-100).topic, null, 'A reset invalidates initialization before the actual storage update');
+  assert.equal(count, 1, 'Only one chat analysis may run at a time');
+});
+
+test('chat profile initialization releases its shared drain and starts a full accumulated batch after failure', async () => {
+  for (const throws of [false, true]) {
+    const h = harness(), calls = [];
+    useRealChatProfiles(h);
+    h.ai.analyzeChatProfile = messages => new Promise((resolve, reject) => calls.push({ messages, resolve, reject }));
+    for (let id = 1; id <= 50; id++) await h.message({ message_id: id, text: id === 10 ? 'Сыч, привет' : 'Реплика', is_topic_message: false });
+    const count = calls.length;
+    if (throws) calls[0].reject(new Error('synthetic failure')); else calls[0].resolve(null);
+    await new Promise(setImmediate);
+    assert.equal(count, 1, 'An accumulated batch must wait for the active initialization');
+    assert.equal(calls.length, 2, 'The ready batch starts when initialization releases the drain');
+    assert.deepEqual([...calls[1].messages.map(message => message.messageId)], Array.from({ length: 50 }, (_, i) => i + 1));
+    calls[1].resolve({}); await new Promise(setImmediate);
+  }
+});
+
+test('initialization guards the forgotten author referenced only by a surviving bot reply', async () => {
+  const h = harness(), calls = [];
+  useRealChatProfiles(h);
+  h.ai.analyzeChatProfile = messages => new Promise(resolve => calls.push({ messages, resolve }));
+  await h.message({ message_id: 1, text: 'Сыч, привет', from: { id: 42 }, is_topic_message: false });
+  for (let id = 2; id <= 29; id++) await h.message({ message_id: id, text: 'Реплика', is_topic_message: false });
+  await h.message({ message_id: 30, text: 'Сыч, привет снова', is_topic_message: false });
+  assert.equal(calls.length, 1);
+  await h.message({ text: 'Сыч, забудь меня', from: { id: 42 }, is_topic_message: false });
+  calls[0].resolve({ topic: 'TOPIC_FROM_FORGOTTEN_REPLY' }); await new Promise(setImmediate);
+  assert.equal(h.storage.getChatProfile(-100).topic, null);
+});
 
 test('spoken Sych request gets one ordinary answer without a transcript card or summary', async () => {
   const { state, message } = harness();

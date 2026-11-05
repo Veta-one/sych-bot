@@ -125,26 +125,49 @@ test('a failed service and insufficient conversation have different fallbacks wi
   assert.ok(!logs.join('\n').match(/SECRET_|Я люблю шахматы|Тест/));
 });
 
-test('immediate analysis is bound to one user message and can only update relationship', async () => {
+test('immediate analysis attaches the real message ID to a bounded delta and ignores model IDs or absolute scores', async () => {
   const { ai } = harness();
   let request;
-  ai.runLogicModel = async (prompt, options) => { request = { prompt, options }; return { relationship: 51, attitude: 'Доброе общение', facts: 'Марс', location: 'Марс', realName: 'Цезарь' }; };
+  ai.runLogicModel = async (prompt, options) => { request = { prompt, options }; return { relationshipDelta: 1, messageId: 999, relationship: 0, attitude: 'Доброе общение', facts: 'Марс', location: 'Марс', realName: 'Цезарь' }; };
   const update = await ai.analyzeUserImmediate({ userId: 1, messageId: 10, name: 'А', text: 'Спасибо, Сыч.' }, profile);
-  assert.deepEqual(JSON.parse(JSON.stringify(update)), { relationship: 51, attitude: 'Доброе общение' });
+  assert.deepEqual(JSON.parse(JSON.stringify(update)), { relationshipEvent: { messageId: 10, delta: 1, attitude: 'Доброе общение' } });
   assert.match(request.prompt, /Спасибо, Сыч/);
   assert.doesNotMatch(request.prompt, /Якобы живёт в Риме/);
   assert.match(request.prompt, /userId.*1/);
   assert.equal(request.options.temperature, 0);
   assert.equal(await ai.analyzeUserImmediate('А: Спасибо. Б: Я живу на Марсе.', profile), null);
+  for (const invalid of [{ relationship: 53 }, { relationshipDelta: 0.5 }, { relationshipDelta: -4 }, { relationshipDelta: 4 }]) {
+    ai.runLogicModel = async () => invalid;
+    assert.equal(await ai.analyzeUserImmediate({ userId: 1, messageId: 10, text: 'Реплика' }, profile), null);
+  }
 });
 
 test('batch discards fabricated evidence and model biographies', async () => {
   const { ai } = harness();
-  ai.runLogicModel = async () => ({ 1: { facts: 'Марс', realName: 'Цезарь', evidence: [
+  ai.runLogicModel = async () => ({ 1: { relationship: 0, attitude: 'Подмена отношения', relationshipEvent: { messageId: 1, delta: -3 }, facts: 'Марс', realName: 'Цезарь', evidence: [
     { messageId: 1, quote: 'Я люблю шахматы.' }, { messageId: 1, quote: 'Живу на Марсе.' },
   ] } });
   const result = await ai.analyzeBatch([{ userId: 1, messageId: 1, name: 'А', text: 'Я люблю шахматы.' }], { 1: profile });
   assert.deepEqual(JSON.parse(JSON.stringify(result)), { 1: { factEvidence: [{ userId: '1', messageId: '1', quote: 'Я люблю шахматы.' }] } });
+});
+
+test('stalled chat profile analysis returns null within its bounded deadline and disables SDK retries', async () => {
+  const { ai } = harness({ timeoutCapMs: 10 });
+  const calls = [];
+  ai.openai.chat.completions.create = (request, options) => {
+    calls.push({ request, options });
+    return new Promise(() => {});
+  };
+  const watchdog = new Promise(resolve => setTimeout(() => resolve('STILL_LOCKED'), 100));
+  const result = await Promise.race([ai.analyzeChatProfile([{ name: 'Тест', text: 'Реплика' }], {}), watchdog]);
+  assert.equal(result, null);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].options.maxRetries, 0);
+  assert.ok(calls[0].options.timeout > 0 && calls[0].options.timeout <= 15000);
+  ai.runLogicModel = async () => ({});
+  assert.deepEqual(JSON.parse(JSON.stringify(await ai.analyzeChatProfile([], {}))), {});
+  ai.runLogicModel = async () => { throw new Error('SECRET_FAILURE'); };
+  assert.equal(await ai.analyzeChatProfile([], {}), null);
 });
 
 test('ordinary and native chat contexts label old memory consistently', async () => {
@@ -176,8 +199,26 @@ test('stalled profile writer aborts once at its deadline; memory analysis retain
   assert.equal(requests[0].options.signal.aborted, true);
   ai.runLogicModel = async () => new Promise(() => {});
   assert.equal(await ai.analyzeUserImmediate({ userId: 1, messageId: 1, text: 'Спасибо' }, profile), null);
-  assert.deepEqual(JSON.parse(JSON.stringify(await ai.analyzeBatch([{ userId: 1, messageId: 1, text: 'Привет' }], {}))), {});
+  assert.equal(await ai.analyzeBatch([{ userId: 1, messageId: 1, text: 'Привет' }], {}), null);
   assert.ok(Date.now() - start < 2000);
+});
+
+test('relationship policy distinguishes ordinary banter from explicit goodwill or directed abuse', async () => {
+  const { ai, writers } = harness();
+  let policy;
+  ai.runLogicModel = async prompt => { policy = prompt; return { relationshipDelta: 0, attitude: 'Нейтральное' }; };
+  await ai.analyzeUserImmediate({ userId: 1, messageId: 11, text: 'Это неправильный ответ, исправь.' }, profile);
+  assert.match(policy, /дружеский подкол/);
+  assert.match(policy, /критика ответа.*0/);
+  assert.match(policy, /мат не в адрес бота: 0/);
+  assert.match(policy, /от -1 до -3/);
+  assert.doesNotMatch(policy, /-5|-10/);
+  await ai.generateProfileDescription({ ...profile, relationship: 50, attitude: 'Старая неприязнь' }, 'Тест');
+  const prompt = writers[0].request.messages[1].content;
+  assert.match(prompt, /relationship имеет приоритет над старой attitude/);
+  assert.match(prompt, /0–20 сухой или колкий/);
+  assert.match(prompt, /21–79 спокойный ироничный/);
+  assert.match(prompt, /80–100 дружеский/);
 });
 
 test('bounded profile logic disables SDK retries and native search without changing ordinary logic', async () => {

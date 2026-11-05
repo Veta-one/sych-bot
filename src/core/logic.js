@@ -27,6 +27,10 @@ const {
 const chatHistory = {};
 const analysisBuffers = {};
 const chatAnalysisBuffers = {}; // Буфер для анализа профиля чата
+const activeProfileDrains = new Set();
+const activeChatDrains = new Set();
+const chatMemoryRevisions = new Map();
+const chatMemoryRevision = chatId => chatMemoryRevisions.get(String(chatId)) || 0;
 const memoryRevisions = new Map();
 const memoryRevision = userId => memoryRevisions.get(String(userId)) || 0;
 const pendingProfileDeletions = new Map();
@@ -172,38 +176,69 @@ function getActionOptions(threadId) {
 
 // escapeHtml импортируется из ../utils/rich (фоллбэк/парсинг разметки теперь внутри sendRich)
 
+function bufferRevisionGuard(chatId, buffer) {
+    const chatRevision = chatMemoryRevision(chatId);
+    const revisions = new Map(buffer.map(message => [String(message.userId), memoryRevision(message.userId)]));
+    return userId => chatMemoryRevision(chatId) === chatRevision && !profileDeletionPending(userId)
+      && revisions.has(String(userId)) && revisions.get(String(userId)) === memoryRevision(userId);
+}
+
 async function processBuffer(chatId) {
-    const buffer = analysisBuffers[chatId];
-    if (!buffer || buffer.length === 0) return;
-
-    const userIds = [...new Set(buffer.map(m => m.userId))];
-    const currentProfiles = storage.getProfilesForUsers(chatId, userIds);
-    const updates = await ai.analyzeBatch(buffer, currentProfiles);
-
-    if (updates) {
-        storage.bulkUpdateProfiles(chatId, updates);
-        console.log(`[OBSERVER] Обновлено профилей: ${Object.keys(updates).length}`);
-    }
-    analysisBuffers[chatId] = [];
+    if (activeProfileDrains.has(chatId)) return;
+    activeProfileDrains.add(chatId);
+    try {
+      while (analysisBuffers[chatId]?.length >= BUFFER_SIZE) {
+        const batch = analysisBuffers[chatId].splice(0, BUFFER_SIZE);
+        const isCurrent = bufferRevisionGuard(chatId, batch);
+        const messages = batch.filter(message => isCurrent(message.userId));
+        if (!messages.length) continue;
+        try {
+          const userIds = [...new Set(messages.map(message => message.userId))];
+          const updates = await ai.analyzeBatch(messages, storage.getProfilesForUsers(chatId, userIds));
+          if (updates == null) throw new Error('Batch unavailable');
+          // Batch has no relationship authority, even if a provider returns
+          // unexpected fields alongside its quoted evidence.
+          const facts = Object.fromEntries(Object.entries(updates)
+            .filter(([userId, update]) => isCurrent(userId) && Array.isArray(update?.factEvidence))
+            .map(([userId, update]) => [userId, { factEvidence: update.factEvidence }]));
+          if (Object.keys(facts).length) await storage.bulkUpdateProfiles(chatId, facts, { isCurrent });
+        } catch {
+          analysisBuffers[chatId] = [...batch.filter(message => isCurrent(message.userId)), ...(analysisBuffers[chatId] || [])];
+          console.warn('[OBSERVER] BATCH_UNAVAILABLE');
+          break; // Retry only on a later input, never spin on an unavailable API.
+        }
+      }
+    } finally { activeProfileDrains.delete(chatId); }
 }
 
 // Анализ профиля чата (каждые 50 сообщений)
 async function processChatBuffer(chatId) {
-    const buffer = chatAnalysisBuffers[chatId];
-    if (!buffer || buffer.length === 0) return;
-
-    const currentProfile = storage.getChatProfile(chatId);
-    const updates = await ai.analyzeChatProfile(buffer, currentProfile);
-
-    if (updates) {
-        storage.updateChatProfile(chatId, updates);
-        console.log(`[CHAT PROFILE] Обновлен профиль чата ${chatId}`);
-    }
-    chatAnalysisBuffers[chatId] = [];
+    if (activeChatDrains.has(chatId)) return;
+    activeChatDrains.add(chatId);
+    try {
+      while (chatAnalysisBuffers[chatId]?.length >= CHAT_BUFFER_SIZE) {
+        const batch = chatAnalysisBuffers[chatId].splice(0, CHAT_BUFFER_SIZE);
+        const isCurrent = bufferRevisionGuard(chatId, batch);
+        const messages = batch.filter(message => isCurrent(message.userId));
+        if (!messages.length) continue;
+        try {
+          const updates = await ai.analyzeChatProfile(messages, storage.getChatProfile(chatId));
+          if (updates == null) throw new Error('Chat batch unavailable');
+          // Aggregated chat prose cannot be separated by author after a forget.
+          if (messages.every(message => isCurrent(message.userId))) storage.updateChatProfile(chatId, updates);
+        } catch {
+          chatAnalysisBuffers[chatId] = [...batch.filter(message => isCurrent(message.userId)), ...(chatAnalysisBuffers[chatId] || [])];
+          console.warn('[CHAT PROFILE] BATCH_UNAVAILABLE');
+          break;
+        }
+      }
+    } finally { activeChatDrains.delete(chatId); }
 }
 
 // Инициализация профиля чата (для новых чатов или при пустом профиле)
 async function initChatProfile(bot, chatId) {
+    if (activeChatDrains.has(chatId)) return;
+    activeChatDrains.add(chatId);
     try {
         // Пытаемся получить последние 50 сообщений из истории
         // (используем chatHistory если есть, или начинаем с нуля)
@@ -211,19 +246,28 @@ async function initChatProfile(bot, chatId) {
 
         if (history.length >= 10) {
             // Если есть хотя бы 10 сообщений — анализируем
-            const messages = history.slice(-50).map(m => ({ name: m.role, text: m.text }));
+            const sources = history.slice(-50);
+            const chatRevision = chatMemoryRevision(chatId);
+            const authors = [...new Set(sources.flatMap(entry => [entry.userId, entry.relatedUserId])
+                .filter(userId => userId !== null && userId !== undefined))];
+            const isCurrent = bufferRevisionGuard(chatId, authors.map(userId => ({ userId })));
+            if (!authors.every(isCurrent)) return;
+            const messages = sources.map(m => ({ name: m.role, text: m.text }));
             const currentProfile = storage.getChatProfile(chatId);
             const updates = await ai.analyzeChatProfile(messages, currentProfile);
 
-            if (updates) {
+            if (updates && chatMemoryRevision(chatId) === chatRevision && authors.every(isCurrent)) {
                 storage.updateChatProfile(chatId, updates);
-                console.log(`[CHAT PROFILE INIT] Инициализирован профиль чата ${chatId}: "${updates.topic}"`);
+                console.log('[CHAT PROFILE INIT] UPDATED');
             }
         } else {
             console.log(`[CHAT PROFILE INIT] Недостаточно сообщений для анализа чата ${chatId}, ждём накопления`);
         }
-    } catch (e) {
-        console.error(`[CHAT PROFILE INIT ERROR] ${e.message}`);
+    } catch (_) {
+        console.warn('[CHAT PROFILE INIT] UNAVAILABLE');
+    } finally {
+        activeChatDrains.delete(chatId);
+        if (chatAnalysisBuffers[chatId]?.length >= CHAT_BUFFER_SIZE) processChatBuffer(chatId);
     }
 }
 
@@ -295,8 +339,9 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     let isDirectlyCalled = directChat || hasTriggerWord || isReplyToBot || Boolean(ownQuestionFollowup);
     const followupToken = conversationFollowups.begin(msg, threadId, { botId: config.botId, inherited: sourceFollowup });
     const userMemoryRevision = memoryRevision(userId);
+    const userChatMemoryRevision = chatMemoryRevision(chatId);
     const isStaleProfileReply = () => profileDeletionPending(userId)
-        || memoryRevision(userId) !== userMemoryRevision || Boolean(followupToken?.cancelled);
+        || memoryRevision(userId) !== userMemoryRevision || chatMemoryRevision(chatId) !== userChatMemoryRevision || Boolean(followupToken?.cancelled);
 
     // === ЕДИНЫЙ КОНТРОЛЛЕР СТАТУСА "ПЕЧАТАЕТ" ===
     let typingTimer = null;
@@ -519,7 +564,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
 
       // Пишем в буфер для анализа профиля чата
       if (!chatAnalysisBuffers[chatId]) chatAnalysisBuffers[chatId] = [];
-      chatAnalysisBuffers[chatId].push({ userId, name: displayName, text });
+      chatAnalysisBuffers[chatId].push({ userId, name: displayName, text, messageId: msg.message_id });
   }
   if (analysisBuffers[chatId].length >= BUFFER_SIZE) {
       processBuffer(chatId);
@@ -606,8 +651,10 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     return sendRich(bot, chatId, { markdown: nowMuted ? "🦉 Окей молчу" : "🦉 Я тут" }, baseOpts(msg, threadId));
   }
   if (command === '/reset') {
+    chatMemoryRevisions.set(String(chatId), chatMemoryRevision(chatId) + 1);
     chatHistory[historyKey] = [];
     analysisBuffers[chatId] = [];
+    chatAnalysisBuffers[chatId] = [];
     conversationFollowups.forgetChat(chatId);
     autoTldrJobs.forgetChat(chatId);
     handleEphemeral.forgetChat(chatId);
@@ -1129,19 +1176,13 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
         isForwarded: Boolean(msg.forward_origin || msg.forward_from || msg.forward_from_chat || msg.forward_sender_name) };
     
     // Запускаем анализ
+    const isCurrent = () => !profileDeletionPending(userId) && memoryRevision(userId) === userMemoryRevision
+      && chatMemoryRevision(chatId) === userChatMemoryRevision;
     ai.analyzeUserImmediate(profileMessage, userProfile).then(updated => {
-        if (updated) {
-            // ЛОГИРУЕМ ИЗМЕНЕНИЯ
-            if (updated.relationship) {
-                console.log(`[RELATIONSHIP] ${senderName}: Новая репутация = ${updated.relationship}/100`);
-            }
-            
-            const updates = {}; updates[userId] = updated;
-            storage.bulkUpdateProfiles(chatId, updates);
-        } else {
-            console.log(`[RELATIONSHIP] Не удалось обновить профиль (AI вернул null)`);
+        if (updated?.relationshipEvent && isCurrent()) {
+            return storage.bulkUpdateProfiles(chatId, { [userId]: { relationshipEvent: updated.relationshipEvent } }, { isCurrent });
         }
-    }).catch(err => console.error("[RELATIONSHIP ERROR]", err));
+    }).catch(() => console.warn('[RELATIONSHIP] ANALYSIS_UNAVAILABLE'));
   }
     } finally {
       conversationFollowups.finish(followupToken);
