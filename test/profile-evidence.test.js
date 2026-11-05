@@ -43,7 +43,7 @@ test('evidence merging is bounded, deduplicates identity and never changes quota
   assert.deepEqual(evidence.mergeProfileEvidence([], [{ ...first, quote: '' }, { ...first, quote: 'x'.repeat(601) }]), []);
 });
 
-test('profile context and deterministic fallback distinguish source words from old unverified memory', () => {
+test('profile context preserves source ownership while fallback never dumps quotes or unverified biography', () => {
   const profile = { userId: 1, relationship: 0, facts: 'Живёт в Риме.', location: 'Рим', realName: 'Цезарь', factEvidence: [
     { userId: '1', messageId: '11', quote: 'Я люблю шахматы.' },
     { userId: '2', messageId: '12', quote: 'Я космонавт.' },
@@ -56,7 +56,19 @@ test('profile context and deterministic fallback distinguish source words from o
   assert.equal(evidence.profileSourceData(profile).relationship, 0);
   const fallback = evidence.conservativeProfileDescription(profile, 'Тест');
   assert.match(fallback, /0\/100/);
-  assert.match(fallback, /Я люблю шахматы/);
-  assert.match(fallback, /без исходных сообщений/);
-  assert.doesNotMatch(fallback, /Живёт в Риме|Цезарь|Я космонавт/);
+  assert.doesNotMatch(fallback, /Я люблю шахматы|Живёт в Риме|Цезарь|Я космонавт/);
+  const failed = evidence.conservativeProfileDescription(profile, 'Тест', 'unavailable');
+  assert.match(failed, /0\/100/);
+  assert.match(failed, /сбой/);
+  assert.doesNotMatch(failed, /Я люблю шахматы|Живёт в Риме|Цезарь|Я космонавт|мало реплик/);
+});
+
+test('deterministic profile header preserves zero and safely renders account names', () => {
+  const header = evidence.profileDescriptionHeader({ relationship: 0 }, '[Имя](url)\n# Новая строка');
+  assert.match(header, /0\/100/);
+  assert.ok(header.startsWith('### \\[Имя\\]\\(url\\) \\# Новая строка'));
+  assert.equal(header.split('\n').filter(line => line.startsWith('###')).length, 1);
+  for (const [score, expected] of [[50, 'нейтрально'], [100, 'свой'], [NaN, 'нейтрально']]) {
+    assert.ok(evidence.profileDescriptionHeader({ relationship: score }, 'Имя').includes(expected));
+  }
 });

@@ -143,21 +143,22 @@ function escapeMarkdown(value) {
     .replace(/([\\`*_{}\[\]()#+.!|~])/g, '\\$1');
 }
 
-function conservativeProfileDescription(profile, targetName) {
+function profileDescriptionHeader(profile, targetName) {
   const data = profileSourceData(profile, targetName);
-  const name = escapeMarkdown(data.displayName || 'Пользователь');
+  const name = escapeMarkdown(data.displayName.replace(/\s+/g, ' ').trim() || 'Пользователь');
   const relation = data.relationship <= 20 ? '😡 Отношение бота: неприязнь' : data.relationship >= 80 ? '🤝 Отношение бота: свой' : '😐 Отношение бота: нейтрально';
-  const lines = [`### ${name}`, `**${relation} (${data.relationship}/100)**`];
-  const reports = data.selfReports.slice(-5);
-  if (reports.length) {
-    lines.push('В памяти остались слова пользователя. Их истинность я отдельно не проверял:',
-      ...reports.map(entry => `> ${escapeMarkdown(entry.quote).replace(/\n/g, '\n> ')}`));
-  } else {
-    lines.push('Надёжных записей из сообщений пользователя пока мало. Биографию из совиной головы сочинять не буду.');
-  }
-  if (Object.values(data.unverifiedLegacy).some(Boolean)) lines.push('Есть старая память без исходных сообщений. Подтвердить её пока не могу.');
-  return lines.join('\n\n');
+  return `### ${name}\n\n**${relation} (${data.relationship}/100)**`;
+}
+
+function conservativeProfileDescription(profile, targetName, reason = 'insufficient') {
+  const messages = {
+    insufficient: 'Пока мало реплик, чтобы сложить портрет. Для меткого подкола нужен материал, а не хрустальный шар.',
+    timeout: 'Не успел собрать характеристику: муза зависла на полуслове. Отношение осталось прежним, попробуй чуть позже.',
+    unavailable: 'Сейчас генератор подколов дал сбой. Отношение помню, а характеристику попробуй запросить чуть позже.',
+    invalid: 'Связная характеристика сейчас не получилась. Отношение осталось прежним, а кривой черновик оставлю при себе.',
+  };
+  return profileDescriptionHeader(profile, targetName) + '\n\n' + (messages[reason] || messages.unavailable);
 }
 
 module.exports = { normalizeProfileMessages, relationshipUpdate, validateProfileUpdates, mergeProfileEvidence,
-  profileSourceData, profileContext, conservativeProfileDescription };
+  profileSourceData, profileContext, profileDescriptionHeader, conservativeProfileDescription };

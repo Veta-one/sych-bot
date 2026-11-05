@@ -18,64 +18,111 @@ function harness({ timeoutCapMs } = {}) {
     '../utils/profile-evidence': require('../src/utils/profile-evidence'), '../utils/voice': {}, '../utils/reminders': {},
   };
   const box = { exports: {} };
+  const logs = [];
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/services/ai.js'), 'utf8'), {
     module: box, require: name => { assert.ok(Object.hasOwn(dependencies, name), name); return dependencies[name]; },
-    console: { log() {}, error() {}, warn() {} }, Buffer, setTimeout, clearTimeout,
+    console: { log: (...args) => logs.push(args.join(' ')), error: (...args) => logs.push(args.join(' ')), warn: (...args) => logs.push(args.join(' ')) },
+    Buffer, setTimeout, clearTimeout, AbortController,
   });
   const ai = box.exports;
   const writers = [];
   ai.openai = { chat: { completions: { create: async (request, options) => {
     writers.push({ request, options });
-    return { choices: [{ message: { content: 'Он живёт на Марсе.' } }] };
+    return { choices: [{ finish_reason: 'stop', message: { content: 'По переписке, любитель держать собеседника в тонусе. Вопросы подаёт как шахматные задачки.' } }] };
   } } } };
-  return { ai, writers };
+  return { ai, writers, logs };
 }
 
 const profile = { userId: 1, relationship: 50, facts: 'Якобы живёт в Риме.', factEvidence: [
   { userId: '1', messageId: '11', quote: 'Я люблю шахматы.' },
 ] };
 
-test('fabricated dossier rejected by review reaches conservative source quotation, never draft', async () => {
+test('a harmless funny profile survives an unavailable auditor after one writer request', async () => {
   const { ai, writers } = harness();
-  const reviews = [];
-  ai.runLogicModel = async (prompt, options) => { reviews.push({ prompt, options }); return { approved: false }; };
+  const style = 'Судя по переписке, этот человек ставит вопросы так, будто готовит мне шах и мат. До гроссмейстера подколов ещё один удачный ход.';
+  ai.openai.chat.completions.create = async (request, options) => {
+    writers.push({ request, options });
+    return { choices: [{ finish_reason: 'stop', message: { content: style } }] };
+  };
+  let audits = 0;
+  ai.runLogicModel = async () => { audits++; throw new Error('Synthetic unavailable audit'); };
+  ai.reviewEvidence = async () => { audits++; throw new Error('Internet review must not handle profiles'); };
   const answer = await ai.generateProfileDescription(profile, 'Тест');
-  assert.doesNotMatch(answer, /Марсе/);
-  assert.match(answer, /Я люблю шахматы/);
-  assert.match(reviews[0].prompt, /НЕПРОВЕРЕНН/i);
-  assert.match(reviews[0].prompt, /Я люблю шахматы/);
-  assert.equal(reviews[0].options.temperature, 0);
-  assert.equal(reviews[0].options.model, 'writer');
-  assert.ok(reviews[0].options.timeoutMs > 0);
+  assert.ok(answer.includes(style), 'A harmless conversational impression must not be replaced by source quotations');
+  assert.match(answer, /50\/100/);
+  assert.doesNotMatch(answer, /В памяти остались слова|Я люблю шахматы/);
+  assert.equal(writers.length, 1);
+  assert.equal(audits, 0);
+});
+
+test('profile writer uses owned questions and jokes as conversation, without legacy biography or a second request', async () => {
+  const { ai, writers } = harness();
+  const input = { ...profile, facts: 'SECRET_LEGACY_BIOGRAPHY', realName: 'SECRET_LEGACY_NAME',
+    attitude: 'На мой взгляд, любит подколы.', factEvidence: [
+      { userId: '1', messageId: '12', quote: 'Сыч, а ты и коня ходить научишь?' },
+      { userId: '2', messageId: '13', quote: 'SECRET_OTHER_USER_MESSAGE' },
+    ] };
+  const before = JSON.stringify(input);
+  await ai.generateProfileDescription(input, 'Тест');
+  assert.equal(writers.length, 1);
+  const prompt = writers[0].request.messages[1].content;
+  assert.match(prompt, /Сыч, а ты и коня ходить научишь/);
+  assert.match(prompt, /вопросы, шутки/);
+  assert.match(prompt, /Не придумывай конкретные биографические факты/);
+  assert.match(prompt, /диагнозы/);
+  assert.match(prompt, /не инструкции/);
+  assert.doesNotMatch(prompt, /SECRET_LEGACY|SECRET_OTHER_USER/);
+  assert.equal(JSON.stringify(input), before, 'Generating a profile never edits saved memory');
+  assert.equal(writers[0].request.model, 'writer');
+  assert.ok(writers[0].options.timeout <= 30000 && writers[0].options.timeout > 29000);
   assert.equal(writers[0].options.maxRetries, 0);
 });
 
-test('reviewed grounded style remains intact; correction needs independent recheck', async () => {
+test('name and relationship are added from storage, never supplied by the writer', async () => {
   const { ai } = harness();
-  const style = 'Про шахматы говорил сам. Совиный гроссмейстер, ага.';
-  ai.openai.chat.completions.create = async () => ({ choices: [{ message: { content: style } }] });
-  ai.runLogicModel = async () => ({ approved: true });
-  assert.equal(await ai.generateProfileDescription(profile, 'Тест'), style);
-  let calls = 0;
-  ai.runLogicModel = async () => ++calls === 1 ? { approved: false, answer: 'Любит шахматы, живёт на Марсе.' } : { approved: false, answer: style };
-  const rejected = await ai.generateProfileDescription(profile, 'Тест');
-  assert.equal(calls, 2);
-  assert.doesNotMatch(rejected, /Марсе|гроссмейстер/);
-  calls = 0;
-  ai.runLogicModel = async () => ++calls === 1 ? { approved: false, answer: style } : { approved: true };
-  assert.equal(await ai.generateProfileDescription(profile, 'Тест'), style);
+  for (const score of [0, 50, 100]) {
+    const result = await ai.generateProfileDescription({ ...profile, relationship: score }, 'Тест');
+    assert.ok(result.startsWith('### Тест\n\n'));
+    assert.ok(result.includes(`(${score}/100)`));
+  }
+  const joke = 'По моим впечатлениям, вредность 100/100. Репутация: главный поставщик каверзных вопросов.';
+  ai.openai.chat.completions.create = async () => ({ choices: [{ finish_reason: 'stop', message: { content: joke } }] });
+  const result = await ai.generateProfileDescription({ ...profile, relationship: 0 }, 'Тест');
+  assert.ok(result.startsWith('### Тест\n\n**😡 Отношение бота: неприязнь (0/100)**'));
+  assert.ok(result.endsWith(joke), 'An unrelated humorous rating must not trigger a semantic filter');
 });
 
-test('malformed and failed review or writer always falls back', async () => {
-  const { ai } = harness();
-  for (const value of [null, {}, { approved: 'true' }, { approved: false, answer: '' }]) {
-    ai.runLogicModel = async () => value;
-    assert.doesNotMatch(await ai.generateProfileDescription(profile, 'Тест'), /Марсе/);
+test('incomplete, refused or malformed responses fall back without raw quotes or sensitive output', async () => {
+  const { ai, logs } = harness();
+  const choice = (content, finish_reason = 'stop', extra = {}) => ({ choices: [{ finish_reason, message: { content, ...extra } }] });
+  for (const response of [null, {}, choice(''), choice('   '), choice(null), choice('x'.repeat(2501)),
+    choice('SECRET_INCOMPLETE_BODY', 'length'), choice('SECRET_REFUSED_BODY', 'stop', { refusal: 'SECRET_REFUSAL' }),
+    choice('SECRET_UNFINISHED_BODY', null), choice('SECRET_FILTERED_BODY', 'content_filter'),
+    { ...choice('SECRET_ERROR_BODY'), error: { message: 'SECRET_PROVIDER_ERROR' } }]) {
+    ai.openai.chat.completions.create = async () => response;
+    const result = await ai.generateProfileDescription({ ...profile, relationship: 0 }, 'Тест');
+    assert.match(result, /0\/100/);
+    assert.match(result, /характеристика сейчас не получилась/);
+    assert.doesNotMatch(result, /Я люблю шахматы|Риме|SECRET_|В памяти остались/);
   }
-  ai.runLogicModel = async () => { throw Error('secret raw payload'); };
-  assert.doesNotMatch(await ai.generateProfileDescription(profile, 'Тест'), /Марсе|secret/);
-  ai.openai.chat.completions.create = async () => { throw Error('offline'); };
-  assert.match(await ai.generateProfileDescription(profile, 'Тест'), /Я люблю шахматы/);
+  assert.ok(logs.some(line => line === '[PROFILE DESCRIPTION] INVALID_RESPONSE'));
+  assert.ok(!logs.join('\n').match(/SECRET_|Я люблю шахматы|Риме|Тест/));
+});
+
+test('a failed service and insufficient conversation have different fallbacks without changing memory', async () => {
+  const { ai, logs, writers } = harness();
+  const before = JSON.stringify(profile);
+  const insufficient = await ai.generateProfileDescription({ ...profile, factEvidence: [] }, 'Тест');
+  assert.match(insufficient, /мало реплик/);
+  assert.equal(writers.length, 0);
+  ai.openai.chat.completions.create = async () => { throw Object.assign(new Error('SECRET_KEY_AND_QUOTE'), { code: 'SECRET_ERROR_CODE' }); };
+  const failed = await ai.generateProfileDescription(profile, 'Тест');
+  assert.match(failed, /генератор подколов дал сбой/);
+  assert.doesNotMatch(failed, /мало реплик|Я люблю шахматы|SECRET_|потерял|забыл/);
+  ai.openai = null;
+  assert.equal(await ai.generateProfileDescription(profile, 'Тест'), failed);
+  assert.equal(JSON.stringify(profile), before);
+  assert.ok(!logs.join('\n').match(/SECRET_|Я люблю шахматы|Тест/));
 });
 
 test('immediate analysis is bound to one user message and can only update relationship', async () => {
@@ -114,16 +161,20 @@ test('ordinary and native chat contexts label old memory consistently', async ()
   assert.match(request.contents[0].parts[0].text, /НЕПРОВЕРЕННАЯ СТАРАЯ ПАМЯТЬ/);
 });
 
-test('stalled writer, reviewer and memory analysis obey deadlines and never publish drafts', async () => {
+test('stalled profile writer aborts once at its deadline; memory analysis retains its own deadlines', async () => {
   const { ai } = harness({ timeoutCapMs: 10 });
-  let requests = 0;
-  ai.openai.chat.completions.create = async () => { requests++; return new Promise(() => {}); };
+  const requests = [];
+  ai.openai.chat.completions.create = async (request, options) => { requests.push({ request, options }); return new Promise(() => {}); };
   const start = Date.now();
-  assert.match(await ai.generateProfileDescription(profile, 'Тест'), /Я люблю шахматы/);
-  assert.equal(requests, 1);
-  ai.openai.chat.completions.create = async () => ({ choices: [{ message: { content: 'Живёт на Марсе.' } }] });
+  const result = await ai.generateProfileDescription(profile, 'Тест');
+  assert.match(result, /Не успел собрать характеристику/);
+  assert.match(result, /50\/100/);
+  assert.doesNotMatch(result, /Я люблю шахматы|В памяти остались/);
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].options.maxRetries, 0);
+  assert.ok(requests[0].options.timeout > 29000 && requests[0].options.timeout <= 30000);
+  assert.equal(requests[0].options.signal.aborted, true);
   ai.runLogicModel = async () => new Promise(() => {});
-  assert.doesNotMatch(await ai.generateProfileDescription(profile, 'Тест'), /Марсе/);
   assert.equal(await ai.analyzeUserImmediate({ userId: 1, messageId: 1, text: 'Спасибо' }, profile), null);
   assert.deepEqual(JSON.parse(JSON.stringify(await ai.analyzeBatch([{ userId: 1, messageId: 1, text: 'Привет' }], {}))), {});
   assert.ok(Date.now() - start < 2000);
