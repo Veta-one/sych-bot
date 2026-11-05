@@ -207,7 +207,7 @@ test('failed final auditing after recovery never releases the recovered writer d
   const answer = await ai.getResponse([], input);
   assert.equal(state.recovery.length, 1);
   assert.equal(state.writers.length, 1);
-  assert.equal(state.audits.length, 1);
+  assert.equal(state.audits.length, 2, 'The fixed short candidate receives one independent audit after the full audit fails');
   assert.doesNotMatch(answer, /RECOVERY_FINAL_RESPONSE|unrelated-translator/);
   assert.ok(answer.includes(supplied[0]));
 });

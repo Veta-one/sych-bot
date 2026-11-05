@@ -257,6 +257,7 @@ ai.setBot(bot);
 console.log("Сыч запущен и готов пояснять за жизнь.");
 console.log(`Admin ID: ${config.adminId}`);
 console.log(`[VOICE] provider=${config.voiceTranscriptionProvider || 'google'}`);
+console.log(`[RESEARCH] review_provider=${config.researchReviewProvider || 'auto'}`);
 
 storage.backupRetention = config.backupRetention;
 storage.startAutomaticBackups(config.backupIntervalMs);

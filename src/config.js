@@ -12,18 +12,24 @@ if (!['google', 'openrouter', 'off'].includes(voiceTranscriptionProvider)) {
 }
 const aiBaseUrl = process.env.AI_BASE_URL || 'https://openrouter.ai/api/v1';
 const aiKey = process.env.OPENROUTER_API_KEY || process.env.AI_API_KEY;
-if (voiceTranscriptionProvider === 'openrouter') {
+const researchReviewProvider = (process.env.RESEARCH_REVIEW_PROVIDER || 'auto').trim().toLowerCase();
+if (!['auto', 'openrouter', 'google'].includes(researchReviewProvider)) {
+  throw new Error('RESEARCH_REVIEW_PROVIDER: допустимы auto, openrouter или google');
+}
+function requireOpenRouterConfig(setting) {
   if (!aiKey?.trim()) {
-    throw new Error('VOICE_TRANSCRIPTION_PROVIDER=openrouter требует OPENROUTER_API_KEY или AI_API_KEY');
+    throw new Error(`${setting}=openrouter требует OPENROUTER_API_KEY или AI_API_KEY`);
   }
   let endpoint;
   try { endpoint = new URL(aiBaseUrl); } catch {}
   if (!endpoint || endpoint.protocol !== 'https:' || endpoint.hostname !== 'openrouter.ai'
     || endpoint.port || endpoint.username || endpoint.password || endpoint.search || endpoint.hash
     || !['/api/v1', '/api/v1/'].includes(endpoint.pathname)) {
-    throw new Error('VOICE_TRANSCRIPTION_PROVIDER=openrouter требует AI_BASE_URL=https://openrouter.ai/api/v1');
+    throw new Error(`${setting}=openrouter требует AI_BASE_URL=https://openrouter.ai/api/v1`);
   }
 }
+if (voiceTranscriptionProvider === 'openrouter') requireOpenRouterConfig('VOICE_TRANSCRIPTION_PROVIDER');
+if (researchReviewProvider === 'openrouter') requireOpenRouterConfig('RESEARCH_REVIEW_PROVIDER');
 
 // Собираем ключи для Native Google (Fallback или Search)
 const geminiKeys = [];
@@ -32,6 +38,9 @@ let i = 2;
 while (process.env[`GOOGLE_GEMINI_API_KEY_${i}`]) {
     geminiKeys.push(process.env[`GOOGLE_GEMINI_API_KEY_${i}`]);
     i++;
+}
+if (researchReviewProvider === 'google' && !geminiKeys.some(key => key.trim())) {
+  throw new Error('RESEARCH_REVIEW_PROVIDER=google требует GOOGLE_GEMINI_API_KEY');
 }
 
 console.log(`[CONFIG] Загружено ключей Gemini (Native): ${geminiKeys.length}`);
@@ -63,6 +72,7 @@ module.exports = {
   // 'google'     -> Переключается на нативный Google API с встроенным поиском (Tools).
   // Если в .env не задано, по умолчанию используем 'tavily'
   searchProvider: process.env.SEARCH_PROVIDER || 'tavily',  
+  researchReviewProvider,
   
   // Настройки провайдеров
   tavilyKey: process.env.TAVILY_API_KEY,

@@ -31,7 +31,7 @@ function harness(extraDependencies = {}, runtime = {}) {
   ai.runLogicModel = async () => ({ needsSearch: true, searchQuery: 'official countries' });
   ai.performSearch = async () => [{ url: 'https://example.org/countries', title: 'Countries', content: 'Kazakhstan is supported for Claude.ai.' }];
   ai.extractUrl = async () => 'Kazakhstan is supported for Claude.ai.';
-  ai.reviewEvidence = async prompt => prompt.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА') ? { approved: true } : ({ claims: [{ claim: 'Kazakhstan supported.', status: 'supported', sourceId: 'S1', quote: 'Kazakhstan is supported for Claude.ai.', limitation: 'No guarantee for a card.' }], sufficient: true });
+  ai.reviewEvidence = async prompt => prompt.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА') ? { approved: true, addressesQuestion: true } : ({ claims: [{ claim: 'Kazakhstan supported.', status: 'supported', sourceId: 'S1', quote: 'Kazakhstan is supported for Claude.ai.', limitation: 'No guarantee for a card.' }], sufficient: true });
   return { ai, calls, config, notifications };
 }
 
@@ -258,7 +258,7 @@ test('public composition rejects unavailable verification in both writer paths',
 test('approved researched answers can link to any domain outside the source-page URLs', async () => {
   const { ai } = harness();
   const result = { claims: [{ claim: 'A source reports the project.', status: 'supported', url: 'https://example.org/article' }], gaps: [], errors: [] };
-  ai.reviewEvidence = async () => ({ approved: true });
+  ai.reviewEvidence = async () => ({ approved: true, addressesQuestion: true });
   for (const url of ['https://t.me/abstractDL', 'https://news.example.net/report', 'https://downloads.example.net/release.zip', 'https://another.example.com/Policy_(service)?version=2#section']) {
     const answer = `Вот найденная ссылка: [Открыть](${url}).`;
     assert.equal(await ai.finalizeResearchedAnswer(answer, result), answer);
@@ -272,7 +272,7 @@ test('Ouroboros Telegram link survives review when its proof is on a different p
     status: 'supported', sourceId: 'S1', url: 'https://habr.com/ru/companies/airi/articles/1065428',
     quote: 'мой Telegram-канал: <https://t.me/abstractDL>',
   }], gaps: [], errors: [] };
-  ai.reviewEvidence = async () => ({ approved: true, issues: [], answer: '' });
+  ai.reviewEvidence = async () => ({ approved: true, addressesQuestion: true, issues: [], answer: '' });
   const answer = 'Канал Антона Разжигаева: [@abstractDL](https://t.me/abstractDL).';
   assert.equal(await ai.finalizeResearchedAnswer(answer, result), answer);
 });
@@ -281,7 +281,7 @@ test('answer audit can return a repaired answer with links outside source-page U
   const { ai } = harness();
   const result = { claims: [{ claim: 'A source identifies the author channel.', status: 'supported', url: 'https://example.org/article' }], gaps: [], errors: [] };
   const repaired = 'Вот канал автора: [Открыть](https://t.me/abstractDL).';
-  ai.reviewEvidence = async () => ({ approved: false, answer: repaired });
+  ai.reviewEvidence = async () => ({ approved: false, addressesQuestion: true, answer: repaired });
   assert.equal(await ai.finalizeResearchedAnswer('Wrong draft.', result), repaired);
 });
 
@@ -294,7 +294,7 @@ test('failed or invalid answer auditing never releases an unchecked draft', asyn
     ai.reviewEvidence = async () => audit;
     assert.match(await ai.finalizeResearchedAnswer('Definitely banned!', result), /Проверку ответа завершить не удалось/);
   }
-  ai.reviewEvidence = async () => ({ approved: false, answer: 'Один [пост](https://example.org/countries) — ещё не доказательство.' });
+  ai.reviewEvidence = async () => ({ approved: false, addressesQuestion: true, answer: 'Один [пост](https://example.org/countries) — ещё не доказательство.' });
   assert.equal(await ai.finalizeResearchedAnswer('Definitely banned!', result), 'Один [пост](https://example.org/countries) — ещё не доказательство.');
 });
 
@@ -352,7 +352,7 @@ test('a slow primary reviewer leaves time for native evidence and final-answer a
   ai.nativeModel = { generateContent: (request, options) => {
     events.push({ provider: 'native', at: context.clock(), timeout: options?.timeout, signal: options?.signal });
     const audit = request.contents[0].parts[0].text.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА');
-    return delay(5000, options?.signal, { response: { text: () => JSON.stringify(audit ? { approved: true } : {
+    return delay(5000, options?.signal, { response: { candidates: [{ finishReason: 'STOP' }], text: () => JSON.stringify(audit ? { approved: true, addressesQuestion: true } : {
       claims: [{ claim: 'Kazakhstan supported.', status: 'supported', sourceId: 'S1', quote: 'Kazakhstan is supported for Claude.ai.' }], sufficient: true,
     }) } });
   } };
