@@ -81,6 +81,7 @@ function harness({ latest = empty, recovery = recovered, first = partial, audit 
     return clone(response);
   };
   ai.openai = { chat: { completions: { create: async request => {
+    if (!Array.isArray(request.messages[1].content)) return { choices: [] };
     state.writers.push(request);
     return { choices: [{ message: { content: `RECOVERY_FINAL_RESPONSE: ${recoveredClaim.claim} [Model](${supplied[1]})` } }] };
   } } } };
@@ -88,7 +89,7 @@ function harness({ latest = empty, recovery = recovered, first = partial, audit 
 }
 
 function answerBeforeMaterials(answer) {
-  return answer.split(/\n\n(?:> )?Найденные материалы:/)[0];
+  return answer.split(/(?:^|\n\n)<details(?: open)?><summary>Источники<\/summary>/)[0];
 }
 
 for (const [name, latest] of [
@@ -108,7 +109,7 @@ for (const [name, latest] of [
     assert.equal(state.audits.length, 1);
     assert.match(answer, /RECOVERY_FINAL_RESPONSE/);
     assert.doesNotMatch(answerBeforeMaterials(answer), /unrelated-translator/);
-    assert.match(answer, /Найденные материалы:[\s\S]*unrelated-translator/);
+    assert.match(answer, /<details><summary>Источники<\/summary>[\s\S]*unrelated-translator/);
     assert.equal(state.result.claims.length, 1, 'Recovery replaces the assessment rather than merging stale claims');
     assert.equal(state.result.claims[0].claim, recoveredClaim.claim);
     assert.equal(state.result.claims[0].url, supplied[1]);
@@ -189,6 +190,7 @@ test('recovery preserves unread-source coverage, partial pages and unknown integ
   assert.ok(state.result.sources.some(source => source.supplied && source.truncated));
   assert.ok(state.result.gaps.some(gap => /прочитать|OpenClaw/.test(gap)));
   assert.ok(answer.includes(supplied[1]));
+  assert.match(answer, /memory-model"[^<]*>[^<]+<\/a> · страница не открылась/);
   assert.doesNotMatch(answer, /404|не существует/);
   assert.doesNotMatch(answerBeforeMaterials(answer), /unrelated-translator/);
 });

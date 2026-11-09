@@ -37,9 +37,14 @@ function sourceTitle(value) {
     .replace(/\s+/g, ' ').trim()].slice(0, 180).join('');
 }
 
-function markdownLabel(value) {
-  return sourceTitle(value).replace(/[&<>\\`*_[\]{}()#+.!|~\-]/g, character =>
-    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[character] || `\\${character}`);
+function escapeSourceHtml(value) {
+  return value.replace(/[&<>"']/g, character =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+}
+
+function escapeSourceText(value) {
+  // Telegram can parse Markdown within inline HTML. Keep provider text literal.
+  return escapeSourceHtml(value).replace(/[\\`*_[\]!|~=$]/g, character => `&#${character.charCodeAt(0)};`);
 }
 
 function sourceMetadata(source) {
@@ -50,28 +55,26 @@ function sourceMetadata(source) {
 
 // A source list reports collection and reading, not model approval. Bodies,
 // rejected claims and provider descriptions never enter this deterministic UI.
-function renderFoundSources(result, { collapsed = false } = {}) {
+function renderFoundSources(result, { open = false, intro = '' } = {}) {
   const unique = new Map();
   for (const source of Array.isArray(result?.foundSources) ? result.foundSources : []) {
     const url = publicUrl(source?.url);
     if (url && !unique.has(url)) unique.set(url, source);
   }
   if (!unique.size) return '';
-  const lines = [`Найденные материалы: ${unique.size}. Названия и ссылки не означают подтверждения выводов.`, ''];
+  const items = [];
   for (const [url, source] of unique) {
-    const status = source.readStatus;
-    const label = status === 'out_of_scope' ? 'исходная ссылка вне указанной площадки, не использована'
-      : source.level === 'page' && status === 'read' ? `текст страницы прочитан${source.truncated ? ' частично' : ''}`
-        : source.level === 'provider_report' ? 'сообщение поискового провайдера, страница не прочитана'
-          : status === 'unavailable' ? 'текст страницы получить не удалось'
-            : status === 'limit' ? 'не прочитано: лимит чтения исходных ссылок'
-              : 'поисковая выдержка, страница не прочитана';
-    lines.push(`${lines.length - 1}. [${markdownLabel(source.title) || 'Без названия'}](${markdownUrl(url)}) — ${label}.`);
+    const characters = [...(sourceTitle(source.title) || new URL(url).hostname)];
+    const title = characters.length > 110 ? characters.slice(0, 109).join('').trimEnd() + '…' : characters.join('');
+    let label = '';
+    if (source.readStatus === 'out_of_scope') label = 'вне указанной площадки';
+    else if (source.supplied && source.readStatus === 'unavailable') label = 'страница не открылась';
+    else if (source.supplied && source.readStatus === 'limit') label = 'за пределами лимита чтения';
+    else if (source.supplied && source.truncated) label = 'прочитан фрагмент';
+    items.push(`<li><a href="${escapeSourceHtml(url)}">${escapeSourceText(title)}</a>${label ? ` · ${label}` : ''}</li>`);
   }
-  const text = lines.join('\n');
-  // Long lists need entity-based legacy delivery: splitting raw Markdown can
-  // cut a destination in half. Quote fallback retains complete text_link URLs.
-  return collapsed || text.length > 3500 ? lines.map(line => `> ${line}`).join('\n') : text;
+  const lead = intro ? `<p>${escapeSourceText(intro)}</p>` : '';
+  return `<details${open ? ' open' : ''}><summary>Источники</summary>${lead}<ol>${items.join('')}</ol></details>`;
 }
 
 function requiredDomainList(value) {
@@ -569,7 +572,7 @@ async function research({ question, plan, search, read, review, suppliedUrls = [
     assessment.sufficient = false;
     assessment.gaps.push(`Не удалось прочитать ${missing.length + omittedSourceCount} из ${uniqueSuppliedUrls.length} исходных ссылок. Причина не доказывает отсутствие страницы или проекта.`);
   }
-  return { ...assessment, question, checkedAt: new Date().toISOString(),
+  return { ...assessment, question, searchTopic: plan.searchQuery, checkedAt: new Date().toISOString(),
     requestedSources, omittedSourceCount, foundSources: [...found.values()], output: sourcesOnly ? 'sources' : 'analysis',
     sources: reviewedSources.length ? reviewedSources : boundedSources(sources, relevance),
     errors: [...new Map(errors.map(error => [`${error.stage}:${error.code}`, error])).values()],
@@ -679,8 +682,9 @@ function conservativeAnswer(result) {
         : supplied
           ? 'Исходные страницы прочитаны, но проверка не выделила подтверждённых выводов по вопросу. Подробный отчёт сейчас дать не могу.'
           : 'Подтвердить выводы по найденным материалам не удалось.';
-  const foundList = Array.isArray(result.foundSources) ? renderFoundSources(result) : null;
-  return explanation + (foundList !== null ? (foundList ? `\n\n${foundList}` : '')
+  const foundList = Array.isArray(result.foundSources)
+    ? renderFoundSources(result, { open: true, intro: explanation }) : null;
+  return (foundList || explanation) + (foundList !== null ? ''
     : links.length ? `\n\n${supplied ? 'Исходные ссылки' : 'Материалы для чтения, без подтверждённых выводов'}: ${links.join(', ')}.` : '') + sourceCoverageNote(result);
 }
 

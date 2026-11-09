@@ -207,15 +207,27 @@ test('an explicit GitHub request survives planner failure while a local code req
   assert.equal(local.needsSearch, false);
 });
 
-test('a link-only request returns the entire collected list without invoking reviewer or writer', async () => {
-  const { ai, calls } = harness();
+test('a link-only request adds one contextual sentence inside the open list', async () => {
+  const { ai, config } = harness();
   const urls = Array.from({ length: 5 }, (_, index) => `https://github.com/demo/fixture-${index}`);
-  ai.runLogicModel = async () => null;
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'sources', searchQuery: 'Тестовые проекты' });
   ai.performSearch = async () => urls.map(url => ({ url, title: 'Fixture', content: 'Search snippet' }));
   ai.reviewEvidence = async () => assert.fail('A list of collected links requires no claims');
-  const answer = await ai.getResponse([], { text: 'Сыч, найди ссылки на GitHub про тестовые проекты', sender: 'Тест' });
+  const calls = [];
+  ai.openai.chat.completions.create = async (body, options) => {
+    calls.push({ body, options });
+    return { choices: [{ finish_reason: 'stop', message: { content: 'По теме «ТЕМА» я тут кое-что накопал.' } }] };
+  };
+  const question = 'Сыч, найди ссылки на GitHub про тестовые проекты';
+  const answer = await ai.getResponse([{ role: 'user', text: 'Private history' }], { text: question, sender: 'Private sender' });
+  assert.match(answer, /^<details open>[\s\S]*<summary>Источники<\/summary>[\s\S]*По теме «Тестовые проекты» я тут кое-что накопал\.[\s\S]*<\/details>$/);
   for (const url of urls) assert.ok(answer.includes(url));
-  assert.equal(calls.length, 0);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].body.model, config.mainModel);
+  assert.equal(calls[0].options.maxRetries, 0);
+  assert.equal(JSON.parse(calls[0].body.messages[1].content).question, question);
+  assert.equal(JSON.parse(calls[0].body.messages[1].content).topic, 'Тестовые проекты');
+  assert.doesNotMatch(JSON.stringify(calls[0].body), /Search snippet|fixture-0|Private history|Private sender/);
 });
 
 test('invalid evidence keeps all links visible and preserves strict publication and billing failure', async () => {
@@ -225,11 +237,63 @@ test('invalid evidence keeps all links visible and preserves strict publication 
   ai.reviewEvidence = async () => { throw Object.assign(new Error('Invalid JSON'), { code: 'EVIDENCE_REVIEW_INVALID' }); };
   const request = { text: 'Сыч, сравни варианты', sender: 'Тест' };
   const answer = await ai.getResponse([], request);
-  assert.match(answer, /Проверку источников завершить не удалось/);
+  assert.match(answer, /^<details open>[\s\S]*Проверка источников прервалась\./);
   for (const url of urls) assert.ok(answer.includes(url));
-  assert.equal(calls.length, 0);
+  assert.equal(calls.length, 1);
+  assert.match(JSON.parse(calls[0].messages[1].content).status, /проверка источников прервалась/);
   await assert.rejects(ai.getResponse([], request, null, undefined, '', null, false, null, '', { failOnUnavailable: true }),
     /PUBLIC_RESPONSE_UNAVAILABLE/);
+  assert.equal(calls.length, 1);
+});
+
+test('a failed final audit keeps an open source list without forwarding the draft or source bodies', async () => {
+  const { ai } = harness();
+  const result = {
+    claims: [{ claim: 'Private claim', quote: 'Private source body', url: 'https://example.org/page', status: 'supported' }],
+    foundSources: [{ title: 'Page', url: 'https://example.org/page', level: 'page' }],
+  };
+  ai.reviewEvidence = async () => { throw Error('Audit offline'); };
+  const calls = [];
+  ai.openai.chat.completions.create = async body => {
+    calls.push(body);
+    return { choices: [{ finish_reason: 'stop', message: { content: 'Проверка споткнулась, вот что я накопал.' } }] };
+  };
+  const answer = await ai.finalizeResearchedAnswer('Unverified draft', result, {}, 'Сыч, проверь https://example.org/page');
+  assert.match(answer, /^<details open>[\s\S]*Проверка споткнулась, вот что я накопал\.[\s\S]*example\.org\/page/);
+  assert.doesNotMatch(answer, /Unverified draft|Private claim/);
+  assert.equal(calls.length, 1);
+  assert.doesNotMatch(JSON.stringify(calls[0]), /Unverified draft|Private claim|Private source body|https:\/\/example\.org\/page/);
+});
+
+test('an invalid source intro cannot insert markup, links, or multiple sentences', async () => {
+  const { ai } = harness();
+  const result = { foundSources: [{ title: 'Original', url: 'https://example.org/page' }] };
+  for (const content of ['<b>Подделка</b>.', 'Вот подделка https://example.com/evil.', 'Подделка. Вот ещё фраза.']) {
+    ai.openai.chat.completions.create = async () => ({ choices: [{ finish_reason: 'stop', message: { content } }] });
+    const answer = await ai.renderSourceReply(result, 'Сыч, проверь новость', 'evidence');
+    assert.match(answer, /^<details open>[\s\S]*Проверка источников прервалась\.[\s\S]*example\.org\/page/);
+    assert.doesNotMatch(answer, /подделка|example\.com/i);
+  }
+});
+
+test('a source intro cannot replace a failed verification with a verdict or promise', async () => {
+  const { ai } = harness();
+  const result = { foundSources: [{ title: 'Original', url: 'https://example.org/page' }] };
+  for (const content of ['Твоя теория верна.', 'Проверка споткнулась, но твоя теория верна.',
+    'Проверка зависла, позже перепроверю.', 'Проверка завершена, но страницу открыть не удалось.',
+    'Проверка не прервалась, вот ссылки.', 'Проверка не зависла, держи материалы.',
+    'Проверка не удалась, но источники подтверждают поддержку PHP 9.',
+    'Проверка не удалась и проект гарантированно поддерживает PHP 9.']) {
+    ai.openai.chat.completions.create = async () => ({ choices: [{ finish_reason: 'stop', message: { content } }] });
+    const answer = await ai.renderSourceReply(result, 'Сыч, проверь мою теорию', 'evidence');
+    assert.match(answer, /Проверка источников прервалась\./);
+    assert.doesNotMatch(answer, /теория верна|перепроверю|Проверка завершена|не прервалась|не зависла|PHP 9/);
+  }
+  ai.openai.chat.completions.create = async () => ({ choices: [{ finish_reason: 'stop',
+    message: { content: 'Я нашёл подтверждение поддержки PHP 9 в этих источниках.' } }] });
+  const links = await ai.renderSourceReply(result, 'Сыч, дай ссылки', 'links');
+  assert.match(links, /Накопал ссылки\./);
+  assert.doesNotMatch(links, /PHP 9/);
 });
 
 test('explicit links plus a recommendation keep Reddit and the requested period in the analysis plan', async () => {
@@ -290,8 +354,8 @@ test('writer fallback preserves gathered evidence and disables a new unreviewed 
     return { response: { text: () => 'Native answer [Источник](https://example.org/countries)', candidates: [{}] } };
   } };
   const answer = await ai.getResponse([], { text: 'Сыч, антропики продают подписки казахам?', sender: 'Тест' });
-  assert.equal(answer.split('\n\n> ')[0], 'Native answer [Источник](https://example.org/countries)');
-  assert.match(answer, /Найденные материалы: 1/);
+  assert.equal(answer.split('\n\n<details>')[0], 'Native answer [Источник](https://example.org/countries)');
+  assert.match(answer, /<details>[\s\S]*<summary>Источники<\/summary>/);
   assert.equal(nativeRequest.tools.length, 0);
   assert.match(nativeRequest.contents[0].parts[0].text, /Kazakhstan supported/);
   assert.match(nativeRequest.contents[0].parts[0].text, /No guarantee for a card/);
@@ -414,6 +478,23 @@ function timedHarness() {
   return context;
 }
 
+test('a stalled source intro is aborted at five seconds and preserves the open links', async () => {
+  const context = timedHarness();
+  const { ai, drive, delay } = context;
+  const result = { foundSources: [{ title: 'Original', url: 'https://example.org/page' }] };
+  let options;
+  ai.openai.chat.completions.create = (_, requestOptions) => {
+    options = requestOptions;
+    return delay(100000, options.signal, null);
+  };
+  const answer = await drive(ai.renderSourceReply(result, 'Сыч, проверь новость', 'audit'));
+  assert.match(answer, /^<details open>[\s\S]*Проверка ответа прервалась\.[\s\S]*example\.org\/page/);
+  assert.equal(context.clock(), 5000);
+  assert.equal(options.timeout, 5000);
+  assert.equal(options.maxRetries, 0);
+  assert.equal(options.signal.aborted, true);
+});
+
 test('a slow primary reviewer leaves time for native evidence and final-answer auditing', async () => {
   const context = timedHarness();
   const { ai, events, delay, drive } = context;
@@ -430,8 +511,8 @@ test('a slow primary reviewer leaves time for native evidence and final-answer a
     }) } });
   } };
   const answer = await drive(ai.getResponse([], { text: 'Сыч, проверь актуальную информацию', sender: 'Тест' }));
-  assert.equal(answer.split('\n\n> ')[0], 'Проверенный ответ [Источник](https://example.org/countries)');
-  assert.match(answer, /Найденные материалы: 1/);
+  assert.equal(answer.split('\n\n<details>')[0], 'Проверенный ответ [Источник](https://example.org/countries)');
+  assert.match(answer, /<details>[\s\S]*<summary>Источники<\/summary>/);
   assert.equal(events.filter(e => e.provider === 'native').length, 2);
   assert.ok(events.every(e => e.signal instanceof AbortSignal));
   assert.ok(events.filter(e => e.provider === 'native').every(e => e.timeout >= 15000));

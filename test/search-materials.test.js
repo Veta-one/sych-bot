@@ -95,7 +95,7 @@ test('the full original link list survives the supplied read and review coverage
   assert.match(text, /Не удалось прочитать/);
 });
 
-test('deterministic material rendering escapes hostile labels and URLs and creates a real expandable quote', () => {
+test('sources use a titled closed or open disclosure and escape all user-visible text', () => {
   const title = '<script>SECRET</script> [click](https://attacker.com) ![image](https://attacker.com/p) **bold**\n> injected\u202e';
   const url = 'https://example.org/path(foo)?q=[])<img';
   const result = { foundSources: [
@@ -104,14 +104,21 @@ test('deterministic material rendering escapes hostile labels and URLs and creat
     { url: 'javascript:alert(1)', title: 'forbidden' }, { url: 'http://127.0.0.1/', title: 'forbidden' },
   ] };
   const text = renderFoundSources(result);
-  const html = new MarkdownIt({ html: true }).render(text);
+  const html = new MarkdownIt({ html: true }).render(collapseMarkdownQuotes('Ответ\n\n' + text));
   assert.equal((html.match(/<a /g) || []).length, 2);
-  assert.doesNotMatch(html, /<script>|<img|href="https:\/\/attacker|\u202e/);
-  assert.match(html, /Найденные материалы: 2/); assert.ok(text.length < 1500);
-  const collapsed = collapseMarkdownQuotes(renderFoundSources(result, { collapsed: true }));
-  assert.match(collapsed, /<blockquote expandable>/);
-  assert.doesNotMatch(collapsed, /<script>|<img|href="https:\/\/attacker/);
-  assert.ok(quoteFallback({ html: collapsed }).some(chunk => chunk.entities.some(entity => entity.type === 'expandable_blockquote')));
+  assert.doesNotMatch(html, /<script>|<img|href="https:\/\/attacker|\u202e|!\[|\[click\]|\*\*bold/);
+  assert.match(html, /<details><summary>Источники<\/summary>/);
+  assert.doesNotMatch(html, /Найденные материалы|поисковая выдержка|текст страницы прочитан/);
+  assert.ok(text.length < 1500);
+  const open = renderFoundSources(result, { open: true, intro: 'Ссылки <img src="x"> & всё.' });
+  assert.match(open, /<details open><summary>Источники<\/summary><p>Ссылки &lt;img src&#61;&quot;x&quot;&gt; &amp; всё\.<\/p>/);
+  assert.doesNotMatch(open, /<img /);
+  const [closedLegacy] = quoteFallback({ markdown: text });
+  assert.ok(closedLegacy.entities.some(entity => entity.type === 'expandable_blockquote'));
+  const [openLegacy] = quoteFallback({ markdown: open });
+  assert.ok(openLegacy.text.includes('Ссылки <img src="x"> & всё.'));
+  assert.equal(openLegacy.entities.filter(entity => entity.type === 'text_link').length, 2);
+  assert.ok(!openLegacy.entities.some(entity => entity.type === 'expandable_blockquote'));
   assert.equal(renderFoundSources({ foundSources: [] }), '');
 });
 
@@ -127,15 +134,17 @@ test('found materials never replace the actual reason for failed verification or
   }
 });
 
-test('large source lists automatically use expandable transport and retain every long destination across chunks', () => {
+test('large open and closed source lists retain all long destinations across legacy chunks', () => {
   const foundSources = Array.from({ length: 40 }, (_, n) => ({ url: `https://example.org/${n}/${'x'.repeat(1800)}`,
     title: `${n}: ${'title '.repeat(40)}`, level: 'snippet', readStatus: 'unread' }));
-  const text = renderFoundSources({ foundSources });
-  assert.ok(text.length > 30000);
-  assert.ok(text.startsWith('> '));
-  const chunks = quoteFallback({ markdown: text });
-  assert.ok(chunks.length > 1);
-  const urls = new Set(chunks.flatMap(chunk => chunk.entities.filter(entity => entity.type === 'text_link').map(entity => entity.url)));
-  assert.deepEqual(urls, new Set(foundSources.map(source => source.url)));
-  assert.ok(chunks.every(chunk => chunk.text.length <= 4000));
+  for (const open of [false, true]) {
+    const text = renderFoundSources({ foundSources }, { open });
+    assert.ok(text.length > 30000);
+    const chunks = quoteFallback({ markdown: text });
+    assert.ok(chunks.length > 1);
+    const urls = new Set(chunks.flatMap(chunk => chunk.entities.filter(entity => entity.type === 'text_link').map(entity => entity.url)));
+    assert.deepEqual(urls, new Set(foundSources.map(source => source.url)));
+    assert.ok(chunks.every(chunk => chunk.text.length <= 4000));
+    assert.equal(chunks.some(chunk => chunk.entities.some(entity => entity.type === 'expandable_blockquote')), !open);
+  }
 });

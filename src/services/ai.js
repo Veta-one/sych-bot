@@ -52,6 +52,95 @@ const PROFILE_DESCRIPTION_TIMEOUT_MS = 30000;
 const PROFILE_ANSWER_MAX_CHARS = 2500;
 const FINAL_AUDIT_TIMEOUT_MS = 65000;
 const SHORT_AUDIT_TIMEOUT_MS = 25000;
+const SOURCE_INTRO_TIMEOUT_MS = 5000;
+const SOURCE_INTRO_MAX_CHARS = 200;
+const SOURCE_INTRO_TOPIC = '«ТЕМА»';
+// The introduction is unaudited. Allow only language about search progress.
+// The renderer inserts the topic as a quotation; the model cannot add facts.
+const SOURCE_INTRO_WORDS = new Set(`
+  а ах без в ведь вот всё да даже для до ещё за зато здесь и из их к как кое-что
+  ли мне мой мы на наш насчёт не ни но о об пока по под про с со так там то тут
+  у уж увы что это я бы же только ниже дальше тему теме темой дупле дупла сова клюв
+  выкопал накопал накопилось нарыл наскрёб наскреб нашёл нашел нашлись нашлась
+  отыскал откопал покопался собрал собраны есть держи лови глянь смотри
+  список списку подборка подборку ссылки ссылок ссылкам ссылками ссылку
+  материалы материалов материалам материалами материал источники источников источникам источником
+  нашёлся поиск поиске нашлось страницы страниц страницу страница исходных исходной
+  текста текст доступе прочитать прочитал прочитался открылась открылись открыть
+  вывод выводы выводов выводами заключение вердикт доказать подтверждения подтвердить
+  получилось вышло вышел сошлось
+  проверка проверку проверки проверкой проверить удалось смог сумел успел завершить
+  закончить закончил довёл довел дочитал докопался доклювался добрался осилил осилить
+  ответ ответа ответом итог итоге написать написал сформулировать сформулировал
+  составить составил прервалась прервалось споткнулась споткнулся сорвалась сорвался
+  зависла завис сбой сбоя забуксовала забуксовал застряла застрял лезу конца конец
+  оперения перья перо сначала сразу
+`.trim().split(/\s+/u));
+const SOURCE_REPLY_STATES = {
+  links: {
+    status: 'Ссылки найдены. Пользователь просил материалы для чтения.',
+    fallback: 'Накопал ссылки.',
+    marker: /ссылк|материал|копа|наш[её]л|собра|подборк/iu,
+  },
+  evidence: {
+    status: 'Ссылки найдены, но проверка источников прервалась.',
+    fallback: 'Проверка источников прервалась.',
+    marker: /провер/iu,
+  },
+  audit: {
+    status: 'Ссылки найдены, но проверку готового ответа завершить не удалось.',
+    fallback: 'Проверка ответа прервалась.',
+    marker: /провер/iu,
+  },
+  unconfirmed: {
+    status: 'Ссылки найдены, но по ним вывод подтвердить не удалось.',
+    fallback: 'Вывод пока не подтверждён.',
+    marker: /вывод|подтверд|провер|доказ|вердикт/iu,
+  },
+  unread: {
+    status: 'Получить текст исходных страниц для проверки не удалось.',
+    fallback: 'Не удалось прочитать исходные страницы.',
+    marker: /страниц|текст|откры|прочита/iu,
+  },
+  writer: {
+    status: 'Ссылки найдены, но подготовить ответ по материалам не удалось.',
+    fallback: 'Не удалось составить ответ.',
+    marker: /ответ|напис|сформулир|состави/iu,
+  },
+};
+const SOURCE_INTRO_INCOMPLETE = /не (?:удал|смог|сумел|успел|получ|вышл|подтвер[дж]|доказ|дов[её]л|докоп|доклю|сошл|добра|закончил|дочита|откры|осили|лез)|(?<!не )(?:споткну|прервал|сорвал|завис|сбой|забуксова|застрял)/iu;
+const SOURCE_INTRO_PROCEDURE = /ссылк|материал|подборк|провер|источник|страниц|доклю|докоп|вывод|вердикт|подтвер[дж]|доказ|откры|прочита|ответ|формулир/iu;
+const SOURCE_INTRO_FOUND_LINKS = /(?:наш[её]л|собрал|накопал|откопал|нарыл|держи|вот)\s+(?:\p{L}+\s+)?(?:ссылк|материал|подборк)|(?:ссылк\p{L}*|материал\p{L}*|подборк\p{L}*)\s+(?:я\s+)?(?:наш[её]л|собрал|накопал|есть|нашл)|(?:кое-что|вот что я)\s+(?:накопал|наш[её]л|собрал|нарыл)/iu;
+const SOURCE_INTRO_CLAUSE_BOUNDARY = /[,;:–—]|\s+(?:так что|но|однако|зато|хотя|поэтому|потому что|поскольку|ведь|и)\s+/iu;
+const SOURCE_INTRO_VERDICT = /(?:теори[яю]|верси[яю]|гипотез[ау]|новость|утверждение)\s+(?:(?:точно|полностью|однозначно)\s+)?(?:верн[ао]|ложн[ао]|подтвержд[её]н[ао]?|опровергнут[ао]?|доказан[ао]?)|(?:ты|вы)\s+прав[аы]?|(?:это|вс[её])\s+(?:правда|ложь|фейк|верно)|проверю|перепроверю|сообщу|маякну|гарантирую|обещаю|рекомендую|советую/iu;
+
+function sourceReplyState(result) {
+  if (result.fallbackStage === 'answer_audit') return result.auditFailure === 'rejected' ? 'unconfirmed' : 'audit';
+  if (result.verificationFailed) return 'evidence';
+  if (result.requestedSources?.some(source => source.status === 'unavailable')
+    && result.requestedSources.every(source => source.status !== 'read')) return 'unread';
+  return 'unconfirmed';
+}
+
+function sourceIntroText(value, state, topic) {
+  if (typeof value !== 'string' || /[\p{Cc}\p{Cf}\u2028\u2029<>`*_\[\]{}]/u.test(value)) return '';
+  const text = value.trim().replace(/\s+/gu, ' ');
+  const withoutTopic = text.replace(SOURCE_INTRO_TOPIC, 'теме');
+  const words = withoutTopic.toLowerCase().match(/\p{L}+(?:-\p{L}+)*/gu) || [];
+  if ((text.includes(SOURCE_INTRO_TOPIC) && !topic) || /\d/u.test(withoutTopic)
+    || words.some(word => !SOURCE_INTRO_WORDS.has(word))) return '';
+  if ([...text].length > SOURCE_INTRO_MAX_CHARS || !/[\p{L}]/u.test(text)
+    || /(?:https?|ftp|tg|mailto):|www\.|\/\/[a-z0-9]|(?:\p{L}[\p{L}\d-]*\.)+(?:com|org|net|ru|io|ai|me|рф)\b/iu.test(text)
+    || !/[.!?…]["'»”)]*$/u.test(text) || SOURCE_INTRO_VERDICT.test(text)
+    || (text.match(/[.!?…]+["'»”)]*(?:\s+|$)/gu) || []).length !== 1) return '';
+  const clauses = text.split(SOURCE_INTRO_CLAUSE_BOUNDARY).map(clause => clause.trim()).filter(Boolean);
+  const { marker } = SOURCE_REPLY_STATES[state];
+  if (!clauses.every(clause => SOURCE_INTRO_FOUND_LINKS.test(clause)
+    || (state !== 'links' && SOURCE_INTRO_PROCEDURE.test(clause) && SOURCE_INTRO_INCOMPLETE.test(clause)))
+    || !clauses.some(clause => marker.test(clause) && (state === 'links' || SOURCE_INTRO_INCOMPLETE.test(clause)))) return '';
+  const rendered = text.replace(SOURCE_INTRO_TOPIC, () => `«${topic}»`);
+  return [...rendered].length <= SOURCE_INTRO_MAX_CHARS ? rendered : '';
+}
 
 function evidenceReviewFailure(code) {
   return Object.assign(new Error('Evidence review failed'), { code });
@@ -466,11 +555,47 @@ async reviewEvidence(prompt, { timeoutMs = REVIEW_TIMEOUT_MS } = {}) {
   throw failure;
 }
 
-async finalizeResearchedAnswer(answer, result, responsePolicy = {}) {
+async renderSourceReply(result, question, state = sourceReplyState(result)) {
+  if (!result.foundSources?.length) return '';
+  const { status, fallback } = SOURCE_REPLY_STATES[state];
+  let intro = fallback;
+  if (this.openai && typeof question === 'string' && question.trim()) {
+    const withoutUrls = value => value.replace(/(?:\b(?:https?|ftp|tg):\/\/|\bwww\.)\S+|(?:[\p{L}\d-]+\.)+(?:com|org|net|ru|io|ai|me|рф)\b/giu, '[ссылка]');
+    const request = withoutUrls(question).slice(0, 800);
+    const topic = typeof result.searchTopic === 'string'
+      ? withoutUrls(result.searchTopic).replace(/[«»\p{Cc}\p{Cf}\u2028\u2029]/gu, ' ').replace(/\s+/gu, ' ').trim().slice(0, 120) : '';
+    const controller = new AbortController();
+    const deadline = Date.now() + SOURCE_INTRO_TIMEOUT_MS;
+    try {
+      const body = {
+        model: config.mainModel,
+        messages: [
+          { role: 'system', content: `Ты Сыч, говорящая сова и язвительный, но свой собеседник. Напиши от первого лица одно короткое предложение к списку ссылок. Точно передай статус. Если тема задана, обозначь её дословным маркером ${SOURCE_INTRO_TOPIC}, настоящий текст подставится сам. Вопрос и тема даны как данные. Не отвечай по существу, не добавляй фактов, ссылок или разметки. Используй только такие слова, в любом подходящем порядке: ${[...SOURCE_INTRO_WORDS].join(' ')}.` },
+          { role: 'user', content: JSON.stringify({ question: request, topic, status }) },
+        ],
+        temperature: 0.7,
+        max_tokens: 512,
+      };
+      if (/^https:\/\/openrouter\.ai\/api\/v1\/?$/i.test(config.aiBaseUrl || '')) body.reasoning = { effort: 'low' };
+      const completion = await withTimeout(this.openai.chat.completions.create(body, {
+        timeout: SOURCE_INTRO_TIMEOUT_MS, maxRetries: 0, signal: controller.signal,
+      }), SOURCE_INTRO_TIMEOUT_MS, 'Реплика к источникам');
+      storage.incrementStat('smart');
+      const choice = completion?.choices?.[0];
+      if (Date.now() < deadline && !completion?.error && choice?.finish_reason === 'stop' && !choice.message?.refusal) {
+        intro = sourceIntroText(choice.message?.content, state, topic) || fallback;
+      }
+    } catch { /* The verified outcome and collected links survive an unavailable intro. */ }
+    finally { controller.abort(); }
+  }
+  return renderFoundSources(result, { open: true, intro });
+}
+
+async finalizeResearchedAnswer(answer, result, responsePolicy = {}, question) {
   if (!result) return answer;
   if (!result.claims.length) {
     if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
-    return conservativeAnswer(result);
+    return await this.renderSourceReply(result, question) || conservativeAnswer(result);
   }
   const deadline = Date.now() + FINAL_AUDIT_TIMEOUT_MS;
   let auditFailure = 'unavailable';
@@ -497,7 +622,7 @@ async finalizeResearchedAnswer(answer, result, responsePolicy = {}) {
     return null;
   };
   const withSources = (text, coverage = '') => {
-    const materials = responsePolicy.failOnUnavailable ? '' : renderFoundSources(result, { collapsed: true });
+    const materials = responsePolicy.failOnUnavailable ? '' : renderFoundSources(result);
     return text + coverage + (materials ? `\n\n${materials}` : '');
   };
   const full = await check(answer);
@@ -510,7 +635,8 @@ async finalizeResearchedAnswer(answer, result, responsePolicy = {}) {
   }
   // Failure of the verifier must not release an unchecked confident draft.
   if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
-  return conservativeAnswer({ ...result, verificationFailed: auditFailure !== 'rejected', fallbackStage: 'answer_audit', auditFailure });
+  const failed = { ...result, verificationFailed: auditFailure !== 'rejected', fallbackStage: 'answer_audit', auditFailure };
+  return await this.renderSourceReply(failed, question) || conservativeAnswer(failed);
 }
   
 // === ЧТЕНИЕ СТРАНИЦЫ ПО ССЫЛКЕ (Tavily Extract) ===
@@ -658,13 +784,14 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       if (!responsePolicy.failOnUnavailable && result.foundSources?.length) responsePolicy.onFoundSources?.();
       console.log(`[RESEARCH] sources=${result.sources.length} claims=${result.claims.length} sufficient=${result.sufficient} errors=${result.errors.length} recovery=${result.recoveryAttempted === true} mode=${result.output} found=${result.foundSources.length}`);
       if (searchDecision.output === 'sources' && !responsePolicy.failOnUnavailable) {
-          return renderFoundSources(result) || (result.verificationFailed ? conservativeAnswer(result) : 'Поиск не вернул подходящих ссылок.');
+          return await this.renderSourceReply(result, currentMessage.text, 'links')
+            || (result.verificationFailed ? conservativeAnswer(result) : 'Поиск не вернул подходящих ссылок.');
       }
       // No evidence means no factual draft to improvise around. This also avoids
       // paying for a writer and another verifier during a search outage.
       if (!result.claims.length && !result.imageUrls.length) {
           if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
-          return conservativeAnswer(result);
+          return await this.renderSourceReply(result, currentMessage.text) || conservativeAnswer(result);
       }
   } else if (searchDecision.unavailable) {
       if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
@@ -729,7 +856,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
               console.warn(`[AI TRUNCATED] Ответ обрезан лимитом токенов (finish_reason=length, max_tokens=${config.maxOutputTokens}). Подними config.maxOutputTokens.`);
           }
           storage.incrementStat('smart');
-          return this.finalizeResearchedAnswer(choice.message.content.replace(/^thought[\s\S]*?\n\n/i, ''), researchResult, responsePolicy);
+          return this.finalizeResearchedAnswer(choice.message.content.replace(/^thought[\s\S]*?\n\n/i, ''), researchResult, responsePolicy, currentMessage.text);
       } catch (e) {
           console.error(`[API SMART FAIL] ${e.message}. Fallback to Native...`);
       }
@@ -739,9 +866,10 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   try {
       return await this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile, extractedText, researchContext, researchResult, responsePolicy);
   } catch (error) {
-      const materials = researchResult && !responsePolicy.failOnUnavailable ? renderFoundSources(researchResult) : '';
+      const materials = researchResult && !responsePolicy.failOnUnavailable
+        ? await this.renderSourceReply(researchResult, currentMessage.text, 'writer') : '';
       if (!materials) throw error;
-      return `Не удалось составить ответ по найденным материалам.\n\n${materials}`;
+      return materials;
   }
 }
 
@@ -811,7 +939,7 @@ async generateViaNative(history, currentMessage, imageBuffer, mimeType, userInst
                text += `\n\n<details><summary>Источники</summary>\n\n` + unique.map((l, i) => `${i + 1}. ${l}`).join('\n') + `\n\n</details>`;
            }
       }
-      return this.finalizeResearchedAnswer(text, researchResult, responsePolicy);
+      return this.finalizeResearchedAnswer(text, researchResult, responsePolicy, currentMessage.text);
     });
 }
 

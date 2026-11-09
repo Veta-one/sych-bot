@@ -66,18 +66,36 @@ function collapseMarkdownQuotes(source) {
   return collapseHtmlQuotes(masked).replace(new RegExp(`${marker}(\\d+)_END`, 'g'), (_, index) => literals[Number(index)]);
 }
 
-// Legacy sendMessage has no <details>. Keep the transcript behind one native
-// expandable quote instead, using UTF-16 entity offsets and lossless chunking.
+// Legacy sendMessage has no <details>. Keep closed bodies behind one native
+// expandable quote and open bodies visible, with clickable UTF-16 link entities.
 function quoteFallback(content) {
   const html = content.html != null ? content.html : markdown.render(content.markdown || '');
   const document = parseDocument(html);
   let text = '';
+  let hasDisclosure = false;
   const entities = [];
   const newline = () => { if (text && !text.endsWith('\n')) text += '\n'; };
+  function expandable(start) {
+    const length = text.slice(start).trimEnd().length;
+    if (length) entities.push({ type: 'expandable_blockquote', offset: start, length });
+  }
   function visit(node, inQuote = false) {
     if (node.type === 'text') { text += node.data; return; }
     if (['script', 'style'].includes(node.name)) return;
-    const block = /^(p|div|li|h[1-6]|blockquote|pre|details|summary|tr|ul|ol)$/.test(node.name || '');
+    if (node.name === 'details') {
+      hasDisclosure = true;
+      newline();
+      const summary = node.children.find(child => child.name === 'summary');
+      if (summary) visit(summary, inQuote);
+      const start = text.length;
+      for (const child of node.children) {
+        if (child !== summary) visit(child, true);
+      }
+      if (!inQuote && !Object.hasOwn(node.attribs, 'open')) expandable(start);
+      newline();
+      return;
+    }
+    const block = /^(p|div|li|h[1-6]|blockquote|pre|summary|tr|ul|ol)$/.test(node.name || '');
     if (block) newline();
     if (node.name === 'br') { text += '\n'; return; }
     if (node.name === 'li') text += '• ';
@@ -92,14 +110,11 @@ function quoteFallback(content) {
         }
       } catch { /* An invalid destination stays plain text. */ }
     }
-    if (quoted && !inQuote) {
-      const length = text.slice(start).trimEnd().length;
-      if (length) entities.push({ type: 'expandable_blockquote', offset: start, length });
-    }
+    if (quoted && !inQuote) expandable(start);
     if (block) newline();
   }
   visit(document);
-  if (!entities.some(entity => entity.type === 'expandable_blockquote')) return null;
+  if (!hasDisclosure && !entities.some(entity => entity.type === 'expandable_blockquote')) return null;
   entities.sort((a, b) => a.offset - b.offset || b.length - a.length);
   text = text.trimEnd();
   const chunks = [];
