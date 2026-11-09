@@ -99,6 +99,18 @@ function harness() {
   } };
 }
 
+test('an unconfirmed gallery recovery does not trigger a duplicate emergency message', async () => {
+  const { state, message } = harness();
+  let attempts = 0;
+  state.sendResponder = async () => {
+    attempts++;
+    throw Object.assign(new Error('Gallery delivery unconfirmed'), { code: 'RICH_DELIVERY_UNCONFIRMED' });
+  };
+  await message({ text: 'Сыч, покажи как выглядит буханка' });
+  assert.equal(attempts, 1);
+  assert.equal(state.legacySends?.length || 0, 0);
+});
+
 test('group delivery does not cut off the last link in a long collected source list', async () => {
   const { state, message } = harness();
   const { renderFoundSources } = require('../src/services/research');

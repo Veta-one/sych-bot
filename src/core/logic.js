@@ -1114,6 +1114,9 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
         if (isSilenced() || isStaleProfileReply()) { stopTyping(); return; }
         stopTyping(); // <-- Если ошибка, ОБЯЗАТЕЛЬНО выключаем
         console.error(`[SEND ERROR]: ${error.message}`);
+        // Telegram may have accepted an uploaded gallery before the connection
+        // failed. Sending the original answer again can duplicate the message.
+        if (error.code === 'RICH_DELIVERY_UNCONFIRMED') return false;
 
         if (isBusinessMessage && /BUSINESS[_ ]?PEER[_ ]?INVALID|BUSINESSPEERINVALID/i.test(error.message)) {
             console.log(`[BUSINESS SEND] Telegram отклонил отправку в chat=${chatId}. Обычно это значит, что peer недоступен для business-ответа или нет входящего окна 24ч.`);

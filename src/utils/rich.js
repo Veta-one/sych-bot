@@ -15,11 +15,68 @@ const { collapseHtmlQuotes, collapseMarkdownQuotes, quoteFallback, stripImageMar
 const API = `https://api.telegram.org/bot${config.telegramToken}`;
 
 async function postRich(bot, url, payload, options, shouldSend) {
-  if (Number(payload.chat_id) < 0 && typeof bot.requireGroupAccess === 'function') {
-    await bot.requireGroupAccess(payload.chat_id);
+  const chatId = payload.chat_id;
+  const groupCheck = Number(chatId) < 0 && typeof bot.requireGroupAccess === 'function';
+  const allowSend = async () => {
+    if (groupCheck) await bot.requireGroupAccess(chatId);
     if (shouldSend !== undefined) checkStrictDelivery(shouldSend);
+  };
+  if (groupCheck) await allowSend();
+  try {
+    return await axios.post(url, payload, options);
+  } catch (error) {
+    const ambiguous = !strictRejection(error.response?.data, error.response?.status)
+      && (error.isAxiosError === true || error.request || error.response
+        || ['ECONNRESET', 'ETIMEDOUT', 'ECONNABORTED', 'ERR_NETWORK', 'ERR_BAD_RESPONSE'].includes(error.code));
+    if (payload.rich_message && withoutRichImages(payload.rich_message) !== payload.rich_message && ambiguous) {
+      throw photoRecoveryStopped();
+    }
+    if (!payload.rich_message || !confirmedPhotoRejection(error)) throw error;
+    const { explicitPhotos, uploadedPhotos, multipartPhotos } = require('./rich-photos');
+    const explicit = explicitPhotos(payload.rich_message);
+    if (!explicit) throw error;
+    const send = async (body, requestOptions) => {
+      await allowSend();
+      const response = await axios.post(url, body, { ...options, timeout: 12000, ...requestOptions });
+      const result = response.data?.result;
+      if (response.status !== 200 || response.data?.ok !== true
+        || !(result === true || Number.isSafeInteger(result?.message_id) || Number.isSafeInteger(result?.ephemeral_message_id))) {
+        const rejected = Object.assign(new Error('Telegram photo recovery response'), { response });
+        throw rejected;
+      }
+      return response;
+    };
+    try {
+      const response = await send({ ...payload, rich_message: explicit });
+      console.log(`[RICH MEDIA] restored=explicit photos=${explicit.media.length}`);
+      return response;
+    } catch (retryError) {
+      if (!confirmedPhotoRejection(retryError)) throw photoRecoveryStopped();
+      const prepared = await uploadedPhotos(payload.rich_message);
+      if (!prepared) throw retryError;
+      const multipart = multipartPhotos(payload, prepared);
+      try {
+        const response = await send(multipart.body, { headers: { 'Content-Type': multipart.contentType },
+          maxBodyLength: multipart.body.length });
+        console.log(`[RICH MEDIA] restored=upload photos=${prepared.photos.length}`);
+        return response;
+      } catch (uploadError) {
+        if (confirmedPhotoRejection(uploadError)) throw uploadError;
+        throw photoRecoveryStopped();
+      }
+    }
   }
-  return axios.post(url, payload, options);
+}
+
+function confirmedPhotoRejection(error) {
+  const response = error?.response;
+  return response?.status === 400 && response.data?.ok === false && response.data.error_code === 400
+    && /RICH_MESSAGE_PHOTO|PHOTO_(?:INVALID|EXT_INVALID)|IMAGE_PROCESS_FAILED|failed to get http url content|wrong type of the web page content/i
+      .test(response.data.description || '');
+}
+
+function photoRecoveryStopped() {
+  return Object.assign(new Error('Telegram photo recovery delivery could not be confirmed'), { code: 'RICH_DELIVERY_UNCONFIRMED' });
 }
 
 
@@ -349,6 +406,7 @@ async function sendRich(bot, chatId, content, opts = {}) {
     const response = await postRich(bot, `${API}/sendRichMessage`, { chat_id: chatId, rich_message: rich, ...extra }, { proxy: false });
     return { ok: true, mode: 'rich', messageId: response.data?.result?.message_id };
   } catch (e) {
+    if (e.code === 'RICH_DELIVERY_UNCONFIRMED') throw e;
     const desc = e.response?.data?.description || e.message;
 
     // Если rich упал из-за медиа (битый URL картинки) — пробуем ещё раз БЕЗ картинок,
