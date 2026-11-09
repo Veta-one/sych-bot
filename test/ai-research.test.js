@@ -323,11 +323,13 @@ test('a required period never falls back to an unfiltered search', async () => {
 test('a single-value lookup uses one search and one grounded extraction without drafting and auditing', async () => {
   const { ai, calls } = harness();
   const url = 'https://example.org/releases';
+  const alternatives = ['https://example.org/other-releases', 'https://example.org/unused'];
+  const reads = [];
   let searches = 0;
   let reviews = 0;
   ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'Node latest release' });
-  ai.performSearch = async () => { searches++; return [{ url, title: 'Node releases' }]; };
-  ai.extractUrl = async () => 'The current stable version of my_pkg is 24.7.0.';
+  ai.performSearch = async () => { searches++; return [url, ...alternatives].map(url => ({ url, title: 'Node releases' })); };
+  ai.extractUrl = async url => { reads.push(url); return 'The current stable version of my_pkg is 24.7.0.'; };
   ai.reviewEvidence = async prompt => {
     reviews++;
     assert.doesNotMatch(prompt, /ПРОВЕРКА ГОТОВОГО ОТВЕТА/);
@@ -339,6 +341,7 @@ test('a single-value lookup uses one search and one grounded extraction without 
   assert.ok(response.includes('my\\_pkg'));
   assert.ok(response.includes(url));
   assert.equal(searches, 1);
+  assert.deepEqual(reads, [url, alternatives[0]]);
   assert.equal(reviews, 1);
   assert.equal(calls.length, 0);
 });
@@ -399,6 +402,33 @@ test('a lookup declines a search result without a readable matching page', async
   const answer = await ai.getResponse([], { text: 'Сыч, сколько песо в рублях?', sender: 'Тест' });
   assert.match(answer, /Подходящих данных/);
   assert.doesNotMatch(answer, /xau-idr|Unrelated/);
+  assert.equal(calls.length, 0);
+});
+
+test('a short weather lookup tries just one fresh result when the first pair has no dated value', async () => {
+  const { ai, calls } = harness();
+  const urls = Array.from({ length: 4 }, (_, index) => `https://example.org/weather-${index}`);
+  const observation = 'Екатеринбург, 9 ноября 2026, 16:15: −4 °C.';
+  const reads = [];
+  const packs = [];
+  let searches = 0;
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'Погода Екатеринбург сейчас' });
+  ai.performSearch = async () => { searches++; return urls.map(url => ({ url, title: 'Погода' })); };
+  ai.extractUrl = async url => { reads.push(url); return url === urls[2] ? observation : 'Екатеринбург: температура без времени.'; };
+  ai.reviewEvidence = async (prompt, options) => {
+    assert.equal(options.lookup, true);
+    const pack = JSON.parse(prompt.split('ИСТОЧНИКИ: ')[1]);
+    packs.push(pack);
+    if (packs.length === 1) return { claims: [], sufficient: false, addressesQuestion: true };
+    return { claims: [{ claim: 'В Екатеринбурге в 16:15 было −4 °C.', status: 'supported', sourceId: 'S3',
+      quote: observation }], sufficient: true, addressesQuestion: true };
+  };
+  const answer = await ai.getResponse([], { text: 'Сыч, какая погода в екатерибурге?', sender: 'Тест' });
+  assert.match(answer, /16:15 было −4 °C/);
+  assert.ok(answer.includes(urls[2]));
+  assert.deepEqual(reads, urls.slice(0, 3));
+  assert.deepEqual(packs.map(pack => pack.map(row => row.url)), [urls.slice(0, 2), [urls[2]]]);
+  assert.equal(searches, 1);
   assert.equal(calls.length, 0);
 });
 
@@ -596,6 +626,26 @@ function timedHarness() {
   };
   return context;
 }
+
+test('an extra lookup page shares the original deadline and cannot start a late review', async () => {
+  const context = timedHarness();
+  const { ai, drive, delay } = context;
+  const urls = Array.from({ length: 4 }, (_, index) => `https://example.org/weather-${index}`);
+  const reads = [];
+  let reviews = 0;
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'weather' });
+  ai.performSearch = async () => urls.map(url => ({ url, title: 'Weather' }));
+  ai.extractUrl = async url => { reads.push(url); return url === urls[2] ? new Promise(() => {}) : 'Weather without a dated value.'; };
+  ai.reviewEvidence = async () => {
+    reviews++;
+    return delay(21000, undefined, { claims: [], sufficient: false, addressesQuestion: true });
+  };
+  const answer = await drive(ai.getResponse([], { text: 'Сыч, какая сейчас погода?', sender: 'Тест' }));
+  assert.equal(context.clock(), 22000);
+  assert.deepEqual(reads, urls.slice(0, 3));
+  assert.equal(reviews, 1);
+  assert.match(answer, /Подходящих данных/);
+});
 
 test('a stalled source intro is aborted at five seconds and preserves the open links', async () => {
   const context = timedHarness();
