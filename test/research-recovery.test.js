@@ -33,6 +33,7 @@ function harness({ latest = empty, recovery = recovered, first = partial, audit 
   });
   const state = { reads: [], searches: [], evidence: [], recovery: [], audits: [], writers: [], logs: [], result: null };
   const deps = {
+    './quick-data': { quickData: async () => '' }, '../utils/research-sources': require('../src/utils/research-sources'),
     '@google/generative-ai': {}, openai: {}, '@tavily/core': {},
     axios: new Proxy({}, { get() { throw Error('Real network access is forbidden'); } }),
     '../config': config, '../core/prompts': promptModule.exports,

@@ -50,6 +50,7 @@ function loadAi({ provider = 'openrouter', keys = [], response, error, stall = f
     }
   }
   const ai = load('services/ai.js', {
+    './quick-data': { quickData: async () => '' }, '../utils/research-sources': require('../src/utils/research-sources'),
     '@google/generative-ai': { GoogleGenerativeAI: FakeGoogle, HarmCategory: {}, HarmBlockThreshold: {} },
     '../config': config, '../core/prompts': prompts, axios: {}, openai: FakeOpenAI, '@tavily/core': {},
     './storage': { initGoogleStats() {}, incrementGoogleStat() {}, incrementStat(name) { stats.push(name); } },

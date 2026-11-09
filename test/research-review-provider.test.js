@@ -33,6 +33,7 @@ function harness({ mode = 'auto', primary = true, native = false } = {}) {
   const config = { geminiKeys: [], mainModel: 'synthetic-review-model', researchReviewProvider: mode };
   const prompts = load('core/prompts.js', { '../config': config });
   const ai = load('services/ai.js', {
+    './quick-data': { quickData: async () => '' }, '../utils/research-sources': require('../src/utils/research-sources'),
     '@google/generative-ai': {}, '../config': config, '../core/prompts': prompts,
     axios: {}, openai: {}, '@tavily/core': {},
     './storage': { initGoogleStats() {}, incrementStat() {}, incrementGoogleStat() {} },

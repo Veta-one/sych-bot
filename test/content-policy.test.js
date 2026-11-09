@@ -1,7 +1,7 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { shouldSkipSearchForPrimarySource, searchRequestIntent } = require('../src/utils/content-policy');
+const { shouldSkipSearchForPrimarySource, searchRequestIntent, requiresResearch } = require('../src/utils/content-policy');
 
 test('document and transcript questions do not trigger unrelated web search', () => {
   assert.equal(shouldSkipSearchForPrimarySource('Сыч, кто выполнил план и на сколько процентов?', true), true);
@@ -96,4 +96,45 @@ test('verification behavior stays available while incidental platform mentions a
 
 test('intent scanning is bounded and never treats an appended oversized payload as the request', () => {
   assert.equal(searchRequestIntent('Обычный вопрос ' + 'x'.repeat(9000) + ' найди в интернете').explicitSearch, false);
+});
+
+test('research veto protects fact checks, comparisons, causal and high-stakes requests', () => {
+  for (const text of [
+    'Сыч, проверь мою теорию про Anthropic',
+    'Сыч, перепроверь ответ',
+    'Проверь утверждение о зарплате в этом тексте',
+    'Это правда?',
+    'Сыч, точно?',
+    'Fact-check the news story',
+    'Сравни модели и выбери лучшую',
+    'Сравни данные в таблице с официальным отчётом',
+    'Какая из этих моделей лучше для монтажа?',
+    'Почему поменялись условия подписки?',
+    'Из-за чего вырос курс?',
+    'Можно ли принимать ибупрофен вместе с другим лекарством?',
+    'Какая формула расчёта дозировки для ребёнка?',
+    'Легально ли это в Казахстане?',
+    'Стоит ли покупать акции компании?',
+    'Безопасно ли подключать это устройство?',
+  ]) assert.equal(requiresResearch(text), true, text);
+});
+
+test('research veto does not cover plain lookup, links, chat, or local work', () => {
+  for (const text of [
+    'Сыч, найди последнюю версию Node.js',
+    'Проверь курс доллара на сегодня',
+    'Посмотри погоду в Екатеринбурге завтра',
+    'Look up the match score',
+    'Найди первоисточник',
+    'Что ты об этом думаешь?',
+    'Привет',
+    'Перепроверь вычисления',
+    'Проверь вычисление факториала',
+    'Проверь этот расчёт',
+    'Проверь орфографию в тексте',
+    'Сравни эти два числа',
+    'Почему в этом коде ошибка?',
+    'Запрос ' + 'x'.repeat(9000) + ' фактчек',
+    null,
+  ]) assert.equal(requiresResearch(text), false, String(text).slice(0, 100));
 });

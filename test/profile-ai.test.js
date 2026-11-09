@@ -9,6 +9,7 @@ function harness({ timeoutCapMs } = {}) {
   const prompts = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/core/prompts.js'), 'utf8'), { module: prompts, require: () => config });
   const dependencies = {
+    './quick-data': { quickData: async () => '' }, '../utils/research-sources': require('../src/utils/research-sources'),
     '@google/generative-ai': {}, '../config': config, '../core/prompts': prompts.exports,
     axios: {}, openai: {}, '@tavily/core': {},
     './storage': { initGoogleStats() {}, resetStatsIfNeeded: () => false, incrementStat() {}, incrementGoogleStat() {} },

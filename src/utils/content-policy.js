@@ -5,6 +5,37 @@ function isVerificationRequest(message) {
   return /(?:проверь|перепроверь|проверить|правдив|достовер|фактчек|факт.?чек|это правда|правда ли|ты уверен|точно\?|откуда (?:ты )?(?:это|взял|инф)|подтверди|доказательств|первоисточник|нагугли|загугли|найди.{0,35}(?:ссылк|источник)|поищи|погугли|fact.?check|verify|are you sure)/i.test(text);
 }
 
+// This vetoes a one-source lookup. It does not decide whether to search.
+function requiresResearch(message) {
+  const text = typeof message === 'string' ? message.slice(0, 8000).toLowerCase() : '';
+  const factCheck = /факт[ -]?чек|это правда|правда ли|не фейк ли|ты уверен|откуда (?:ты )?(?:это|взял|инф)|^(?:сыч[, ]+)?точно\?\s*$|\bfact[ -]?check\b|\bare you sure\b/.test(text)
+    || /(?:проверь|проверить|подтверди|сверь).{0,45}(?:правдив|достовер|тезис|теори|гипотез|новост|утверждени|(?:факт(?:ы|ов)?|пост(?:а)?)(?!\p{L}))/u.test(text);
+  if (factCheck) return true;
+
+  const highStakes = [
+    /дозировк|побочн.{0,6} эффект|сколько.{0,25}таблет|(?:можно ли|как|когда)\s+(?:мне\s+)?(?:принимать|лечить|отменить при[её]м)|\b(?:dosage|side effects|drug interactions)\b/,
+    /законно ли|легально ли|имею ли (?:я )?право|штрафуют ли|(?:могу ли|как).{0,22}(?:расторгнуть договор|оспорить штраф)|\b(?:is it legal|legal advice)\b/,
+    /куда вложить деньги|(?:стоит ли|посоветуй|порекомендуй).{0,45}(?:акци|облигаци|крипт|биткоин|инвестиц|кредит|ипотек)|\b(?:investment advice|should i invest)\b/,
+    /безопасно ли|как безопасно|рискованно ли|\bis it safe\b/,
+  ].some(pattern => pattern.test(text));
+  if (highStakes) return true;
+
+  const local = /орфограф|граммат|пунктуац|арифметик|вычислен|формул|в (?:этом |приложенном )?(?:коде|файле|тексте|таблице)|(?:этот|мой) расч[её]т|эти (?:два |три )?числа|\b(?:my math|this code|the attached file)\b/.test(text);
+  const external = /в интернете|в сети|первоисточник|(?:по|с) официальн|с актуальн|\b(?:online|on the web|official source)\b/.test(text);
+  if (local && !external) return false;
+
+  return [
+    /перепроверь|(?:проверь|проверить|подтверди|сверь).{0,45}(?:свой ответ|мой ответ|это в интернет)|\b(?:verify|recheck)\b.{0,40}\b(?:claim|story|article|your answer)\b/,
+    /сравни|сопоставь|чем отлича|разниц[аыу] между|(?:что|кто|какой|какая|какие)\s+[^.!?\n]{0,55}лучше|выбери.{0,25}(?:лучши|подходящ)|\b(?:compare|which is better|difference between)\b/,
+    /(?<![\p{L}])почему(?![-\p{L}])|отчего|из-за чего|по какой причине|в ч[её]м причин|\b(?:why|what caused)\b/u,
+  ].some(pattern => pattern.test(text));
+}
+
+function hasSourceConstraint(message) {
+  const text = typeof message === 'string' ? message.slice(0, 8000) : '';
+  return /(?:по (?:данным|сведениям|котировкам|версии|информации)|согласно|на сайте|according to|as reported by)\s+\S|курс[^.!?\n]{0,30}\s(?:ЦБ(?: РФ)?|Банка России)(?!\p{L})/iu.test(text);
+}
+
 function searchRequestIntent(userMessage) {
   // Only the user's bounded request is authoritative, never attached source text.
   const text = typeof userMessage === 'string' ? userMessage.slice(0, 8000).toLowerCase() : '';
@@ -27,7 +58,6 @@ function searchRequestIntent(userMessage) {
   const explicitLocation = action && (web || domains.length > 0 || namedSite);
   const local = /(?:в|из|по)\s+(?:(?:этом|этой|этих|моем|моём|моей|приложенном|прикрепленном|локальной|локальном)\s+)?(?:коде|тексте|сообщении|документе|файле|папке|каталоге|диалоге|таблице|переписке)|на\s+(?:(?:моём|моем)\s+)?(?:диске|компьютере)/.test(text);
   if (local && /найди|найти|поищи|отыщи|ищи|find|search/.test(text) && !explicitLocation && !siteQuery) return empty;
-  if (!explicitLocation && !siteQuery && !isVerificationRequest(text)) return empty;
 
   const wantsSources = /(?:найди|найти|нагугли|загугли|поищи|дай|покажи|пришли|find).{0,60}(?:ссылк|источник|links|sources)|(?:только|просто|лишь)\s+(?:список|ссылк|источник|результат)|\bonly\s+(?:links|sources|list)\b/.test(text);
   const wantsAnswer = /выбери|выбрать|сравни|сопостав|объясни|объяснить|разбери|проанализируй|оцени|почему|что лучше|\b(?:compare|explain|choose|analy[sz]e)\b/.test(text);
@@ -37,8 +67,12 @@ function searchRequestIntent(userMessage) {
     ['month', /за\s+(?:(?:последний|прошедший|этот)\s+)?месяц|(?:последние|последних)\s+30\s+дней|\bpast\s+(?:month|30\s+days)\b/],
     ['year', /за\s+(?:(?:последний|прошедший|этот)\s+)?год|(?:последние|последних)\s+365\s+дней|\bpast\s+(?:year|365\s+days)\b/],
   ].filter(([, pattern]) => pattern.test(text));
+  const requiredTimeRange = windows.length === 1 ? windows[0][0] : null;
+  if (!explicitLocation && !siteQuery && !isVerificationRequest(text)) {
+    return { ...empty, requiredDomains: domains, requiredTimeRange };
+  }
   return { explicitSearch: true, output: wantsSources && !wantsAnswer ? 'sources' : 'answer',
-    requiredDomains: domains, requiredTimeRange: windows.length === 1 ? windows[0][0] : null };
+    requiredDomains: domains, requiredTimeRange };
 }
 
 function shouldSkipSearchForPrimarySource(message, hasPrimarySource) {
@@ -58,4 +92,6 @@ module.exports = {
   shouldSkipSearchForPrimarySource,
   isVerificationRequest,
   searchRequestIntent,
+  requiresResearch,
+  hasSourceConstraint,
 };

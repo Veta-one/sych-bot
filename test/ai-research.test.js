@@ -13,6 +13,7 @@ function harness(extraDependencies = {}, runtime = {}) {
   const dependencies = {
     '../utils/private-context': require('../src/utils/private-context'),
     '../utils/profile-evidence': require('../src/utils/profile-evidence'),
+    './quick-data': { quickData: async () => '' }, '../utils/research-sources': require('../src/utils/research-sources'),
     '@google/generative-ai': {}, '../config': config, '../core/prompts': promptsModule.exports,
     axios: {}, openai: {}, '@tavily/core': {},
     './storage': { initGoogleStats() {}, resetStatsIfNeeded: () => false, incrementStat() {}, incrementGoogleStat() {} },
@@ -317,6 +318,124 @@ test('a required period never falls back to an unfiltered search', async () => {
   await assert.rejects(search('tool recommendations', { requiredTimeRange: 'week' }), /SEARCH_PERIOD_UNAVAILABLE/);
   config.searchProvider = 'perplexity';
   await assert.rejects(search('tool recommendations', { requiredTimeRange: 'week' }), /SEARCH_PERIOD_UNAVAILABLE/);
+});
+
+test('a single-value lookup uses one search and one grounded extraction without drafting and auditing', async () => {
+  const { ai, calls } = harness();
+  const url = 'https://example.org/releases';
+  let searches = 0;
+  let reviews = 0;
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'Node latest release' });
+  ai.performSearch = async () => { searches++; return [{ url, title: 'Node releases' }]; };
+  ai.extractUrl = async () => 'The current stable version of my_pkg is 24.7.0.';
+  ai.reviewEvidence = async prompt => {
+    reviews++;
+    assert.doesNotMatch(prompt, /ПРОВЕРКА ГОТОВОГО ОТВЕТА/);
+    return { claims: [{ claim: 'Стабильная версия my_pkg 24.7.0.', status: 'supported', sourceId: 'S1',
+      quote: 'The current stable version of my_pkg is 24.7.0.' }], sufficient: true, addressesQuestion: true };
+  };
+  const response = await ai.getResponse([], { text: 'Сыч, какая последняя стабильная версия my_pkg?', sender: 'Тест' });
+  assert.match(response, /24\.7\.0/);
+  assert.ok(response.includes('my\\_pkg'));
+  assert.ok(response.includes(url));
+  assert.equal(searches, 1);
+  assert.equal(reviews, 1);
+  assert.equal(calls.length, 0);
+});
+
+test('an auditor repair with its own link appendix is delivered with one source block', async () => {
+  const { ai } = harness();
+  const url = 'https://example.org/weather';
+  const result = { claims: [{ claim: 'Сейчас −1 °C' }], foundSources: [{ url, title: 'Погода' }] };
+  ai.reviewEvidence = async () => ({ approved: false, addressesQuestion: true,
+    answer: `По [погоде](${url}) сейчас −1 °C.\n\n**Источники**\n1. [Погода](${url})` });
+  const answer = await ai.finalizeResearchedAnswer('Черновик', result);
+  assert.match(answer, /^По \[погоде\]/);
+  assert.equal((answer.match(/Источники/g) || []).length, 1);
+  assert.match(answer, /<details><summary>Источники<\/summary>/);
+});
+
+test('today for a current lookup does not become a publication filter', async () => {
+  const { ai } = harness();
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'PHP RUB', topic: 'finance', timeRange: 'day' });
+  const plan = await ai.checkSearchNeeded('Сыч, сколько сегодня 15000 филиппинских песо в рублях?', '', null);
+  assert.equal(plan.output, 'lookup');
+  assert.equal(plan.timeRange, null);
+});
+
+test('a parsed conversion uses its structured provider and the strict request keeps the audit', async () => {
+  let directCalls = 0;
+  const { ai, calls } = harness({ './quick-data': { quickData: async lookup => {
+    directCalls++;
+    assert.equal(lookup.base, 'PHP');
+    assert.equal(lookup.quote, 'RUB');
+    assert.equal(lookup.amount, 15000);
+    return '15 000 PHP ≈ 19 478 ₽.';
+  } } });
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'PHP RUB',
+    lookup: { kind: 'currency', base: 'PHP', quote: 'RUB', amount: 15000 } });
+  let searches = 0;
+  ai.performSearch = async () => {
+    searches++;
+    return [{ url: 'https://example.org/countries', title: 'Fixture' }];
+  };
+  const input = { text: 'Сыч 15000 филипинских пессо это сколько сегодня в рублях?', sender: 'Тест' };
+  assert.match(await ai.getResponse([], input), /19 478 ₽/);
+  assert.equal(directCalls, 1);
+  assert.equal(searches, 0);
+  assert.equal(calls.length, 0);
+  await ai.getResponse([], input, null, undefined, '', null, false, null, '', { failOnUnavailable: true });
+  assert.equal(directCalls, 1);
+  assert.equal(searches, 1);
+  assert.equal(calls.length, 1);
+});
+
+test('a lookup declines a search result without a readable matching page', async () => {
+  const { ai, calls } = harness();
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'PHP RUB' });
+  ai.performSearch = async () => [{ url: 'https://example.org/xau-idr', content: 'Unrelated provider excerpt' }];
+  ai.extractUrl = async () => null;
+  ai.reviewEvidence = async () => assert.fail('An unread snippet cannot answer a short lookup');
+  const answer = await ai.getResponse([], { text: 'Сыч, сколько песо в рублях?', sender: 'Тест' });
+  assert.match(answer, /Подходящих данных/);
+  assert.doesNotMatch(answer, /xau-idr|Unrelated/);
+  assert.equal(calls.length, 0);
+});
+
+test('a named rate provider takes precedence over the default currency adapter', async () => {
+  const { ai } = harness({ './quick-data': { quickData: async () => assert.fail('The user specified another provider') } });
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'USD RUB CBR',
+    lookup: { kind: 'currency', base: 'USD', quote: 'RUB', amount: 1 }, preferredDomains: ['www.cbr.ru'] });
+  ai.performSearch = async (_, options) => {
+    assert.deepEqual([...options.requiredDomains], ['cbr.ru']);
+    return [{ url: 'https://example.org/rate' }, { url: 'https://www.cbr.ru/rate' }];
+  };
+  ai.extractUrl = async url => { assert.equal(url, 'https://www.cbr.ru/rate'); return 'Доллар США USD 80,00.'; };
+  ai.reviewEvidence = async () => ({ claims: [{ claim: 'Один доллар стоит 80,00 ₽.', status: 'supported',
+    sourceId: 'S2', quote: 'Доллар США USD 80,00.' }], sufficient: true, addressesQuestion: true });
+  const answer = await ai.getResponse([], { text: 'Сыч, проверь курс доллара по данным ЦБ РФ', sender: 'Тест' });
+  assert.match(answer, /\[Источник\]\(https:\/\/www\.cbr\.ru\/rate\)/);
+  assert.doesNotMatch(answer, /Frankfurter|example\.org/);
+});
+
+test('a planner cannot use a quick lookup for an explicit fact check or a comparison', async () => {
+  const { ai } = harness();
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'test', lookup: { kind: 'currency' } });
+  for (const question of ['Сыч, проверь мою теорию про Anthropic', 'Сыч, сравни тарифы двух банков', 'Сыч, почему упал курс?']) {
+    const plan = await ai.checkSearchNeeded(question, '', null);
+    assert.equal(plan.output, 'answer', question);
+  }
+});
+
+test('questions phrased without a search verb still preserve a website and a publication window', async () => {
+  const { ai } = harness();
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'quote' });
+  const website = await ai.checkSearchNeeded('Сыч, какой сейчас курс USD/RUB на xe.com?', '', null);
+  assert.deepEqual([...website.requiredDomains], ['xe.com']);
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'Node releases', timeRange: 'day' });
+  const period = await ai.checkSearchNeeded('Сыч, сколько релизов Node вышло за последнюю неделю?', '', null);
+  assert.equal(period.requiredTimeRange, 'week');
+  assert.equal(period.timeRange, 'week');
 });
 
 test('native search keeps links without attaching other sources’ evidence', async () => {

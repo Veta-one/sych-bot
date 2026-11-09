@@ -28,7 +28,7 @@ test('all unique public materials survive two rounds, bounded review packs and a
   assert.doesNotMatch(rendered, /SECRET_PROVIDER_PAYLOAD|Unverified provider snippet/);
 });
 
-test('source-only mode skips every review and stops after the first nonempty round with honest reading states', async () => {
+test('source-only mode returns found URLs without reading or reviewing search results', async () => {
   let searches = 0, reviews = 0;
   const reads = [];
   const result = await research({ question: 'Give links', plan: { searchQuery: 'links', output: 'sources' },
@@ -38,9 +38,9 @@ test('source-only mode skips every review and stops after the first nonempty rou
     review: async () => { reviews++; throw Error('must not call'); },
   });
   assert.equal(searches, 1); assert.equal(reviews, 0); assert.equal(result.reviewAttempts, 0);
-  assert.equal(reads.length, 3); assert.equal(result.foundSources.length, 4);
-  assert.equal(result.foundSources[0].level, 'page'); assert.equal(result.foundSources[0].readStatus, 'read');
-  assert.equal(result.foundSources[1].level, 'provider_report'); assert.equal(result.foundSources[1].readStatus, 'unavailable');
+  assert.equal(reads.length, 0); assert.equal(result.foundSources.length, 4);
+  assert.equal(result.foundSources[0].level, 'snippet'); assert.equal(result.foundSources[0].readStatus, 'unread');
+  assert.equal(result.foundSources[1].level, 'provider_report'); assert.equal(result.foundSources[1].readStatus, 'unread');
   assert.equal(result.foundSources[3].readStatus, 'unread');
   assert.equal(result.claims.length, 0); assert.equal(result.verificationFailed, false);
 });
@@ -56,8 +56,8 @@ test('empty source-only round retries once while strict platform and explicitly 
   assert.equal(searches.length, 2);
   assert.ok(searches.every(options => options.timeRange === 'week'));
   assert.ok(searches.every(options => options.requiredDomains.includes('platform.example.org')));
-  assert.equal(reads.length, 2); assert.equal(result.foundSources.length, 2);
-  assert.ok(reads.every(url => !url.includes('attacker')));
+  assert.equal(reads.length, 0); assert.equal(result.foundSources.length, 2);
+  assert.ok(result.foundSources.every(source => !source.url.includes('attacker')));
 });
 
 test('a null required period preserves the initial soft date filter and clears it on follow-up', async () => {

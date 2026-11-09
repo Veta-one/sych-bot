@@ -73,6 +73,7 @@ module.exports = {
   // Если в .env не задано, по умолчанию используем 'tavily'
   searchProvider: process.env.SEARCH_PROVIDER || 'tavily',  
   researchReviewProvider,
+  quickWeatherNoncommercial: process.env.QUICK_WEATHER_NONCOMMERCIAL === 'true',
   
   // Настройки провайдеров
   tavilyKey: process.env.TAVILY_API_KEY,

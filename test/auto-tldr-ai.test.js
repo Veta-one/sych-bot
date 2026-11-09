@@ -36,6 +36,7 @@ function harness({ primary = [], native = [], api = true, nativeAvailable = fals
       : { response: { text: () => raw, candidates: [{ finishReason: step.incomplete ? 'MAX_TOKENS' : 'STOP' }] } };
   };
   const dependencies = {
+    './quick-data': { quickData: async () => '' }, '../utils/research-sources': require('../src/utils/research-sources'),
     '@google/generative-ai': {}, '../config': config, '../core/prompts': promptsModule.exports,
     axios: {}, openai: {}, '@tavily/core': {},
     './storage': {
