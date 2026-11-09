@@ -405,7 +405,30 @@ test('a lookup declines a search result without a readable matching page', async
   assert.equal(calls.length, 0);
 });
 
-test('a short weather lookup tries just one fresh result when the first pair has no dated value', async () => {
+test('a short lookup retains a current source value without inventing its observation time', async () => {
+  const { ai, calls } = harness();
+  const url = 'https://example.org/current-weather';
+  const quote = 'Екатеринбург, погода сейчас: 0°, пасмурно, ощущается как −5°.';
+  const navigation = 'Погода Екатеринбург сейчас. Другие города, меню и настройки.\n'.repeat(21);
+  const forecast = '\nНедельный прогноз и другие данные. '.repeat(135);
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'Погода Екатеринбург сейчас' });
+  ai.performSearch = async () => [{ url, title: 'Погода в Екатеринбурге' }];
+  ai.extractUrl = async () => navigation + quote + forecast;
+  ai.reviewEvidence = async prompt => {
+    const [source] = JSON.parse(prompt.split('ИСТОЧНИКИ: ')[1]);
+    if (!source.pageText.includes(quote) || !prompt.includes('точного времени обновления')) {
+      return { claims: [], sufficient: false, addressesQuestion: true };
+    }
+    return { claims: [{ claim: 'По данным страницы, в Екатеринбурге около 0 °C и пасмурно, ощущается как −5 °C.',
+      status: 'supported', sourceId: 'S1', quote }], sufficient: true, addressesQuestion: true };
+  };
+  const answer = await ai.getResponse([], { text: 'Сыч, какая погода в екатерибурге?', sender: 'Тест' });
+  assert.match(answer, /около 0 °C и пасмурно, ощущается как −5 °C/);
+  assert.ok(answer.includes(url));
+  assert.equal(calls.length, 0);
+});
+
+test('a short weather lookup reviews the first pair again alongside one fresh result', async () => {
   const { ai, calls } = harness();
   const urls = Array.from({ length: 4 }, (_, index) => `https://example.org/weather-${index}`);
   const observation = 'Екатеринбург, 9 ноября 2026, 16:15: −4 °C.';
@@ -427,7 +450,7 @@ test('a short weather lookup tries just one fresh result when the first pair has
   assert.match(answer, /16:15 было −4 °C/);
   assert.ok(answer.includes(urls[2]));
   assert.deepEqual(reads, urls.slice(0, 3));
-  assert.deepEqual(packs.map(pack => pack.map(row => row.url)), [urls.slice(0, 2), [urls[2]]]);
+  assert.deepEqual(packs.map(pack => pack.map(row => row.url)), [urls.slice(0, 2), urls.slice(0, 3)]);
   assert.equal(searches, 1);
   assert.equal(calls.length, 0);
 });
