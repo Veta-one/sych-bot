@@ -45,9 +45,9 @@ function harness() {
       ? state.tldrResponder(text) : 'Автор объясняет устройство нового инструмента. Оригинал полезен тем, кто планирует его подключать.'; },
     transcribeAudio: async () => state.transcriptionResponder ? state.transcriptionResponder() : ({ text: state.transcript }),
     summarizeVoiceTranscript: async text => { state.summaries.push(text); return 'Краткий текст'; },
-    getResponse: async (history, input, media, mimeType, instruction, profile, spontaneous, chatProfile, externalContext) => {
+    getResponse: async (history, input, media, mimeType, instruction, profile, spontaneous, chatProfile, externalContext, policy) => {
       state.answers.push({ input, history: [...history], media, mimeType, externalContext });
-      return state.answerResponder ? state.answerResponder() : '4';
+      return state.answerResponder ? state.answerResponder(policy) : '4';
     },
     analyzeUserImmediate: async input => { state.immediate.push(input); return null; },
     analyzeBatch: async () => ({}), analyzeChatProfile: async () => ({}),
@@ -98,6 +98,17 @@ function harness() {
     await box.exports.processMessage(bot, msg); return msg;
   } };
 }
+
+test('group delivery does not cut off the last link in a long collected source list', async () => {
+  const { state, message } = harness();
+  const { renderFoundSources } = require('../src/services/research');
+  const foundSources = Array.from({ length: 24 }, (_, index) => ({ title: `Source ${index}`, url: `https://example.org/${index}?q=${'a'.repeat(1500)}` }));
+  const list = renderFoundSources({ foundSources });
+  assert.ok(list.length > 30000);
+  state.answerResponder = policy => { policy.onFoundSources(); return list; };
+  await message({ text: 'Сыч, покажи ссылки' });
+  assert.ok(state.sent.at(-1).content.markdown.includes(foundSources.at(-1).url));
+});
 
 test('observer detaches twenty messages once and retains message22 for the next nonoverlapping batch', async () => {
   const { message, ai, storage } = harness();

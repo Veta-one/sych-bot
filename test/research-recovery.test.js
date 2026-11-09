@@ -87,6 +87,10 @@ function harness({ latest = empty, recovery = recovered, first = partial, audit 
   return { ai, state };
 }
 
+function answerBeforeMaterials(answer) {
+  return answer.split(/\n\n(?:> )?Найденные материалы:/)[0];
+}
+
 for (const [name, latest] of [
   ['an empty later review', empty],
   ['a later wrong-subject review', { ...empty, claims: [initialClaim], addressesQuestion: false }],
@@ -103,7 +107,8 @@ for (const [name, latest] of [
     assert.equal(state.writers.length, 1);
     assert.equal(state.audits.length, 1);
     assert.match(answer, /RECOVERY_FINAL_RESPONSE/);
-    assert.doesNotMatch(answer, /unrelated-translator/);
+    assert.doesNotMatch(answerBeforeMaterials(answer), /unrelated-translator/);
+    assert.match(answer, /Найденные материалы:[\s\S]*unrelated-translator/);
     assert.equal(state.result.claims.length, 1, 'Recovery replaces the assessment rather than merging stale claims');
     assert.equal(state.result.claims[0].claim, recoveredClaim.claim);
     assert.equal(state.result.claims[0].url, supplied[1]);
@@ -131,7 +136,8 @@ for (const [name, recovery] of [
     assert.equal(state.result.claims.length, 0);
     assert.equal(state.writers.length, 0);
     assert.equal(state.audits.length, 0);
-    assert.doesNotMatch(answer, /RECOVERY_FINAL_RESPONSE|A local memory service is available|unrelated-translator/);
+    assert.doesNotMatch(answer, /RECOVERY_FINAL_RESPONSE|A local memory service is available/);
+    assert.doesNotMatch(answerBeforeMaterials(answer), /unrelated-translator/);
     for (const url of supplied) assert.ok(answer.includes(url));
   });
 }
@@ -154,7 +160,8 @@ test('a technical evidence failure after its retry is never rescued as an ordina
   assert.equal(state.result.verificationFailed, true);
   assert.equal(state.recovery.length, 0);
   assert.equal(state.writers.length, 0);
-  assert.doesNotMatch(answer, /PRIVATE_PROVIDER_ERROR|unrelated-translator/);
+  assert.doesNotMatch(answer, /PRIVATE_PROVIDER_ERROR/);
+  assert.doesNotMatch(answerBeforeMaterials(answer), /unrelated-translator/);
 });
 
 test('a recovery exception has no retry or stale claim fallback', async () => {
@@ -163,7 +170,8 @@ test('a recovery exception has no retry or stale claim fallback', async () => {
   assert.equal(state.recovery.length, 1);
   assert.equal(state.result.claims.length, 0);
   assert.equal(state.writers.length, 0);
-  assert.doesNotMatch(answer, /PRIVATE_RECOVERY_EXCEPTION|A local memory service is available|unrelated-translator/);
+  assert.doesNotMatch(answer, /PRIVATE_RECOVERY_EXCEPTION|A local memory service is available/);
+  assert.doesNotMatch(answerBeforeMaterials(answer), /unrelated-translator/);
 });
 
 test('recovery preserves unread-source coverage, partial pages and unknown integration gaps', async () => {
@@ -181,7 +189,8 @@ test('recovery preserves unread-source coverage, partial pages and unknown integ
   assert.ok(state.result.sources.some(source => source.supplied && source.truncated));
   assert.ok(state.result.gaps.some(gap => /прочитать|OpenClaw/.test(gap)));
   assert.ok(answer.includes(supplied[1]));
-  assert.doesNotMatch(answer, /unrelated-translator|404|не существует/);
+  assert.doesNotMatch(answer, /404|не существует/);
+  assert.doesNotMatch(answerBeforeMaterials(answer), /unrelated-translator/);
 });
 
 test('a freshly revalidated partial answer still discloses the unread original model page', async () => {
@@ -199,7 +208,7 @@ test('a freshly revalidated partial answer still discloses the unread original m
   assert.equal(state.audits.length, 1);
   assert.ok(answer.includes(supplied[1]));
   assert.match(answer, /Не удалось прочитать/);
-  assert.doesNotMatch(answer, /unrelated-translator/);
+  assert.doesNotMatch(answerBeforeMaterials(answer), /unrelated-translator/);
 });
 
 test('failed final auditing after recovery never releases the recovered writer draft', async () => {
@@ -208,7 +217,8 @@ test('failed final auditing after recovery never releases the recovered writer d
   assert.equal(state.recovery.length, 1);
   assert.equal(state.writers.length, 1);
   assert.equal(state.audits.length, 2, 'The fixed short candidate receives one independent audit after the full audit fails');
-  assert.doesNotMatch(answer, /RECOVERY_FINAL_RESPONSE|unrelated-translator/);
+  assert.doesNotMatch(answer, /RECOVERY_FINAL_RESPONSE/);
+  assert.doesNotMatch(answerBeforeMaterials(answer), /unrelated-translator/);
   assert.ok(answer.includes(supplied[0]));
 });
 

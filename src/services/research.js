@@ -27,6 +27,62 @@ function publicUrl(value) {
   } catch { return null; }
 }
 
+function markdownUrl(value) {
+  const url = publicUrl(value);
+  return url && url.replace(/[()[\]\\<>"'`\s]/g, character => `%${character.charCodeAt(0).toString(16).toUpperCase()}`);
+}
+
+function sourceTitle(value) {
+  return [...String(value || '').replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g, ' ')
+    .replace(/\s+/g, ' ').trim()].slice(0, 180).join('');
+}
+
+function markdownLabel(value) {
+  return sourceTitle(value).replace(/[&<>\\`*_[\]{}()#+.!|~\-]/g, character =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[character] || `\\${character}`);
+}
+
+function sourceMetadata(source) {
+  return { id: source.id, url: source.url, title: sourceTitle(source.title), level: source.level,
+    readStatus: source.readStatus || (source.level === 'page' ? 'read' : 'unread'),
+    ...(source.supplied ? { supplied: true } : {}), ...(source.truncated ? { truncated: true } : {}) };
+}
+
+// A source list reports collection and reading, not model approval. Bodies,
+// rejected claims and provider descriptions never enter this deterministic UI.
+function renderFoundSources(result, { collapsed = false } = {}) {
+  const unique = new Map();
+  for (const source of Array.isArray(result?.foundSources) ? result.foundSources : []) {
+    const url = publicUrl(source?.url);
+    if (url && !unique.has(url)) unique.set(url, source);
+  }
+  if (!unique.size) return '';
+  const lines = [`Найденные материалы: ${unique.size}. Названия и ссылки не означают подтверждения выводов.`, ''];
+  for (const [url, source] of unique) {
+    const status = source.readStatus;
+    const label = status === 'out_of_scope' ? 'исходная ссылка вне указанной площадки, не использована'
+      : source.level === 'page' && status === 'read' ? `текст страницы прочитан${source.truncated ? ' частично' : ''}`
+        : source.level === 'provider_report' ? 'сообщение поискового провайдера, страница не прочитана'
+          : status === 'unavailable' ? 'текст страницы получить не удалось'
+            : status === 'limit' ? 'не прочитано: лимит чтения исходных ссылок'
+              : 'поисковая выдержка, страница не прочитана';
+    lines.push(`${lines.length - 1}. [${markdownLabel(source.title) || 'Без названия'}](${markdownUrl(url)}) — ${label}.`);
+  }
+  const text = lines.join('\n');
+  // Long lists need entity-based legacy delivery: splitting raw Markdown can
+  // cut a destination in half. Quote fallback retains complete text_link URLs.
+  return collapsed || text.length > 3500 ? lines.map(line => `> ${line}`).join('\n') : text;
+}
+
+function requiredDomainList(value) {
+  return [...new Set((Array.isArray(value) ? value : []).flatMap(domain => {
+    if (typeof domain !== 'string') return [];
+    const normalized = domain.trim().toLowerCase();
+    const url = publicUrl(`https://${normalized}/`);
+    return url && new URL(url).hostname === normalized ? [normalized] : [];
+  }))];
+}
+
 function requestedUrls(message) {
   const urls = new Set();
   const add = value => { const url = publicUrl(value); if (url) urls.add(url); };
@@ -46,8 +102,10 @@ function requestedUrls(message) {
 function sourceCoverageNote(result) {
   const missing = (result.requestedSources || []).filter(source => source.status !== 'read');
   if (!missing.length && !result.omittedSourceCount) return '';
-  const links = missing.slice(0, 8).map((source, index) => `[${index + 1}](${source.url.replace(/[()]/g,
-    character => character === '(' ? '%28' : '%29')})`).join(', ');
+  const links = missing.slice(0, 8).flatMap((source, index) => {
+    const url = markdownUrl(source.url);
+    return url ? [`[${index + 1}](${url})`] : [];
+  }).join(', ');
   const extra = Math.max(0, missing.length - 8) + (result.omittedSourceCount || 0);
   const limit = missing.some(source => source.status === 'limit')
     ? ` За один запрос читаю до ${SUPPLIED_URL_READ_LIMIT} уникальных ссылок; остальные остались за пределом этого прохода.` : '';
@@ -168,7 +226,7 @@ function boundedSources(sources, query) {
 
 function normalizeSources(results, offset = 0) {
   const seen = new Set();
-  return (Array.isArray(results) ? results : []).slice(0, 8).flatMap(row => {
+  return (Array.isArray(results) ? results : []).flatMap(row => {
     if (!row || typeof row !== 'object') return [];
     const url = publicUrl(row.url);
     if (!url || seen.has(url)) return [];
@@ -177,6 +235,7 @@ function normalizeSources(results, offset = 0) {
       snippet: String(row.content || ''), publishedAt: clean(row.publishedDate).slice(0, 80) || null,
       imageUrls: (Array.isArray(row.imageUrls) ? row.imageUrls : []).map(publicUrl).filter(Boolean).slice(0, 4),
       level: row.level === 'provider_report' ? 'provider_report' : 'snippet',
+      readStatus: 'unread',
     }];
   });
 }
@@ -195,8 +254,10 @@ function citedProviderSources(answer, citations) {
       if (url) segments.set(url, [...(segments.get(url) || []), segment]);
     }
   }
-  return [...segments].map(([url, parts]) => ({ url, title: 'Сообщение поискового провайдера',
-    content: parts.join('\n'), level: 'provider_report' }));
+  // A listed URL is still a collected material even if the generated report
+  // cites no segment for it. Empty content cannot pass quotation validation.
+  return [...new Set(citations.map(publicUrl).filter(Boolean))].map(url => ({ url, title: 'Сообщение поискового провайдера',
+    content: (segments.get(url) || []).join('\n'), level: 'provider_report' }));
 }
 
 function renderedQuoteText(value) {
@@ -263,6 +324,7 @@ function reviewPrompt(question, sources, requestedSources = []) {
 Сначала установи предмет исходного поста. Название похожего проекта или другая модель того же разработчика не заменяют этот предмет. addressesQuestion проверяет совпадение предмета, а не полноту: true для полезных частичных выводов о нужном объекте, false для выводов о другом объекте. Непроверенные детали вынеси в gaps, не отбрасывай из-за них подтверждённую часть.
 Переданные пользователем URL имеют приоритет перед поисковой выдачей. Проверь каждый прочитанный исходный URL; объясни недоступные части. Не объявляй проект несуществующим по выдаче о другом проекте. Ошибка извлечения текста не доказывает HTTP 404, отсутствие репозитория или ложность поста.
 Для правил компании предпочитай её документацию; для спорных новостей отличай заявление стороны от независимо установленного события.
+При сравнении используй критерии из вопроса. Разделяй мнение автора, результаты отдельных испытаний и общий вывод; сохраняй известные даты и область применимости. Несколько найденных публикаций не доказывают глобальное превосходство или мнение всех пользователей. Недостающие критерии и ограниченное покрытие укажи в gaps, не назначай победителя без оснований.
 Ссылка должна подтверждать именно вывод: нельзя путать страну доступа, продукт, тариф, тип аккаунта и конкретную карту; нельзя распространять один случай на другие страны/всех людей.
 Составь до 8 атомарных выводов: supported прямо подтверждается прочитанной страницей; reported только сообщается источником; contradicted означает, что источник прямо опровергает утверждение пользователя/старого ответа. Поле claim всегда содержит итоговый обоснованный вывод, при contradicted ИСПРАВЛЕННЫЙ факт, а не повтор ложного утверждения.
 На каждый вывод дай sourceId и ДОСЛОВНУЮ непрерывную цитату из pageText или snippet. Текст после отображения Markdown тоже должен совпадать дословно: различие разметки допустимо, пропущенные слова и пересказ нет. Не исправляй и не переводи цитату. Не выдумывай URL.
@@ -294,15 +356,31 @@ function stageError(stage, error) {
 
 // Dependency injection keeps provider failures, deadlines and evidence validation testable.
 async function research({ question, plan, search, read, review, suppliedUrls = [], budgetMs = RESEARCH_TIMEOUT_MS }) {
+  const sourcesOnly = plan.output === 'sources';
+  const strictDomains = Array.isArray(plan.requiredDomains) && plan.requiredDomains.length > 0;
+  const requiredDomains = requiredDomainList(plan.requiredDomains);
+  const inScope = url => !strictDomains || requiredDomains.some(domain => {
+    const hostname = new URL(url).hostname;
+    return hostname === domain || hostname.endsWith(`.${domain}`);
+  });
+  const requiredTimeRange = ['day', 'week', 'month', 'year'].includes(plan.requiredTimeRange);
+  const constrain = options => ({ ...options,
+    ...(strictDomains ? { requiredDomains, preferredDomains: requiredDomains } : {}),
+    ...(requiredTimeRange ? { timeRange: plan.requiredTimeRange, requiredTimeRange: plan.requiredTimeRange } : {}) });
   question = boundedQuestion(question);
   const budget = Math.max(1, Math.min(RESEARCH_TIMEOUT_MS, Number(budgetMs) || RESEARCH_TIMEOUT_MS));
   const deadline = Date.now() + budget;
   const recoveryReserveMs = Math.min(RECOVERY_TIMEOUT_MS, Math.floor(budget / 4));
   const sources = [];
+  const found = new Map();
   const uniqueSuppliedUrls = [...new Set(suppliedUrls.map(publicUrl).filter(Boolean))];
   const omittedSourceCount = Math.max(0, uniqueSuppliedUrls.length - 32);
   const requestedSources = uniqueSuppliedUrls.slice(0, 32).map((url, index) => ({
-    url, sourceId: `S${index + 1}`, status: index < SUPPLIED_URL_READ_LIMIT ? 'pending' : 'limit',
+    url, sourceId: `S${index + 1}`, status: !inScope(url) ? 'out_of_scope' : index < SUPPLIED_URL_READ_LIMIT ? 'pending' : 'limit',
+  }));
+  for (const [index, url] of uniqueSuppliedUrls.entries()) found.set(url, sourceMetadata({
+    id: `S${index + 1}`, url, title: 'Исходная ссылка пользователя', level: 'snippet', supplied: true,
+    readStatus: !inScope(url) ? 'out_of_scope' : index < SUPPLIED_URL_READ_LIMIT ? 'unread' : 'limit',
   }));
   const errors = [];
   const reviewStats = [];
@@ -316,7 +394,7 @@ async function research({ question, plan, search, read, review, suppliedUrls = [
   const candidates = [];
   let recoveryAttempted = false;
   const hasSuppliedPages = () => sources.some(source => source.supplied && source.level === 'page');
-  const normalDeadline = () => hasSuppliedPages() ? deadline - recoveryReserveMs : deadline;
+  const normalDeadline = () => !sourcesOnly && hasSuppliedPages() ? deadline - recoveryReserveMs : deadline;
   const bounded = (fn, ms, label, until = deadline, planningLimit = false) => {
     const left = until - Date.now();
     if (left <= 0) throw Object.assign(new Error('research deadline'), { code: planningLimit ? 'RESEARCH_PLANNING_LIMIT' : 'RESEARCH_DEADLINE' });
@@ -392,9 +470,9 @@ async function research({ question, plan, search, read, review, suppliedUrls = [
     return false;
   };
   // Exact user URLs are read before search and cannot be replaced by its ranking.
-  const supplied = requestedSources.slice(0, SUPPLIED_URL_READ_LIMIT);
+  const supplied = requestedSources.slice(0, SUPPLIED_URL_READ_LIMIT).filter(entry => entry.status === 'pending');
   for (const entry of supplied) sources.push({ id: entry.sourceId, url: entry.url,
-    title: 'Исходная ссылка пользователя', snippet: '', level: 'snippet', supplied: true });
+    title: 'Исходная ссылка пользователя', snippet: '', level: 'snippet', supplied: true, readStatus: 'unread' });
   const readSupplied = async entry => {
     const source = sources.find(item => item.id === entry.sourceId);
     try {
@@ -405,11 +483,13 @@ async function research({ question, plan, search, read, review, suppliedUrls = [
         entry.status = 'read';
       } else entry.status = 'unavailable';
     } catch (error) { entry.status = 'unavailable'; errors.push(stageError('read', error)); }
+    source.readStatus = entry.status;
+    found.set(source.url, sourceMetadata(source));
   };
   for (let offset = 0; offset < supplied.length; offset += 4) {
     await Promise.all(supplied.slice(offset, offset + 4).map(readSupplied));
   }
-  if (sources.some(source => source.level === 'page')) {
+  if (!sourcesOnly && sources.some(source => source.level === 'page')) {
     needsFreshReview = true;
     await checkSources(plan.searchQuery || relevance);
   }
@@ -422,30 +502,43 @@ async function research({ question, plan, search, read, review, suppliedUrls = [
       // Keep known primary domains on a targeted follow-up, but clear stale date
       // filters. Broaden domains if the initial domain yielded no usable sources.
       const followUpOptions = sources.length ? { preferredDomains: plan.preferredDomains, includeImages: plan.includeImages } : {};
-      const results = await bounded(() => search(query, round ? followUpOptions : plan), 42000, 'Поиск источников', normalDeadline(), hasSuppliedPages());
-      const lastSourceId = Math.max(requestedSources.length, ...sources.map(source => Number(source.id.slice(1))), 0);
+      const results = await bounded(() => search(query, constrain(round ? followUpOptions : plan)), 42000, 'Поиск источников', normalDeadline(), !sourcesOnly && hasSuppliedPages());
+      const lastSourceId = Math.max(uniqueSuppliedUrls.length, ...sources.map(source => Number(source.id.slice(1))), 0);
       incoming = normalizeSources(results, lastSourceId)
-        .filter(s => !sources.some(old => old.url === s.url));
+        .filter(s => inScope(s.url) && !found.has(s.url));
+      // Keep every accepted result even when the review source pack is smaller.
+      // Record before reading so a deadline never erases discovered links.
+      for (const source of incoming) found.set(source.url, sourceMetadata(source));
       // Rank reads by suggested domains, but don't mistake this hint for evidence of authority.
-      const domains = Array.isArray(plan.preferredDomains) ? plan.preferredDomains : [];
+      const domains = strictDomains ? requiredDomains : Array.isArray(plan.preferredDomains) ? plan.preferredDomains : [];
       const rank = s => domains.some(d => typeof d === 'string' &&
         (new URL(s.url).hostname === d || new URL(s.url).hostname.endsWith(`.${d}`))) ? 0 : 1;
       incoming.sort((a, b) => rank(a) - rank(b));
       const toRead = incoming.slice(0, round ? 2 : 3);
       await Promise.all(toRead.map(async source => {
         try {
-          const page = await bounded(() => read(source.url), 12000, 'Чтение источника', normalDeadline(), hasSuppliedPages());
+          const page = await bounded(() => read(source.url), 12000, 'Чтение источника', normalDeadline(), !sourcesOnly && hasSuppliedPages());
           if (typeof page === 'string' && page.trim()) {
             const excerpt = pageExcerpt(page, `${relevance}\n${query}`, PAGE_MAX_CHARS);
             source.pageText = excerpt.text; source.truncated = excerpt.truncated; source.level = 'page';
-          }
-        } catch (error) { if (error.code !== 'RESEARCH_PLANNING_LIMIT') errors.push(stageError('read', error)); }
+            source.readStatus = 'read';
+          } else source.readStatus = 'unavailable';
+        } catch (error) {
+          source.readStatus = 'unavailable';
+          if (error.code !== 'RESEARCH_PLANNING_LIMIT') errors.push(stageError('read', error));
+        }
+        found.set(source.url, sourceMetadata(source));
       }));
       sources.push(...incoming);
-      if (incoming.length) needsFreshReview = true;
+      if (incoming.length && !sourcesOnly) needsFreshReview = true;
     } catch (error) {
       if (error.code === 'RESEARCH_PLANNING_LIMIT') needsFreshReview = hasSuppliedPages();
       else { errors.push(stageError('search', error)); verificationFailed = true; }
+    }
+    if (sourcesOnly) {
+      if (incoming?.length) break;
+      query = `${query} primary source official`;
+      continue;
     }
     // Empty/deduplicated search results add no evidence. Re-running the same
     // broad check can erase a useful partial answer and wastes its deadline.
@@ -459,7 +552,7 @@ async function research({ question, plan, search, read, review, suppliedUrls = [
   // Candidates are only hints; the new pass must validate every quote again.
   const rejectedPartial = !assessment.sufficient && assessment.diagnostics?.proposedClaims > assessment.claims.length
     && !assessment.claims.some(claim => claim.status === 'contradicted');
-  if ((!assessment.claims.length || needsFreshReview || rejectedPartial) && !lastReviewFailed && hasSuppliedPages() && Date.now() < deadline) {
+  if (!sourcesOnly && (!assessment.claims.length || needsFreshReview || rejectedPartial) && !lastReviewFailed && hasSuppliedPages() && Date.now() < deadline) {
     recoveryAttempted = true;
     await checkSources(relevance, 'recovery');
   }
@@ -477,7 +570,7 @@ async function research({ question, plan, search, read, review, suppliedUrls = [
     assessment.gaps.push(`Не удалось прочитать ${missing.length + omittedSourceCount} из ${uniqueSuppliedUrls.length} исходных ссылок. Причина не доказывает отсутствие страницы или проекта.`);
   }
   return { ...assessment, question, checkedAt: new Date().toISOString(),
-    requestedSources, omittedSourceCount,
+    requestedSources, omittedSourceCount, foundSources: [...found.values()], output: sourcesOnly ? 'sources' : 'analysis',
     sources: reviewedSources.length ? reviewedSources : boundedSources(sources, relevance),
     errors: [...new Map(errors.map(error => [`${error.stage}:${error.code}`, error])).values()],
     verificationFailed, recoveryAttempted, reviewAttempts, reviewStats,
@@ -557,8 +650,8 @@ JSON: {"approved":true,"addressesQuestion":true,"issues":[],"answer":""}`;
 
 function conservativeAnswer(result) {
   // A literal quote check alone doesn't prove that the model interpreted it
-  // correctly. Never publish intermediate claims or titles on a failed audit.
-  const technical = result.verificationFailed || result.claims?.length;
+  // correctly. Never publish intermediate claims or a draft on a failed audit.
+  const technical = result.verificationFailed;
   const supplied = Array.isArray(result.requestedSources) && result.requestedSources.length > 0;
   const seen = new Set();
   // A failed verification cannot endorse arbitrary search results as reading
@@ -586,9 +679,11 @@ function conservativeAnswer(result) {
         : supplied
           ? 'Исходные страницы прочитаны, но проверка не выделила подтверждённых выводов по вопросу. Подробный отчёт сейчас дать не могу.'
           : 'Подтвердить выводы по найденным материалам не удалось.';
-  return explanation + (links.length ? `\n\n${supplied ? 'Исходные ссылки' : 'Материалы для чтения, без подтверждённых выводов'}: ${links.join(', ')}.` : '') + sourceCoverageNote(result);
+  const foundList = Array.isArray(result.foundSources) ? renderFoundSources(result) : null;
+  return explanation + (foundList !== null ? (foundList ? `\n\n${foundList}` : '')
+    : links.length ? `\n\n${supplied ? 'Исходные ссылки' : 'Материалы для чтения, без подтверждённых выводов'}: ${links.join(', ')}.` : '') + sourceCoverageNote(result);
 }
 
 module.exports = { publicUrl, requestedUrls, sourceCoverageNote, pageExcerpt, normalizeSources, validateReview, reviewPrompt, research, evidenceContext,
-  answerAuditPrompt, shortResearchAnswer, conservativeAnswer, citedProviderSources, boundedSources, boundedQuestion,
+  answerAuditPrompt, shortResearchAnswer, conservativeAnswer, renderFoundSources, citedProviderSources, boundedSources, boundedQuestion,
   REVIEW_TIMEOUT_MS, RESEARCH_TIMEOUT_MS, SOURCE_TEXT_MAX_CHARS, PAGE_MAX_CHARS, SNIPPET_MAX_CHARS, QUESTION_MAX_CHARS };

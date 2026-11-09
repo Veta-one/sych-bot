@@ -197,6 +197,78 @@ test('planner failure still searches an explicit request and labels other curren
   assert.match(calls[0].messages[1].content[0].text, /подтвердить не удалось/);
 });
 
+test('an explicit GitHub request survives planner failure while a local code request stays local', async () => {
+  const { ai } = harness();
+  ai.runLogicModel = async () => { throw new Error('planner timeout'); };
+  const web = await ai.checkSearchNeeded('Сыч, найди Поки на гите под php2shell', '', null);
+  assert.equal(web.needsSearch, true);
+  assert.deepEqual([...web.requiredDomains], ['github.com']);
+  const local = await ai.checkSearchNeeded('Сыч, найди ошибку в этом коде', '', null);
+  assert.equal(local.needsSearch, false);
+});
+
+test('a link-only request returns the entire collected list without invoking reviewer or writer', async () => {
+  const { ai, calls } = harness();
+  const urls = Array.from({ length: 5 }, (_, index) => `https://github.com/demo/fixture-${index}`);
+  ai.runLogicModel = async () => null;
+  ai.performSearch = async () => urls.map(url => ({ url, title: 'Fixture', content: 'Search snippet' }));
+  ai.reviewEvidence = async () => assert.fail('A list of collected links requires no claims');
+  const answer = await ai.getResponse([], { text: 'Сыч, найди ссылки на GitHub про тестовые проекты', sender: 'Тест' });
+  for (const url of urls) assert.ok(answer.includes(url));
+  assert.equal(calls.length, 0);
+});
+
+test('invalid evidence keeps all links visible and preserves strict publication and billing failure', async () => {
+  const { ai, calls } = harness();
+  const urls = Array.from({ length: 5 }, (_, index) => `https://example.org/result-${index}`);
+  ai.performSearch = async () => urls.map(url => ({ url, title: 'Fixture' }));
+  ai.reviewEvidence = async () => { throw Object.assign(new Error('Invalid JSON'), { code: 'EVIDENCE_REVIEW_INVALID' }); };
+  const request = { text: 'Сыч, сравни варианты', sender: 'Тест' };
+  const answer = await ai.getResponse([], request);
+  assert.match(answer, /Проверку источников завершить не удалось/);
+  for (const url of urls) assert.ok(answer.includes(url));
+  assert.equal(calls.length, 0);
+  await assert.rejects(ai.getResponse([], request, null, undefined, '', null, false, null, '', { failOnUnavailable: true }),
+    /PUBLIC_RESPONSE_UNAVAILABLE/);
+});
+
+test('explicit links plus a recommendation keep Reddit and the requested period in the analysis plan', async () => {
+  const { ai } = harness();
+  ai.runLogicModel = async () => ({ needsSearch: false, output: 'sources', searchQuery: 'tool recommendations',
+    timeRange: 'month', preferredDomains: ['example.org'] });
+  const plan = await ai.checkSearchNeeded('Сыч, найди ссылки на Reddit за последнюю неделю и выбери лучшую программу', '', null);
+  assert.equal(plan.needsSearch, true);
+  assert.equal(plan.output, 'answer');
+  assert.deepEqual([...plan.preferredDomains], ['reddit.com']);
+  assert.equal(plan.timeRange, 'week');
+});
+
+test('a required period never falls back to an unfiltered search', async () => {
+  const { ai, config } = harness();
+  ai.searchViaNative = async () => assert.fail('This route cannot enforce the requested period');
+  const search = Object.getPrototypeOf(ai).performSearch.bind(ai);
+  ai.tavilyClient = { search: async (_, opts) => { assert.equal(opts.timeRange, 'week'); return { results: [] }; } };
+  assert.equal((await search('tool recommendations', { requiredTimeRange: 'week' })).length, 0);
+  ai.tavilyClient.search = async () => { throw new Error('synthetic outage'); };
+  await assert.rejects(search('tool recommendations', { requiredTimeRange: 'week' }), /SEARCH_PERIOD_UNAVAILABLE/);
+  config.searchProvider = 'perplexity';
+  await assert.rejects(search('tool recommendations', { requiredTimeRange: 'week' }), /SEARCH_PERIOD_UNAVAILABLE/);
+});
+
+test('native search keeps links without attaching other sources’ evidence', async () => {
+  const { ai } = harness();
+  ai.keys = ['synthetic'];
+  ai.executeNativeWithRetry = async work => work();
+  ai.nativeModel = { generateContent: async () => ({ response: { candidates: [{ groundingMetadata: {
+    groundingChunks: [{ web: { uri: 'https://example.org/first' } }, { web: { uri: 'https://example.org/second' } }],
+    groundingSupports: [{ groundingChunkIndices: [0], segment: { text: 'First source statement.' } }],
+  } }] } }) };
+  const results = await ai.searchViaNative('synthetic fixture');
+  assert.deepEqual(Array.from(results, row => [row.url, row.content]), [
+    ['https://example.org/first', 'First source statement.'], ['https://example.org/second', ''],
+  ]);
+});
+
 test('banter skips research and keeps original personality and generation temperature', async () => {
   const { ai, calls } = harness();
   ai.runLogicModel = async () => ({ needsSearch: false });
@@ -218,7 +290,8 @@ test('writer fallback preserves gathered evidence and disables a new unreviewed 
     return { response: { text: () => 'Native answer [Источник](https://example.org/countries)', candidates: [{}] } };
   } };
   const answer = await ai.getResponse([], { text: 'Сыч, антропики продают подписки казахам?', sender: 'Тест' });
-  assert.equal(answer, 'Native answer [Источник](https://example.org/countries)');
+  assert.equal(answer.split('\n\n> ')[0], 'Native answer [Источник](https://example.org/countries)');
+  assert.match(answer, /Найденные материалы: 1/);
   assert.equal(nativeRequest.tools.length, 0);
   assert.match(nativeRequest.contents[0].parts[0].text, /Kazakhstan supported/);
   assert.match(nativeRequest.contents[0].parts[0].text, /No guarantee for a card/);
@@ -357,7 +430,8 @@ test('a slow primary reviewer leaves time for native evidence and final-answer a
     }) } });
   } };
   const answer = await drive(ai.getResponse([], { text: 'Сыч, проверь актуальную информацию', sender: 'Тест' }));
-  assert.equal(answer, 'Проверенный ответ [Источник](https://example.org/countries)');
+  assert.equal(answer.split('\n\n> ')[0], 'Проверенный ответ [Источник](https://example.org/countries)');
+  assert.match(answer, /Найденные материалы: 1/);
   assert.equal(events.filter(e => e.provider === 'native').length, 2);
   assert.ok(events.every(e => e.signal instanceof AbortSignal));
   assert.ok(events.filter(e => e.provider === 'native').every(e => e.timeout >= 15000));

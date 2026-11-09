@@ -2,6 +2,15 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { collapseHtmlQuotes, collapseMarkdownQuotes, quoteFallback } = require('../src/utils/quotes');
 
+test('legacy expandable source list preserves clickable links and UTF-16 offsets', () => {
+  const [chunk] = quoteFallback({ markdown: '📖 Результат\n\n> [Источник](https://example.org/article)\n> [Другая страница](https://example.org/other)' });
+  const links = chunk.entities.filter(entity => entity.type === 'text_link');
+  assert.deepEqual(links.map(link => [chunk.text.slice(link.offset, link.offset + link.length), link.url]), [
+    ['Источник', 'https://example.org/article'], ['Другая страница', 'https://example.org/other'],
+  ]);
+  assert.ok(chunk.entities.some(entity => entity.type === 'expandable_blockquote'));
+});
+
 test('HTML quotes collapse once, except inside closed disclosures or code', () => {
   const source = '<blockquote>A</blockquote><details><summary>Расшифровка</summary><blockquote expandable>B</blockquote></details>'
     + '<details open><blockquote>C</blockquote></details><pre><code>&lt;blockquote&gt;D</code></pre>';

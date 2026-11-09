@@ -1028,6 +1028,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
 
     let aiResponse = "";
     let answerAvailable = true;
+    let hasFoundSources = false;
     let answerDelivered = false;
 
     // Получаем профиль чата для контекста
@@ -1054,7 +1055,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
         !isDirectlyCalled,
         chatProfile, // <--- Передаём профиль чата
         externalContext,
-        directChat ? { failOnUnavailable: true } : undefined
+        directChat ? { failOnUnavailable: true } : { onFoundSources: () => { hasFoundSources = true; } }
     );
 
     console.log(`[DEBUG] 2. Ответ от AI получен! Длина: ${aiResponse ? aiResponse.length : "PUSTO"}`);
@@ -1090,9 +1091,9 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
 
 
     try {
-        // Защита от спама. Telegram rich (sendRichMessage) держит ~32768 символов —
-        // режем по 30000, оставляя запас под маркер ниже. Раньше тут стояло 16000.
-        if (formattedResponse.length > 30000) {
+        // Ordinary prose is capped. Source lists need intact destinations, so
+        // sendRich handles oversized lists through its chunked legacy delivery.
+        if (!hasFoundSources && formattedResponse.length > 30000) {
             formattedResponse = formattedResponse.substring(0, 30000) + "\n\n...[обсуждение слишком длинное, я устал]...";
         }
 

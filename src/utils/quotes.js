@@ -84,6 +84,14 @@ function quoteFallback(content) {
     const start = text.length;
     const quoted = node.name === 'blockquote';
     for (const child of node.children || []) visit(child, inQuote || quoted);
+    if (node.name === 'a' && text.length > start) {
+      try {
+        const url = new URL(node.attribs?.href);
+        if (['https:', 'http:'].includes(url.protocol) && !url.username && !url.password) {
+          entities.push({ type: 'text_link', offset: start, length: text.length - start, url: url.href });
+        }
+      } catch { /* An invalid destination stays plain text. */ }
+    }
     if (quoted && !inQuote) {
       const length = text.slice(start).trimEnd().length;
       if (length) entities.push({ type: 'expandable_blockquote', offset: start, length });
@@ -91,7 +99,8 @@ function quoteFallback(content) {
     if (block) newline();
   }
   visit(document);
-  if (!entities.length) return null;
+  if (!entities.some(entity => entity.type === 'expandable_blockquote')) return null;
+  entities.sort((a, b) => a.offset - b.offset || b.length - a.length);
   text = text.trimEnd();
   const chunks = [];
   for (let start = 0; start < text.length;) {
@@ -100,7 +109,7 @@ function quoteFallback(content) {
     const chunkEntities = entities.flatMap(entity => {
       const from = Math.max(start, entity.offset);
       const to = Math.min(end, entity.offset + entity.length);
-      return to > from ? [{ type: entity.type, offset: from - start, length: to - from }] : [];
+      return to > from ? [{ ...entity, offset: from - start, length: to - from }] : [];
     });
     chunks.push({ text: text.slice(start, end), entities: chunkEntities });
     start = end;

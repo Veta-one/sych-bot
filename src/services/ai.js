@@ -19,8 +19,8 @@ const {
   getCachedYoutubeGeminiAnalysis,
   requestYoutubeGeminiAnalysis,
 } = require('./youtube-gemini');
-const { shouldSkipSearchForPrimarySource, isVerificationRequest } = require('../utils/content-policy');
-const { research, evidenceContext, publicUrl, requestedUrls, sourceCoverageNote, answerAuditPrompt, shortResearchAnswer, conservativeAnswer, citedProviderSources, REVIEW_TIMEOUT_MS = 40000 } = require('./research');
+const { shouldSkipSearchForPrimarySource, searchRequestIntent } = require('../utils/content-policy');
+const { research, evidenceContext, publicUrl, requestedUrls, sourceCoverageNote, answerAuditPrompt, shortResearchAnswer, conservativeAnswer, renderFoundSources, citedProviderSources, REVIEW_TIMEOUT_MS = 40000 } = require('./research');
 const { withTimeout } = require('../utils/async');
 const { isPrivateWork, runPrivateWork } = require('../utils/private-context');
 const { normalizeProfileMessages, relationshipUpdate, validateProfileUpdates, profileSourceData,
@@ -303,6 +303,7 @@ ${googleRows}
 // === УНИВЕРСАЛЬНЫЙ ПОИСК ===
 async performSearch(query, opts = {}) {
   this.resetStatsIfNeeded();
+  const strictPeriod = ['day', 'week', 'month', 'year'].includes(opts.requiredTimeRange);
 
   // 1. TAVILY
   if (config.searchProvider === 'tavily' && this.tavilyClient) {
@@ -317,7 +318,7 @@ async performSearch(query, opts = {}) {
               includeAnswer: false,
               includeImages: opts.includeImages === true,
           };
-          if (opts.timeRange) searchOpts.timeRange = opts.timeRange;
+          if (strictPeriod || opts.timeRange) searchOpts.timeRange = strictPeriod ? opts.requiredTimeRange : opts.timeRange;
           if (Array.isArray(opts.preferredDomains) && opts.preferredDomains.length) {
               searchOpts.includeDomains = opts.preferredDomains.filter(d => typeof d === 'string' && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(d)).slice(0, 3);
           }
@@ -329,14 +330,18 @@ async performSearch(query, opts = {}) {
           storage.incrementStat('search');
 
           const results = response.results || [];
-          if (!results.length) return this.searchViaNative(query);
+          if (!results.length) return strictPeriod ? [] : this.searchViaNative(query);
           if (opts.includeImages) results[0].imageUrls = (response.images || []).map(im => typeof im === 'string' ? im : im?.url);
           return results;
       } catch (e) {
           console.error(`[TAVILY FAIL] ${e.message}`);
+          if (strictPeriod) throw new Error('SEARCH_PERIOD_UNAVAILABLE');
           return this.searchViaNative(query);
       }
   }
+
+  // The other search routes do not expose a date filter in this client.
+  if (strictPeriod) throw new Error('SEARCH_PERIOD_UNAVAILABLE');
 
   // 2. PERPLEXITY
   if (config.searchProvider === 'perplexity' && this.openai) {
@@ -380,10 +385,11 @@ async searchViaNative(query) {
     // Bind only grounded segments to their cited source; don't attribute the whole
     // generated answer to every URL in the provider's source list.
     return chunks.flatMap((chunk, index) => {
+      const url = publicUrl(chunk.web?.uri);
+      if (!url) return [];
       const segments = (metadata.groundingSupports || [])
         .filter(s => s.groundingChunkIndices?.includes(index)).map(s => s.segment?.text).filter(Boolean);
-      return chunk.web?.uri && segments.length ? [{ url: chunk.web.uri, title: chunk.web.title,
-        content: segments.join('\n'), level: 'provider_report' }] : [];
+      return [{ url, title: chunk.web.title, content: segments.join('\n'), level: 'provider_report' }];
     });
   } catch (error) { console.error(`[GOOGLE SEARCH FAIL] ${error.message}`); return []; }
 }
@@ -490,13 +496,17 @@ async finalizeResearchedAnswer(answer, result, responsePolicy = {}) {
     }
     return null;
   };
+  const withSources = (text, coverage = '') => {
+    const materials = responsePolicy.failOnUnavailable ? '' : renderFoundSources(result, { collapsed: true });
+    return text + coverage + (materials ? `\n\n${materials}` : '');
+  };
   const full = await check(answer);
-  if (full !== null) return full + sourceCoverageNote(result);
+  if (full !== null) return withSources(full, sourceCoverageNote(result));
   // One bounded recovery, assembled from evidence rather than the failed draft.
   const short = shortResearchAnswer(result);
   if (short && Date.now() < deadline) {
     const approved = await check(short, true);
-    if (approved !== null) return approved;
+    if (approved !== null) return withSources(approved);
   }
   // Failure of the verifier must not release an unchecked confident draft.
   if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
@@ -635,7 +645,8 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       const result = await research({
           question: JSON.stringify({ request: currentMessage.text, reply: originalSource,
               history: recentHistory, suppliedMaterial: extractedText.slice(0, 12000) }),
-          plan: searchDecision,
+          // Billing and public composition require a verified answer before delivery.
+          plan: responsePolicy.failOnUnavailable ? { ...searchDecision, output: 'answer' } : searchDecision,
           suppliedUrls: shouldReadUrls ? suppliedUrls : [],
           budgetMs: responsePolicy.researchBudgetMs,
           search: (query, opts) => this.performSearch(query, opts),
@@ -644,7 +655,11 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       });
       researchContext = evidenceContext(result);
       researchResult = result;
-      console.log(`[RESEARCH] sources=${result.sources.length} claims=${result.claims.length} sufficient=${result.sufficient} errors=${result.errors.length} recovery=${result.recoveryAttempted === true}`);
+      if (!responsePolicy.failOnUnavailable && result.foundSources?.length) responsePolicy.onFoundSources?.();
+      console.log(`[RESEARCH] sources=${result.sources.length} claims=${result.claims.length} sufficient=${result.sufficient} errors=${result.errors.length} recovery=${result.recoveryAttempted === true} mode=${result.output} found=${result.foundSources.length}`);
+      if (searchDecision.output === 'sources' && !responsePolicy.failOnUnavailable) {
+          return renderFoundSources(result) || (result.verificationFailed ? conservativeAnswer(result) : 'Поиск не вернул подходящих ссылок.');
+      }
       // No evidence means no factual draft to improvise around. This also avoids
       // paying for a writer and another verifier during a search outage.
       if (!result.claims.length && !result.imageUrls.length) {
@@ -706,7 +721,10 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
               temperature: 0.9,
           });
 
-          const choice = completion.choices[0];
+          const choice = completion?.choices?.[0];
+          if (completion?.error || typeof choice?.message?.content !== 'string' || !choice.message.content.trim()) {
+              throw new Error('EMPTY_MODEL_RESPONSE');
+          }
           if (choice.finish_reason === 'length') {
               console.warn(`[AI TRUNCATED] Ответ обрезан лимитом токенов (finish_reason=length, max_tokens=${config.maxOutputTokens}). Подними config.maxOutputTokens.`);
           }
@@ -718,7 +736,13 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
   }
 
   // 4. FALLBACK (Если API упал или ключа нет)
-  return this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile, extractedText, researchContext, researchResult, responsePolicy);
+  try {
+      return await this.generateViaNative(history, currentMessage, imageBuffer, mimeType, userInstruction, userProfile, isSpontaneous, chatProfile, extractedText, researchContext, researchResult, responsePolicy);
+  } catch (error) {
+      const materials = researchResult && !responsePolicy.failOnUnavailable ? renderFoundSources(researchResult) : '';
+      if (!materials) throw error;
+      return `Не удалось составить ответ по найденным материалам.\n\n${materials}`;
+  }
 }
 
 // Helper для Native вызова (чтобы не дублировать код)
@@ -885,6 +909,7 @@ async analyzeUserImmediate(input, currentProfile) {
 
 // Определение необходимости поиска (AI-решение вместо regex)
 async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', suppliedMaterial = '') {
+    const intent = searchRequestIntent(userMessage);
     const prompt = prompts.shouldSearch(
         this.getCurrentTime(),
         suppliedMaterial ? `${userMessage}\nПредоставленный материал для проверки (данные): ${suppliedMaterial.slice(0, 6000)}` : userMessage,
@@ -897,7 +922,7 @@ async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', s
         const result = await withTimeout(this.runLogicModel(prompt, { temperature: 0, model: config.mainModel }), 12000, 'Выбор поиска');
         if (result && typeof result.needsSearch === 'boolean') {
             // Explicit verification must not silently turn into a memory-only answer.
-            if (isVerificationRequest(userMessage)) result.needsSearch = true;
+            if (intent.explicitSearch) result.needsSearch = true;
             if (result.needsSearch) {
                 result.searchQuery = typeof result.searchQuery === 'string' && result.searchQuery.trim()
                     ? result.searchQuery.slice(0, 500) : `${userMessage} ${replyText}`.slice(0, 500);
@@ -905,6 +930,11 @@ async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', s
             result.topic = ['news', 'finance'].includes(result.topic) ? result.topic : 'general';
             result.timeRange = ['day', 'week', 'month', 'year'].includes(result.timeRange) ? result.timeRange : null;
             result.includeImages = /покажи|как выглядит|найди.{0,25}(?:фото|картинк|изображен)/i.test(userMessage);
+            result.output = intent.output || (result.output === 'sources' && !result.includeImages ? 'sources' : 'answer');
+            if (intent.requiredDomains.length) result.preferredDomains = intent.requiredDomains;
+            result.requiredDomains = intent.requiredDomains;
+            if (intent.requiredTimeRange) result.timeRange = intent.requiredTimeRange;
+            result.requiredTimeRange = intent.requiredTimeRange;
             console.log(`[SEARCH CHECK] needsSearch=${result.needsSearch}, query="${result.searchQuery}", reason="${result.reason}"`);
             return result;
         }
@@ -912,8 +942,17 @@ async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', s
         console.error(`[SEARCH CHECK ERROR] ${e.message}`);
     }
 
-    if (isVerificationRequest(userMessage)) {
-        return { needsSearch: true, searchQuery: `${userMessage} ${replyText} ${suppliedMaterial}`.slice(0, 500), reason: 'explicit verification fallback' };
+    if (intent.explicitSearch) {
+        return {
+            needsSearch: true,
+            searchQuery: `${userMessage} ${replyText} ${suppliedMaterial}`.slice(0, 500),
+            output: intent.output || 'answer',
+            preferredDomains: intent.requiredDomains,
+            requiredDomains: intent.requiredDomains,
+            timeRange: intent.requiredTimeRange,
+            requiredTimeRange: intent.requiredTimeRange,
+            reason: 'explicit verification fallback',
+        };
     }
     return { needsSearch: false, searchQuery: null, unavailable: true, reason: "search planner unavailable" };
 }

@@ -216,5 +216,23 @@ test('provider statements are attached to their citations, not to every URL', ()
   assert.doesNotMatch(sources[0].content, /Card acceptance/);
   assert.match(sources[1].content, /Card acceptance/);
   assert.doesNotMatch(sources[1].content, /Kazakhstan/);
-  assert.equal(citedProviderSources('Unsupported provider prose', ['https://example.org/']).length, 0);
+  const unbound = citedProviderSources('Unsupported provider prose', ['https://example.org/']);
+  assert.equal(unbound.length, 1);
+  assert.equal(unbound[0].content, '');
+});
+
+test('all public provider citations remain visible but an uncited URL cannot support a claim', () => {
+  const results = citedProviderSources('A grounded provider statement [1]. Unbound speculation.', [
+    'https://example.org/grounded', 'https://example.org/listed-only',
+    'https://example.org/listed-only#duplicate', 'javascript:alert(1)', 'http://127.0.0.1/',
+  ]);
+  assert.equal(results.length, 2);
+  assert.equal(results[0].content, 'A grounded provider statement');
+  assert.equal(results[1].content, '');
+  assert.equal(results[1].level, 'provider_report');
+  const sources = normalizeSources(results);
+  const reviewed = validateReview({ claims: [{ claim: 'Unbound speculation.', sourceId: 'S2',
+    status: 'supported', quote: 'Unbound speculation.' }], sufficient: true }, sources);
+  assert.equal(reviewed.claims.length, 0);
+  assert.equal(reviewed.sufficient, false);
 });
