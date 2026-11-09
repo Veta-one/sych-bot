@@ -193,13 +193,16 @@ test('search, extraction, invalid review and deadline failures never become fact
   }
 });
 
-test('images are exposed only when explicitly requested', async () => {
+test('image search keeps distinct described candidates with their source, separate from evidence', async () => {
   for (const includeImages of [false, true]) {
+    const photo = 'https://example.org/photo.jpg';
     const result = await research({ question: 'example', plan: { searchQuery: 'example', includeImages },
-      search: async () => [{ url: source.url, content: page, imageUrls: ['https://example.org/photo.jpg'] }],
+      search: async () => ({ results: [{ url: source.url, content: page, images: [photo] }],
+        images: [{ url: photo, description: 'Фото здания' }, 'http://127.0.0.1/private.jpg'] }),
       read: async () => page, review: async () => ({ claims: [claim], sufficient: true }),
     });
-    assert.equal(result.imageUrls.length, includeImages ? 1 : 0);
+    assert.deepEqual(result.images, includeImages ? [{ id: 'I1', url: photo, description: 'Фото здания', sourceUrl: source.url }] : []);
+    assert.doesNotMatch(evidenceContext(result), /photo\.jpg/);
   }
 });
 

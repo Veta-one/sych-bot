@@ -29,7 +29,8 @@ function harness({ mode = 'auto', primary = true, native = false } = {}) {
     setTimeout: setTimer, clearTimeout: clearTimer,
     console: { log: (...args) => logs.push(args.join(' ')), warn: (...args) => logs.push(args.join(' ')), error: (...args) => logs.push(args.join(' ')) } };
   const asyncModule = load('utils/async.js', {}, runtime);
-  const research = load('services/research.js', { '../utils/async': asyncModule, 'markdown-it': require('markdown-it') }, runtime);
+  const research = load('services/research.js', { '../utils/async': asyncModule,
+    '../utils/quotes': require('../src/utils/quotes'), 'markdown-it': require('markdown-it') }, runtime);
   const config = { geminiKeys: [], mainModel: 'synthetic-review-model', researchReviewProvider: mode };
   const prompts = load('core/prompts.js', { '../config': config });
   const ai = load('services/ai.js', {

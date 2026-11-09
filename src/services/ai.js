@@ -22,7 +22,7 @@ const {
 const { shouldSkipSearchForPrimarySource, searchRequestIntent, requiresResearch, hasSourceConstraint } = require('../utils/content-policy');
 const { splitSourceAppendix } = require('../utils/research-sources');
 const { quickData } = require('./quick-data');
-const { research, evidenceContext, publicUrl, requestedUrls, sourceCoverageNote, answerAuditPrompt, shortResearchAnswer, conservativeAnswer, renderFoundSources, lookupAnswer, citedProviderSources, REVIEW_TIMEOUT_MS = 40000 } = require('./research');
+const { research, evidenceContext, publicUrl, requestedUrls, sourceCoverageNote, answerAuditPrompt, shortResearchAnswer, conservativeAnswer, renderFoundSources, renderResearchImages, withoutResearchMedia, lookupAnswer, citedProviderSources, REVIEW_TIMEOUT_MS = 40000 } = require('./research');
 const { withTimeout } = require('../utils/async');
 const { isPrivateWork, runPrivateWork } = require('../utils/private-context');
 const { normalizeProfileMessages, relationshipUpdate, validateProfileUpdates, profileSourceData,
@@ -409,6 +409,7 @@ async performSearch(query, opts = {}) {
               includeAnswer: false,
               includeImages: opts.includeImages === true,
           };
+          if (searchOpts.includeImages) searchOpts.includeImageDescriptions = true;
           if (strictPeriod || opts.timeRange) searchOpts.timeRange = strictPeriod ? opts.requiredTimeRange : opts.timeRange;
           if (Array.isArray(opts.preferredDomains) && opts.preferredDomains.length) {
               searchOpts.includeDomains = opts.preferredDomains.filter(d => typeof d === 'string' && /^[a-z0-9.-]+\.[a-z]{2,}$/i.test(d)).slice(0, 3);
@@ -421,8 +422,10 @@ async performSearch(query, opts = {}) {
           storage.incrementStat('search');
 
           const results = response.results || [];
+          if (searchOpts.includeImages && (results.length || response.images?.length)) {
+              return { results, images: response.images };
+          }
           if (!results.length) return strictPeriod ? [] : this.searchViaNative(query);
-          if (opts.includeImages) results[0].imageUrls = (response.images || []).map(im => typeof im === 'string' ? im : im?.url);
           return results;
       } catch (e) {
           console.error(`[TAVILY FAIL] ${e.message}`);
@@ -596,13 +599,16 @@ async renderSourceReply(result, question, state = sourceReplyState(result)) {
 
 async finalizeResearchedAnswer(answer, result, responsePolicy = {}, question) {
   if (!result) return answer;
-  if (!result.claims.length) {
+  const photoOnly = !result.claims.length && result.imageIntent === 'requested' && result.images?.length
+    && !responsePolicy.failOnUnavailable;
+  if (!result.claims.length && !photoOnly) {
     if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
     return await this.renderSourceReply(result, question) || conservativeAnswer(result);
   }
   const deadline = Date.now() + FINAL_AUDIT_TIMEOUT_MS;
   let auditFailure = 'unavailable';
   const check = async (candidate, short = false) => {
+    candidate = withoutResearchMedia(candidate);
     const allowance = Math.min(short ? SHORT_AUDIT_TIMEOUT_MS : REVIEW_TIMEOUT_MS, deadline - Date.now());
     if (allowance <= 0) { auditFailure = 'timeout'; return null; }
     const phaseDeadline = Date.now() + allowance;
@@ -612,10 +618,14 @@ async finalizeResearchedAnswer(answer, result, responsePolicy = {}, question) {
       if (!auditShapeValid(audit)) throw evidenceReviewFailure('EVIDENCE_REVIEW_INVALID');
       const subjectConfirmed = audit.addressesQuestion === true;
       console.log(`[ANSWER AUDIT] phase=${short ? 'short' : 'full'} subjectConfirmed=${subjectConfirmed} approved=${audit.approved}`);
-      if (subjectConfirmed && audit.approved) return candidate;
+      const media = subjectConfirmed ? renderResearchImages(result, audit.imageIds) : '';
+      if (subjectConfirmed && audit.approved && (!photoOnly || media)) return { text: candidate, media };
       // The full audit may supply a complete repair. The short stage only
       // approves its fixed candidate; it cannot release a new unchecked draft.
-      if (!short && subjectConfirmed && typeof audit.answer === 'string' && audit.answer.trim()) return audit.answer.trim();
+      if (!photoOnly && !short && subjectConfirmed && typeof audit.answer === 'string') {
+        const repaired = withoutResearchMedia(audit.answer);
+        if (repaired) return { text: repaired, media };
+      }
       auditFailure = 'rejected';
     } catch (error) {
       const code = evidenceReviewErrorCode(error, Date.now() >= phaseDeadline);
@@ -624,13 +634,13 @@ async finalizeResearchedAnswer(answer, result, responsePolicy = {}, question) {
     }
     return null;
   };
-  const withSources = (text, coverage = '') => {
-    if (responsePolicy.failOnUnavailable) return text + coverage;
+  const withSources = ({ text, media }, coverage = '') => {
+    if (responsePolicy.failOnUnavailable) return [text + coverage, media].filter(Boolean).join('\n\n');
     const appendix = splitSourceAppendix(text);
     const combined = { ...result, foundSources: [...(result.foundSources || []), ...appendix.links] };
-    if (!appendix.text.trim() && combined.foundSources.length) return this.renderSourceReply(combined, question, 'links');
+    if (!appendix.text.trim() && !media && combined.foundSources.length) return this.renderSourceReply(combined, question, 'links');
     const materials = renderFoundSources(combined);
-    return appendix.text + coverage + (materials ? `\n\n${materials}` : '');
+    return [appendix.text + coverage, media, materials].filter(Boolean).join('\n\n');
   };
   const full = await check(answer);
   if (full !== null) return withSources(full, sourceCoverageNote(result));
@@ -642,6 +652,7 @@ async finalizeResearchedAnswer(answer, result, responsePolicy = {}, question) {
   }
   // Failure of the verifier must not release an unchecked confident draft.
   if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
+  if (photoOnly && !result.foundSources?.length) return 'Подходящее фото подтвердить не удалось.';
   const failed = { ...result, verificationFailed: auditFailure !== 'rejected', fallbackStage: 'answer_audit', auditFailure };
   return await this.renderSourceReply(failed, question) || conservativeAnswer(failed);
 }
@@ -815,8 +826,11 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       }
       // No evidence means no factual draft to improvise around. This also avoids
       // paying for a writer and another verifier during a search outage.
-      if (!result.claims.length && !result.imageUrls.length) {
+      if (!result.claims.length) {
           if (responsePolicy.failOnUnavailable) throw new Error('PUBLIC_RESPONSE_UNAVAILABLE');
+          if (result.imageIntent === 'requested' && result.images.length) {
+              return this.finalizeResearchedAnswer('Вот что нашёл.', result, responsePolicy, currentMessage.text);
+          }
           return await this.renderSourceReply(result, currentMessage.text) || conservativeAnswer(result);
       }
   } else if (searchDecision.unavailable) {
@@ -1064,6 +1078,8 @@ async analyzeUserImmediate(input, currentProfile) {
 // Определение необходимости поиска (AI-решение вместо regex)
 async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', suppliedMaterial = '') {
     const intent = searchRequestIntent(userMessage);
+    const asksForImages = /(?:найди|поищи|покажи|пришли|подбери|дай)\s+(?:(?:мне|несколько|реальные|свежие|новые|архивные|пожалуйста),?\s+)*(?:фото|картинк|изображени|сним(?:ок|ки))|\b(?:find|show|send)\s+(?:(?:me|some|a|the)\s+)*\b(?:photos?|pictures?|images?)\b/iu.test(userMessage)
+        && !/(?:приложенн|прикрепл[её]нн|на\s+(?:этом|мо[её]м)\s+фото)/iu.test(userMessage);
     const prompt = prompts.shouldSearch(
         this.getCurrentTime(),
         suppliedMaterial ? `${userMessage}\nПредоставленный материал для проверки (данные): ${suppliedMaterial.slice(0, 6000)}` : userMessage,
@@ -1076,19 +1092,22 @@ async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', s
         const result = await withTimeout(this.runLogicModel(prompt, { temperature: 0, model: config.mainModel }), 12000, 'Выбор поиска');
         if (result && typeof result.needsSearch === 'boolean') {
             // Explicit verification must not silently turn into a memory-only answer.
-            if (intent.explicitSearch) result.needsSearch = true;
+            const wantsImages = asksForImages || result.imageIntent === 'requested';
+            if (intent.explicitSearch || wantsImages) result.needsSearch = true;
             if (result.needsSearch) {
                 result.searchQuery = typeof result.searchQuery === 'string' && result.searchQuery.trim()
                     ? result.searchQuery.slice(0, 500) : `${userMessage} ${replyText}`.slice(0, 500);
             }
             result.topic = ['news', 'finance'].includes(result.topic) ? result.topic : 'general';
             result.timeRange = ['day', 'week', 'month', 'year'].includes(result.timeRange) ? result.timeRange : null;
-            result.includeImages = /покажи|как выглядит|найди.{0,25}(?:фото|картинк|изображен)/i.test(userMessage);
             const plannedOutput = result.output;
-            const deep = result.includeImages || requiresResearch(userMessage);
-            result.output = intent.output === 'sources' ? 'sources'
+            const deep = wantsImages || requiresResearch(userMessage);
+            result.output = wantsImages ? 'answer' : intent.output === 'sources' ? 'sources'
                 : plannedOutput === 'lookup' && !deep ? 'lookup'
                 : !intent.output && plannedOutput === 'sources' && !deep ? 'sources' : 'answer';
+            result.imageIntent = wantsImages ? 'requested'
+                : result.needsSearch && result.output === 'answer' && result.imageIntent === 'illustrate' ? 'illustrate' : null;
+            result.includeImages = result.imageIntent !== null;
             if (result.output === 'lookup') result.timeRange = null;
             if (intent.requiredDomains.length) result.preferredDomains = intent.requiredDomains;
             const namedSource = result.output === 'lookup' && hasSourceConstraint(userMessage)
@@ -1105,11 +1124,13 @@ async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', s
         console.error(`[SEARCH CHECK ERROR] ${e.message}`);
     }
 
-    if (intent.explicitSearch) {
+    if (intent.explicitSearch || asksForImages) {
         return {
             needsSearch: true,
             searchQuery: `${userMessage} ${replyText} ${suppliedMaterial}`.slice(0, 500),
-            output: intent.output || 'answer',
+            output: asksForImages ? 'answer' : intent.output || 'answer',
+            imageIntent: asksForImages ? 'requested' : null,
+            includeImages: asksForImages,
             preferredDomains: intent.requiredDomains,
             requiredDomains: intent.requiredDomains,
             timeRange: intent.requiredTimeRange,

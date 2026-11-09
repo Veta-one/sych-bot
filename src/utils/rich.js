@@ -10,7 +10,7 @@
 const axios = require('axios');
 const config = require('../config');
 const { selectVoiceSummary, shouldSummarizeVoice } = require('./voice');
-const { collapseHtmlQuotes, collapseMarkdownQuotes, quoteFallback } = require('./quotes');
+const { collapseHtmlQuotes, collapseMarkdownQuotes, quoteFallback, stripImageMarkup } = require('./quotes');
 
 const API = `https://api.telegram.org/bot${config.telegramToken}`;
 
@@ -59,6 +59,14 @@ function htmlToPlain(html = '') {
     .replace(/\n{3,}/g, '\n\n')
     .trim();
 }
+
+function withoutRichImages(rich, markdownImages = true) {
+  const field = rich.markdown != null ? 'markdown' : 'html';
+  const plain = stripImageMarkup(rich[field], { markdownImages: field === 'markdown' && markdownImages });
+  return plain === rich[field] ? rich : { [field]: plain.trim() };
+}
+
+const richImageRejected = description => /media|rich_message|failed to get http url content|photo_invalid/i.test(description);
 
 // Markdown ИИ шлём как есть — Telegram rich рисует его красиво (в т.ч. таблицы).
 // Единственное: гарантируем пустую строку ПЕРЕД таблицей, иначе парсер иногда
@@ -152,8 +160,8 @@ async function sendEphemeralRich(bot, chatId, content, opts) {
     const { receiverUserId, editId, replyToEphemeralId } = ephemeral;
     const rich = content.html != null ? { html: collapseHtmlQuotes(content.html) }
       : { markdown: collapseMarkdownQuotes(content.markdown) };
-    const plain = content.fallback != null ? content.fallback
-      : content.html != null ? htmlToPlain(content.html) : content.markdown;
+    const textOnly = withoutRichImages(rich);
+    const plain = content.fallback ?? withoutRichImages(rich, false).markdown ?? htmlToPlain(rich.html);
     const extra = {};
     if (opts.replyMarkup) extra.reply_markup = opts.replyMarkup;
     if (editId === undefined) {
@@ -171,14 +179,8 @@ async function sendEphemeralRich(bot, chatId, content, opts) {
     let response = await send(rich);
     if (!response.rejected) return ephemeralResult(response, receiverUserId, editId, 'rich');
 
-    const hasMedia = /!\[|<img|<tg-(collage|slideshow)/i.test(rich.markdown || rich.html || '');
-    if (hasMedia && /media|no_media|RICH_MESSAGE/i.test(response.description)) {
-      const noImg = rich.markdown != null ? {
-        markdown: rich.markdown.replace(/<\/?tg-(collage|slideshow)>/gi, '')
-          .replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/<img[^>]*>/gi, '')
-          .replace(/\n{3,}/g, '\n\n').trim(),
-      } : { html: rich.html.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/<img[^>]*>/gi, '') };
-      response = await send(noImg);
+    if (textOnly !== rich && richImageRejected(response.description)) {
+      response = await send(textOnly);
       if (!response.rejected) return ephemeralResult(response, receiverUserId, editId, 'rich-noimg');
     }
 
@@ -260,8 +262,8 @@ async function sendStrictRich(bot, chatId, content, opts) {
     }
     const rich = content.html != null ? { html: collapseHtmlQuotes(content.html) }
       : { markdown: collapseMarkdownQuotes(content.markdown) };
-    const plain = content.fallback != null ? content.fallback
-      : content.html != null ? htmlToPlain(content.html) : content.markdown;
+    const textOnly = withoutRichImages(rich, false);
+    const plain = content.fallback != null ? content.fallback : textOnly.markdown ?? htmlToPlain(textOnly.html);
     const extra = { reply_parameters: { message_id: opts.replyTo, allow_sending_without_reply: false } };
     if (opts.threadId) extra.message_thread_id = opts.threadId;
     if (opts.businessId) extra.business_connection_id = opts.businessId;
@@ -352,13 +354,10 @@ async function sendRich(bot, chatId, content, opts = {}) {
     // Если rich упал из-за медиа (битый URL картинки) — пробуем ещё раз БЕЗ картинок,
     // чтобы сохранить форматирование (таблицы/списки), а не падать в плоский текст.
     // Картинки Telegram качает сам со своей стороны, поэтому доверяем именно его вердикту.
-    const hasImg = /!\[|<tg-(collage|slideshow)/i.test(content.markdown || '') || /<img|<tg-(collage|slideshow)/i.test(content.html || '');
-    if (hasImg && /media|no_media|RICH_MESSAGE/i.test(desc)) {
-      const noImg = {};
-      if (rich.markdown != null) noImg.markdown = rich.markdown.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/!\[[^\]]*\]\([^)]*\)/g, '').replace(/<img[^>]*>/gi, '').replace(/\n{3,}/g, '\n\n').trim();
-      if (rich.html != null) noImg.html = rich.html.replace(/<\/?tg-(collage|slideshow)>/gi, '').replace(/<img[^>]*>/gi, '');
+    const textOnly = withoutRichImages(rich);
+    if (textOnly !== rich && richImageRejected(desc)) {
       try {
-        const response = await postRich(bot, `${API}/sendRichMessage`, { chat_id: chatId, rich_message: noImg, ...extra }, { proxy: false });
+        const response = await postRich(bot, `${API}/sendRichMessage`, { chat_id: chatId, rich_message: textOnly, ...extra }, { proxy: false });
         console.error(`[RICH] медиа не прошло, отправил без картинок: ${desc}`);
         return { ok: true, mode: 'rich-noimg', messageId: response.data?.result?.message_id };
       } catch (_) { /* падаем в общий фоллбэк ниже */ }
@@ -381,7 +380,7 @@ async function sendRich(bot, chatId, content, opts = {}) {
 
     // Для markdown-контента пробуем сохранить разметку (legacy Markdown), иначе плейн.
     let messageId;
-    const quotedChunks = content.fallback == null ? quoteFallback(rich) : null;
+    const quotedChunks = content.fallback == null ? quoteFallback(textOnly) : null;
     if (quotedChunks) {
       for (const chunk of quotedChunks) {
         const sent = await bot.sendMessage(chatId, chunk.text, { ...legacy, entities: chunk.entities });
@@ -390,7 +389,7 @@ async function sendRich(bot, chatId, content, opts = {}) {
       return { ok: true, mode: 'fallback', error: desc, messageId };
     }
     if (content.markdown != null && content.fallback == null) {
-      for (const chunk of splitChunks(content.markdown)) {
+      for (const chunk of splitChunks(textOnly.markdown)) {
         try {
           const sent = await bot.sendMessage(chatId, chunk, { ...legacy, parse_mode: 'Markdown' });
           messageId ||= sent.message_id;
@@ -403,8 +402,7 @@ async function sendRich(bot, chatId, content, opts = {}) {
     }
 
     const plain = content.fallback != null ? content.fallback
-      : content.html != null ? htmlToPlain(content.html)
-      : String(content.markdown || '');
+      : textOnly.markdown ?? htmlToPlain(textOnly.html);
     for (const chunk of splitChunks(plain)) {
       const sent = await bot.sendMessage(chatId, chunk, legacy);
       messageId ||= sent.message_id;

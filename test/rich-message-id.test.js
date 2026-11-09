@@ -24,6 +24,49 @@ test('clarifications can be replied to after rich, image-retry and legacy delive
   }
 });
 
+test('a rejected Rich slideshow falls back without leaking tags and keeps image links and reply scope', async () => {
+  const box = { exports: {} };
+  const posts = [];
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/utils/rich.js'), 'utf8'), {
+    module: box, console: { error() {} },
+    require: name => name === 'axios' ? { post: async (_, payload) => {
+      posts.push(JSON.parse(JSON.stringify(payload)));
+      throw new Error(posts.length === 1 ? 'Bad Request: failed to get HTTP URL content' : 'Rich unavailable');
+    } } : name === '../config' ? { telegramToken: 'test' } : name === './quotes' ? require('../src/utils/quotes') : {},
+  });
+  const images = Array.from({ length: 6 }, (_, i) => ({ id: `I${i + 1}`, url: `https://example.org/${'a'.repeat(1400)}/${i}.jpg` }));
+  const { renderResearchImages } = require('../src/services/research');
+  const slide = renderResearchImages({ imageIntent: 'requested', images }, images.map(({ id }) => id));
+  const sent = [];
+  const result = await box.exports.sendRich({ sendMessage: async (_, text, options) => {
+    sent.push({ text, options }); return { message_id: 123 };
+  } }, 4, { markdown: `Вот фото.\n\n${slide}` }, { replyTo: 9, threadId: 3 });
+  assert.equal(posts.length, 2);
+  assert.match(posts[0].rich_message.markdown, /<tg-slideshow>/);
+  assert.doesNotMatch(posts[1].rich_message.markdown, /tg-slideshow|<img/);
+  assert.equal(sent.length, 1);
+  assert.deepEqual(sent[0].options.entities.filter(entity => entity.type === 'text_link').map(({ url }) => url), images.map(({ url }) => url));
+  assert.doesNotMatch(sent[0].text, /tg-slideshow|<img/);
+  assert.equal(sent[0].options.reply_parameters.message_id, 9);
+  assert.equal(sent[0].options.message_thread_id, 3);
+  assert.equal(result.mode, 'fallback');
+});
+
+test('a Rich rejection preserves HTML examples in Markdown code fences', async () => {
+  const box = { exports: {} };
+  vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/utils/rich.js'), 'utf8'), {
+    module: box, console: { error() {} },
+    require: name => name === 'axios' ? { post: async () => { throw new Error('Rich unavailable'); } }
+      : name === '../config' ? { telegramToken: 'test' } : name === './quotes' ? require('../src/utils/quotes') : {},
+  });
+  const example = 'Пример\n\n```html\n<img src="example.jpg">\n```';
+  const sent = [];
+  await box.exports.sendRich({ sendMessage: async (_, text) => {
+    sent.push(text); return { message_id: 123 };
+  } }, 4, { markdown: example });
+  assert.deepEqual(sent, [example]);
+});
+
 test('failed rich voice delivery keeps one expandable transcript and reply context', async () => {
   const box = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/utils/rich.js'), 'utf8'), {

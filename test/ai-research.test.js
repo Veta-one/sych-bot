@@ -346,6 +346,76 @@ test('a single-value lookup uses one search and one grounded extraction without 
   assert.equal(calls.length, 0);
 });
 
+test('an explicit photo request survives a planner refusal and a search with only image results', async () => {
+  const { ai, calls } = harness();
+  const first = 'https://example.org/one.jpg?a=1&b=2';
+  const second = 'https://example.org/two.jpg';
+  ai.runLogicModel = async () => ({ needsSearch: false });
+  ai.performSearch = Object.getPrototypeOf(ai).performSearch.bind(ai);
+  const searchOptions = [];
+  ai.tavilyClient = { search: async (_, options) => {
+    searchOptions.push(options);
+    return { results: [], images: [{ url: first, description: 'Фасад дома Бальо' }, { url: second, description: 'Другой ракурс' }] };
+  } };
+  ai.extractUrl = async () => assert.fail('Image candidates are not text sources');
+  ai.reviewEvidence = async prompt => {
+    assert.match(prompt, /^ПРОВЕРКА ГОТОВОГО ОТВЕТА/);
+    assert.match(prompt, /Фасад дома Бальо/);
+    return { approved: true, addressesQuestion: true, imageIds: ['I2', 'I1', 'I2', 'I9', 'https://unknown.org/x'] };
+  };
+  const answer = await ai.getResponse([], { text: 'Сыч, пришли фотографию дома Бальо', sender: 'Тест' });
+  assert.match(answer, /<tg-slideshow><img src="https:\/\/example\.org\/two\.jpg"\/><img src="https:\/\/example\.org\/one\.jpg\?a=1&amp;b=2"\/><\/tg-slideshow>/);
+  assert.doesNotMatch(answer, /unknown\.org|Проверку ответа/);
+  assert.equal(searchOptions.length, 1);
+  assert.equal(searchOptions[0].includeImages, true);
+  assert.equal(searchOptions[0].includeImageDescriptions, true);
+  assert.equal(calls.length, 0);
+});
+
+test('a normal researched answer uses only images chosen by its existing audit', async () => {
+  const { ai } = harness();
+  const url = 'https://example.org/building';
+  const photo = 'https://example.org/building.jpg';
+  ai.runLogicModel = async () => ({ needsSearch: true, searchQuery: 'Casa Batlló', output: 'answer', imageIntent: 'illustrate' });
+  ai.performSearch = async (_, options) => {
+    assert.equal(options.includeImages, true);
+    return { results: [{ url, images: [{ url: photo, description: 'Мозаичный фасад' }] }] };
+  };
+  const quote = 'The facade of Casa Batlló is covered with mosaics.';
+  ai.extractUrl = async () => quote;
+  const codeExample = '\x60\x60\x60html\n<img src="example.jpg">\n\x60\x60\x60';
+  ai.openai.chat.completions.create = async () => ({ choices: [{ message: { content: 'На фасаде есть мозаика.\n\n![Подпись\nк фото](https://unknown.org/x.jpg)\n\n' + codeExample } }] });
+  ai.reviewEvidence = async prompt => {
+    if (prompt.startsWith('ПРОВЕРКА ГОТОВОГО ОТВЕТА')) {
+      assert.match(prompt, /Мозаичный фасад/);
+      assert.doesNotMatch(prompt, /unknown\.org/);
+      assert.ok(prompt.includes(JSON.stringify(codeExample).slice(1, -1)));
+      return { approved: false, addressesQuestion: true, answer: `Фасад покрыт мозаикой. [Источник](${url})`, imageIds: ['I1'] };
+    }
+    return { sufficient: true, addressesQuestion: true, claims: [{ claim: 'Фасад покрыт мозаикой.', quote, sourceId: 'S1', status: 'supported' }] };
+  };
+  const answer = await ai.getResponse([], { text: 'Расскажи об архитектуре дома Бальо', sender: 'Тест' });
+  assert.match(answer, /Фасад покрыт мозаикой/);
+  assert.ok(answer.includes(`<img src="${photo}"/>`));
+  assert.doesNotMatch(answer, /tg-slideshow|unknown\.org/);
+});
+
+test('a photo-only reply still needs the auditor to confirm the subject and select a candidate', async () => {
+  const { ai } = harness();
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'answer', searchQuery: 'Casa Batlló' });
+  ai.performSearch = async () => ({ results: [], images: ['https://example.org/building.jpg'] });
+  for (const audit of [
+    { approved: false, addressesQuestion: true, imageIds: ['I1'] },
+    { approved: true, addressesQuestion: false, imageIds: ['I1'] },
+    { approved: true, addressesQuestion: true, imageIds: ['I9'] },
+  ]) {
+    ai.reviewEvidence = async () => audit;
+    const answer = await ai.getResponse([], { text: 'Найди фото дома Бальо', sender: 'Тест' });
+    assert.match(answer, /Подходящее фото подтвердить не удалось/);
+    assert.doesNotMatch(answer, /<img|building\.jpg/);
+  }
+});
+
 test('an auditor repair with its own link appendix is delivered with one source block', async () => {
   const { ai } = harness();
   const url = 'https://example.org/weather';
@@ -620,7 +690,8 @@ function timedHarness() {
   const researchBox = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/services/research.js'), 'utf8'), {
     module: researchBox, URL, Date: ClockDate, console: { log() {} },
-    require: name => name === '../utils/async' ? asyncBox.exports : require(name),
+    require: name => name === '../utils/async' ? asyncBox.exports
+      : name === '../utils/quotes' ? require('../src/utils/quotes') : require(name),
   });
   const context = harness({ '../utils/async': asyncBox.exports, './research': researchBox.exports },
     { Date: ClockDate, setTimeout: setTimer, clearTimeout: clearTimer });

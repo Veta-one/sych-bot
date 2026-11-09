@@ -132,4 +132,32 @@ function quoteFallback(content) {
   return chunks;
 }
 
-module.exports = { collapseHtmlQuotes, collapseMarkdownQuotes, quoteFallback };
+function stripImageMarkup(text, { markdownImages = true } = {}) {
+  if (!/!\[|<(?:\/?tg-(?:collage|slideshow)|img)\b/i.test(text)) return text;
+  const strip = value => {
+    const plain = value.replace(/<\/?tg-(?:collage|slideshow)\b[^>]*>|<img\b[^>]*>/gi, '')
+      .replace(/<(?=\/?tg-(?:collage|slideshow)\b|img\b)/gi, '&lt;');
+    return markdownImages ? plain.replace(/!\[[^\]]*\](?:\([^\n]*?\)|\[[^\]\n]*\])?/g, '').replace(/!\[/g, '[') : plain;
+  };
+  const stripInline = value => {
+    let out = '', end = 0;
+    for (const match of value.matchAll(/(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g)) {
+      out += strip(value.slice(end, match.index)) + match[0];
+      end = match.index + match[0].length;
+    }
+    return out + strip(value.slice(end));
+  };
+  const lines = text.split('\n');
+  const codeBlocks = markdown.parse(text, {}).filter(token => token.type === 'fence' || token.type === 'code_block');
+  const chunks = [];
+  let cursor = 0;
+  for (const { map: [start, end] } of codeBlocks) {
+    if (start > cursor) chunks.push(stripInline(lines.slice(cursor, start).join('\n')));
+    chunks.push(lines.slice(start, end).join('\n'));
+    cursor = end;
+  }
+  if (cursor < lines.length) chunks.push(stripInline(lines.slice(cursor).join('\n')));
+  return chunks.join('\n');
+}
+
+module.exports = { collapseHtmlQuotes, collapseMarkdownQuotes, quoteFallback, stripImageMarkup };
