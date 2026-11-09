@@ -617,8 +617,8 @@ async finalizeResearchedAnswer(answer, result, responsePolicy = {}, question) {
       if (Date.now() >= phaseDeadline) throw evidenceReviewFailure('ETIMEDOUT');
       if (!auditShapeValid(audit)) throw evidenceReviewFailure('EVIDENCE_REVIEW_INVALID');
       const subjectConfirmed = audit.addressesQuestion === true;
-      console.log(`[ANSWER AUDIT] phase=${short ? 'short' : 'full'} subjectConfirmed=${subjectConfirmed} approved=${audit.approved}`);
       const media = subjectConfirmed ? renderResearchImages(result, audit.imageIds) : '';
+      console.log(`[ANSWER AUDIT] phase=${short ? 'short' : 'full'} subjectConfirmed=${subjectConfirmed} approved=${audit.approved} media=${Boolean(media)}`);
       if (subjectConfirmed && audit.approved && (!photoOnly || media)) return { text: candidate, media };
       // The full audit may supply a complete repair. The short stage only
       // approves its fixed candidate; it cannot release a new unchecked draft.
@@ -819,7 +819,7 @@ async getResponse(history, currentMessage, imageBuffer = null, mimeType = "image
       researchContext = evidenceContext(result);
       researchResult = result;
       if (!responsePolicy.failOnUnavailable && result.foundSources?.length) responsePolicy.onFoundSources?.();
-      console.log(`[RESEARCH] sources=${result.sources.length} claims=${result.claims.length} sufficient=${result.sufficient} errors=${result.errors.length} recovery=${result.recoveryAttempted === true} mode=${result.output} found=${result.foundSources.length}`);
+      console.log(`[RESEARCH] sources=${result.sources.length} claims=${result.claims.length} sufficient=${result.sufficient} errors=${result.errors.length} recovery=${result.recoveryAttempted === true} mode=${result.output} found=${result.foundSources.length} imageIntent=${result.imageIntent || 'none'} images=${result.images.length}`);
       if (searchDecision.output === 'sources' && !responsePolicy.failOnUnavailable) {
           return await this.renderSourceReply(result, currentMessage.text, 'links')
             || (result.verificationFailed ? conservativeAnswer(result) : 'Поиск не вернул подходящих ссылок.');
@@ -1078,7 +1078,12 @@ async analyzeUserImmediate(input, currentProfile) {
 // Определение необходимости поиска (AI-решение вместо regex)
 async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', suppliedMaterial = '') {
     const intent = searchRequestIntent(userMessage);
-    const asksForImages = /(?:найди|поищи|покажи|пришли|подбери|дай)\s+(?:(?:мне|несколько|реальные|свежие|новые|архивные|пожалуйста),?\s+)*(?:фото|картинк|изображени|сним(?:ок|ки))|\b(?:find|show|send)\s+(?:(?:me|some|a|the)\s+)*\b(?:photos?|pictures?|images?)\b/iu.test(userMessage)
+    const appearance = userMessage.match(/(?:^|[^\p{L}])как\s+выгляд(?:ит|ят)\s+([^.!?\n]+)/iu)?.[1]?.trim();
+    const subject = appearance?.replace(/^(?:(?:мой|мо[яеё]|наш[ае]?|твой|тво[яеё]|корректн\p{L}*|правильн\p{L}*|типичн\p{L}*|хорош\p{L}*|готов\p{L}*|обычн\p{L}*|стандартн\p{L}*)\s+)+/iu, '');
+    const externalAppearance = subject && !/^(?:(?:эт[аои]|он[аио]?|код|json|xml|html|yaml|синтаксис|команд[аы]|строк[аи]|текст|запрос|ответ|шаблон|пример|метод|договор|резюме|документ|процесс|план)(?![\p{L}\d])|функци|выражени|формул|заявлени|конфигураци)/iu.test(subject);
+    const allowImages = !/(?:без\s+(?:фото|картинок|изображений)|только\s+(?:ссылки|текст)|не\s+(?:(?:надо|нужно)\s+)?(?:присыла\p{L}*|добавля\p{L}*|вставля\p{L}*|показыва\p{L}*)\s+(?:фото|картинк|изображени)|\b(?:no images|links only)\b)/iu.test(userMessage);
+    const asksForImages = allowImages
+        && Boolean(externalAppearance || /(?:найди|поищи|покажи|пришли|подбери|дай)\s+(?:(?:мне|несколько|реальные|свежие|новые|архивные|пожалуйста),?\s+)*(?:фото|картинк|изображени|сним(?:ок|ки))|\b(?:find|show|send)\s+(?:(?:me|some|a|the)\s+)*\b(?:photos?|pictures?|images?)\b/iu.test(userMessage))
         && !/(?:приложенн|прикрепл[её]нн|на\s+(?:этом|мо[её]м)\s+фото)/iu.test(userMessage);
     const prompt = prompts.shouldSearch(
         this.getCurrentTime(),
@@ -1092,7 +1097,7 @@ async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', s
         const result = await withTimeout(this.runLogicModel(prompt, { temperature: 0, model: config.mainModel }), 12000, 'Выбор поиска');
         if (result && typeof result.needsSearch === 'boolean') {
             // Explicit verification must not silently turn into a memory-only answer.
-            const wantsImages = asksForImages || result.imageIntent === 'requested';
+            const wantsImages = allowImages && (asksForImages || result.imageIntent === 'requested');
             if (intent.explicitSearch || wantsImages) result.needsSearch = true;
             if (result.needsSearch) {
                 result.searchQuery = typeof result.searchQuery === 'string' && result.searchQuery.trim()
@@ -1106,7 +1111,7 @@ async checkSearchNeeded(userMessage, recentHistory, chatTopic, replyText = '', s
                 : plannedOutput === 'lookup' && !deep ? 'lookup'
                 : !intent.output && plannedOutput === 'sources' && !deep ? 'sources' : 'answer';
             result.imageIntent = wantsImages ? 'requested'
-                : result.needsSearch && result.output === 'answer' && result.imageIntent === 'illustrate' ? 'illustrate' : null;
+                : allowImages && result.needsSearch && result.output === 'answer' && result.imageIntent === 'illustrate' ? 'illustrate' : null;
             result.includeImages = result.imageIntent !== null;
             if (result.output === 'lookup') result.timeRange = null;
             if (intent.requiredDomains.length) result.preferredDomains = intent.requiredDomains;

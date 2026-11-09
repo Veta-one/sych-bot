@@ -206,6 +206,25 @@ test('image search keeps distinct described candidates with their source, separa
   }
 });
 
+test('a failed image retry preserves already sufficient text evidence', async () => {
+  let searches = 0;
+  const result = await research({
+    question: 'What does the object look like?',
+    plan: { searchQuery: 'object', includeImages: true, imageIntent: 'requested' },
+    search: async () => {
+      if (++searches === 2) throw new Error('image search unavailable');
+      return [{ url: source.url, content: page }];
+    },
+    read: async () => page,
+    review: async () => ({ claims: [claim], sufficient: true, addressesQuestion: true }),
+  });
+  assert.equal(searches, 2);
+  assert.equal(result.claims.length, 1);
+  assert.equal(result.sufficient, true);
+  assert.equal(result.verificationFailed, false);
+  assert.deepEqual(result.errors, []);
+});
+
 test('failed auditing never publishes intermediate model conclusions', () => {
   const text = conservativeAnswer({ claims: [{ ...claim, url: source.url, status: 'contradicted' }], gaps: [], fallbackStage: 'answer_audit' });
   assert.match(text, /Проверку ответа завершить не удалось/);

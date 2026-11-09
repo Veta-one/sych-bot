@@ -416,6 +416,58 @@ test('a photo-only reply still needs the auditor to confirm the subject and sele
   }
 });
 
+test('an appearance question requests images and tries once more when only text was found', async () => {
+  const { ai } = harness();
+  const question = 'Сыч, как выглядит карта 5090?';
+  const url = 'https://example.org/rtx-5090';
+  const image = 'https://example.org/rtx-5090-front.jpg';
+  const quote = 'RTX 5090 Founders Edition has two fans.';
+  const searches = [];
+  let readCount = 0, reviewCount = 0;
+  ai.runLogicModel = async () => ({ needsSearch: true, output: 'lookup', searchQuery: 'RTX 5090 Founders Edition', imageIntent: null });
+  ai.performSearch = async (query, options) => {
+    searches.push(query);
+    assert.equal(options.includeImages, true);
+    return searches.length === 1 ? { results: [{ url }] } : { results: [], images: [{ url: image, description: quote }] };
+  };
+  ai.extractUrl = async () => { readCount++; return quote; };
+  ai.openai.chat.completions.create = async request => {
+    assert.match(JSON.stringify(request.messages), /Поиск уже нашёл кандидатов/);
+    return { choices: [{ message: { content: 'Не могу вставить фото. У Founders Edition два вентилятора.' } }] };
+  };
+  ai.reviewEvidence = async prompt => {
+    if (prompt.startsWith('ПРОВЕРКА ГОТОВОГО ОТВЕТА')) {
+      assert.match(prompt, /согласован ли текст с imageIds/);
+      return { approved: false, addressesQuestion: true, imageIds: ['I1'],
+        answer: `У Founders Edition два вентилятора. [Источник](${url})` };
+    }
+    reviewCount++;
+    return { sufficient: true, addressesQuestion: true, claims: [{ claim: 'Два вентилятора.', quote, sourceId: 'S1', status: 'supported' }] };
+  };
+  const answer = await ai.getResponse([], { text: question, sender: 'Тест' });
+  assert.deepEqual(searches, ['RTX 5090 Founders Edition', 'RTX 5090 Founders Edition photos']);
+  assert.equal(readCount, 1);
+  assert.equal(reviewCount, 1);
+  assert.match(answer, /<img src="https:\/\/example\.org\/rtx-5090-front\.jpg"/);
+  assert.doesNotMatch(answer, /не могу/i);
+});
+
+test('a request for a code example does not become a mandatory visual search', async () => {
+  const { ai } = harness();
+  ai.runLogicModel = async () => ({ needsSearch: false });
+  for (const text of ['Сыч, как выглядит JSON для вебхука?', 'как выглядит мой код?',
+    'как выглядит корректный JSON для вебхука?', 'как выглядит функция main на Python?']) {
+    const plan = await ai.checkSearchNeeded(text, [], null);
+    assert.equal(plan.needsSearch, false);
+    assert.equal(plan.includeImages, false);
+  }
+  ai.runLogicModel = async () => ({ needsSearch: true, imageIntent: 'requested', output: 'answer' });
+  const textOnly = await ai.checkSearchNeeded('Сыч, как выглядит карта 5090? Опиши без фото.', [], null);
+  assert.equal(textOnly.includeImages, false);
+  const noPictures = await ai.checkSearchNeeded('Как выглядит карта 5090? Не присылай картинки.', [], null);
+  assert.equal(noPictures.includeImages, false);
+});
+
 test('an auditor repair with its own link appendix is delivered with one source block', async () => {
   const { ai } = harness();
   const url = 'https://example.org/weather';
