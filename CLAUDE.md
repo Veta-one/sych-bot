@@ -85,7 +85,7 @@ Reputation events (1.16.3): only immediate analysis of an ordinary answered mess
 | Purpose | Model | Usage |
 |---------|-------|-------|
 | Logic/Analysis | `google/gemma-3-27b-it` | Context analysis, decide if response needed, emoji selection |
-| Smart Responses | `google/gemini-3.7-flash` | Generate conversational replies |
+| Smart Responses | `google/gemini-3.8-flash` | Generate replies, plan web searches, and verify sources and answers on the primary API |
 | Fallback | `gemini-2.5-flash-lite` | Google Gemini native when quota exhausted |
 
 **Fallback chain**: OpenRouter → Google Gemini (rotates through multiple keys) → Admin notification
