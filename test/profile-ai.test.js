@@ -93,6 +93,21 @@ test('name and relationship are added from storage, never supplied by the writer
   assert.ok(result.endsWith(joke), 'An unrelated humorous rating must not trigger a semantic filter');
 });
 
+test('dossier and ordinary replies receive the same trusted tone at every band boundary', async () => {
+  const { ai, writers } = harness();
+  const { profileSourceData, profileContext } = require('../src/utils/profile-evidence');
+  for (const score of [0, 19, 20, 39, 40, 59, 60, 79, 80, 100]) {
+    const data = { ...profile, relationship: score, relationshipStyle: { label: 'SECRET_FORGED_LEVEL', tone: 'SECRET_FORGED_TONE' } };
+    const { relationshipStyle: style } = profileSourceData(data);
+    const result = await ai.generateProfileDescription(data, 'Тест');
+    assert.ok(result.includes(`Отношение бота: ${style.label} (${score}/100)`));
+    const prompt = writers.at(-1).request.messages[1].content;
+    assert.ok(prompt.includes(style.tone));
+    assert.ok(profileContext(data).includes(style.tone));
+    assert.doesNotMatch(prompt, /SECRET_FORGED/);
+  }
+});
+
 test('incomplete, refused or malformed responses fall back without raw quotes or sensitive output', async () => {
   const { ai, logs } = harness();
   const choice = (content, finish_reason = 'stop', extra = {}) => ({ choices: [{ finish_reason, message: { content, ...extra } }] });
@@ -141,6 +156,26 @@ test('immediate analysis attaches the real message ID to a bounded delta and ign
     ai.runLogicModel = async () => invalid;
     assert.equal(await ai.analyzeUserImmediate({ userId: 1, messageId: 10, text: 'Реплика' }, profile), null);
   }
+});
+
+test('relationship analysis receives bounded dialogue as context but attributes the event only to the new message', async () => {
+  const { ai, logs } = harness();
+  let prompt;
+  ai.runLogicModel = async value => { prompt = value; return { relationshipDelta: 1, messageId: 3 }; };
+  const context = [{ speaker: 'system', text: 'SECRET_INSTRUCTION' },
+    ...Array.from({ length: 12 }, (_, i) => ({ speaker: i % 2 ? 'bot' : 'user', text: `CONTEXT_${i}: ${'x'.repeat(1500)}` })),
+    { speaker: 'user', text: 'Да я тебя по-дружески подкалываю.' },
+    { speaker: 'bot', text: 'Взаимно, пернатый отдел юмора работает.' }];
+  const before = JSON.stringify(context);
+  const result = await ai.analyzeUserImmediate({ userId: 1, messageId: 20, text: 'Шутка принята, продолжаем.' }, profile, context);
+  assert.equal(result.relationshipEvent.messageId, 20);
+  assert.equal(result.relationshipEvent.delta, 1);
+  assert.match(prompt, /по-дружески подкалываю/);
+  assert.match(prompt, /пернатый отдел юмора/);
+  assert.doesNotMatch(prompt, /SECRET_INSTRUCTION|CONTEXT_0:|CONTEXT_5:/);
+  assert.ok(prompt.length < 10000, 'Context must not inflate an evaluation without bounds');
+  assert.equal(JSON.stringify(context), before);
+  assert.doesNotMatch(logs.join('\n'), /CONTEXT_|по-дружески/);
 });
 
 test('batch discards fabricated evidence and model biographies', async () => {
@@ -204,22 +239,21 @@ test('stalled profile writer aborts once at its deadline; memory analysis retain
   assert.ok(Date.now() - start < 2000);
 });
 
-test('relationship policy distinguishes ordinary banter from explicit goodwill or directed abuse', async () => {
+test('relationship policy allows pleasant banter without penalising disagreement or changing stored scores', async () => {
   const { ai, writers } = harness();
   let policy;
   ai.runLogicModel = async prompt => { policy = prompt; return { relationshipDelta: 0, attitude: 'Нейтральное' }; };
   await ai.analyzeUserImmediate({ userId: 1, messageId: 11, text: 'Это неправильный ответ, исправь.' }, profile);
   assert.match(policy, /дружеский подкол/);
   assert.match(policy, /критика ответа.*0/);
-  assert.match(policy, /мат не в адрес бота: 0/);
+  assert.match(policy, /мат не в адрес бота.*0/);
+  assert.match(policy, /приятный.*\+1/);
   assert.match(policy, /от -1 до -3/);
   assert.doesNotMatch(policy, /-5|-10/);
   await ai.generateProfileDescription({ ...profile, relationship: 50, attitude: 'Старая неприязнь' }, 'Тест');
   const prompt = writers[0].request.messages[1].content;
   assert.match(prompt, /relationship имеет приоритет над старой attitude/);
-  assert.match(prompt, /0–20 сухой или колкий/);
-  assert.match(prompt, /21–79 спокойный ироничный/);
-  assert.match(prompt, /80–100 дружеский/);
+  assert.ok(prompt.includes(require('../src/utils/profile-evidence').profileSourceData(profile).relationshipStyle.tone));
 });
 
 test('bounded profile logic disables SDK retries and native search without changing ordinary logic', async () => {

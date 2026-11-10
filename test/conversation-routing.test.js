@@ -49,7 +49,7 @@ function harness() {
       state.answers.push({ input, history: [...history], media, mimeType, externalContext });
       return state.answerResponder ? state.answerResponder(policy) : '4';
     },
-    analyzeUserImmediate: async input => { state.immediate.push(input); return null; },
+    analyzeUserImmediate: async (input, profile, context) => { state.immediate.push(input); (state.relationshipContexts ||= []).push(context); return null; },
     analyzeBatch: async () => ({}), analyzeChatProfile: async () => ({}),
     describeImage: async () => null,
     generateProfileDescription: async (profile, targetName) => {
@@ -92,7 +92,7 @@ function harness() {
       (state.legacySends ||= []).push(args);
       return state.legacyResponder ? state.legacyResponder(...args) : { message_id: ++messageId };
     } };
-  return { state, ai, storage, async message(overrides) {
+  return { state, ai, storage, bot, async message(overrides) {
     const msg = { message_id: ++messageId, from: { id: 999, first_name: 'Тест' },
       chat: { id: -100, type: 'supergroup' }, is_topic_message: true, message_thread_id: 184, ...overrides };
     await box.exports.processMessage(bot, msg); return msg;
@@ -181,6 +181,73 @@ test('one answered message can collect batch facts but only immediate supplies i
   assert.equal(updates.length, 2);
   assert.deepEqual(Object.keys(updates[0]), ['factEvidence']);
   assert.deepEqual(JSON.parse(JSON.stringify(updates[1])), { relationshipEvent: { messageId: 20, delta: 1 } });
+});
+
+test('relationship dialogue stays with the author, topic and business scope and excludes future replies and forwards', async () => {
+  const { message, state } = harness();
+  state.answerResponder = () => `BOT_${state.answers.at(-1).input.text}`;
+  await message({ text: 'Сыч, OWN_OLD' });
+  await message({ text: 'Сыч, FOREIGN_USER', from: { id: 77, first_name: 'Чужой' } });
+  await message({ text: 'Сыч, FOREIGN_TOPIC', message_thread_id: 185 });
+  await message({ text: 'Сыч, FOREIGN_BUSINESS', business_connection_id: 'another' });
+  await message({ text: 'FORWARDED_TEXT', forward_origin: { type: 'user' } });
+  let finish;
+  state.answerResponder = () => new Promise(resolve => { finish = resolve; });
+  const pending = message({ text: 'Сыч, TARGET_NOW' });
+  await new Promise(setImmediate);
+  await message({ text: 'FUTURE_MESSAGE' });
+  finish('CURRENT_BOT_REPLY'); await pending;
+  const context = state.relationshipContexts.at(-1);
+  assert.deepEqual(JSON.parse(JSON.stringify(context)), [
+    { speaker: 'user', text: 'Сыч, OWN_OLD' }, { speaker: 'bot', text: 'BOT_Сыч, OWN_OLD' },
+  ]);
+  assert.equal(state.immediate.at(-1).text, 'Сыч, TARGET_NOW');
+});
+
+test('relationship context never attributes a generated image description to its sender', async () => {
+  const { ai, message, state } = harness();
+  ai.describeImage = async () => 'FOREIGN_PHOTO_DESCRIPTION';
+  await message({ text: 'Сыч, посмотри', reply_to_message: {
+    message_id: 10, from: { id: 77 }, photo: [{ file_id: 'foreign-photo' }],
+  } });
+  await new Promise(setImmediate);
+  await message({ text: 'Сыч, продолжаем' });
+  assert.ok(state.answers.at(-1).history.some(entry => entry.text.includes('FOREIGN_PHOTO_DESCRIPTION')),
+    'The image-memory enrichment must actually have occurred');
+  const context = state.relationshipContexts.at(-1);
+  assert.equal(context[0].text, 'Сыч, посмотри');
+  assert.doesNotMatch(JSON.stringify(context), /FOREIGN_PHOTO_DESCRIPTION/);
+});
+
+test('an earlier voice update cannot use a later text exchange while transcription is pending', async () => {
+  const { message, state } = harness();
+  await message({ message_id: 10, text: 'Сыч, OLD_MESSAGE' });
+  let finish;
+  state.transcriptionResponder = () => new Promise(resolve => { finish = resolve; });
+  const pending = message({ message_id: 30, voice: { file_id: 'voice' } });
+  await new Promise(setImmediate);
+  await message({ message_id: 31, text: 'Сыч, FUTURE_MESSAGE' });
+  finish({ text: 'Сыч, VOICE_MESSAGE' }); await pending;
+  const context = state.relationshipContexts.at(-1);
+  assert.equal(context[0].text, 'Сыч, OLD_MESSAGE');
+  assert.equal(context.length, 2);
+  assert.doesNotMatch(JSON.stringify(context), /FUTURE_MESSAGE/);
+});
+
+test('forgetting during command address resolution invalidates its earlier relationship context', async () => {
+  const { message, state, bot } = harness();
+  await message({ text: 'Сыч, FORGOTTEN_MESSAGE' });
+  let finish;
+  bot.getMe = () => new Promise(resolve => { finish = resolve; });
+  const before = state.immediate.length;
+  const pending = message({ text: '/comment@Siitch_bot Сыч, спасибо' });
+  await new Promise(setImmediate);
+  await message({ text: 'Сыч, забудь меня' });
+  finish({ username: 'Siitch_bot' }); await pending;
+  assert.equal(state.immediate.length, before, 'Stale address resolution must not resurrect forgotten context');
+  assert.equal(state.answers.length, 1);
+  await message({ text: 'Сыч, новый разговор' });
+  assert.doesNotMatch(JSON.stringify(state.relationshipContexts.at(-1)), /FORGOTTEN_MESSAGE|\/comment/);
 });
 
 test('forgotten in-flight batch results and failed-batch requeue cannot resurrect that user', async () => {

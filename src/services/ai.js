@@ -25,7 +25,7 @@ const { quickData } = require('./quick-data');
 const { research, evidenceContext, publicUrl, requestedUrls, sourceCoverageNote, answerAuditPrompt, shortResearchAnswer, conservativeAnswer, renderFoundSources, renderResearchImages, withoutResearchMedia, lookupAnswer, citedProviderSources, REVIEW_TIMEOUT_MS = 40000 } = require('./research');
 const { withTimeout } = require('../utils/async');
 const { isPrivateWork, runPrivateWork } = require('../utils/private-context');
-const { normalizeProfileMessages, relationshipUpdate, validateProfileUpdates, profileSourceData,
+const { normalizeProfileMessages, normalizeRelationshipContext, relationshipUpdate, validateProfileUpdates, profileSourceData,
   profileContext, profileDescriptionHeader, conservativeProfileDescription } = require('../utils/profile-evidence');
 const { parseVoiceJson, readTranscript, shouldSummarizeVoice, selectVoiceSummary } = require('../utils/voice');
 const { resolveReminderDecision, isRecallQuestion } = require('../utils/reminders');
@@ -1063,12 +1063,12 @@ async runLogicText(promptText) {
     return null; 
 }
 
-async analyzeUserImmediate(input, currentProfile) {
+async analyzeUserImmediate(input, currentProfile, context = []) {
     const [message] = normalizeProfileMessages([input]);
     if (!message || message.isForwarded || !Number.isSafeInteger(Number(message.messageId))) return null;
     try {
         const result = await withTimeout(this.runLogicModel(prompts.analyzeImmediate(
-            { relationship: profileSourceData(currentProfile).relationship }, message),
+            { relationship: profileSourceData(currentProfile).relationship }, message, normalizeRelationshipContext(context)),
             { temperature: 0, timeoutMs: PROFILE_ANALYSIS_TIMEOUT_MS }), PROFILE_ANALYSIS_TIMEOUT_MS, 'Обновление отношения');
         const update = relationshipUpdate(result, message.messageId);
         return Object.keys(update).length ? update : null;

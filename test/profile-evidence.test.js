@@ -72,3 +72,16 @@ test('deterministic profile header preserves zero and safely renders account nam
     assert.ok(evidence.profileDescriptionHeader({ relationship: score }, 'Имя').includes(expected));
   }
 });
+
+test('all five relationship bands agree between the header and ordinary answer context', () => {
+  for (const [score, label] of [[0, 'неприязнь'], [19, 'неприязнь'], [20, 'настороженно'], [39, 'настороженно'],
+    [40, 'нейтрально'], [59, 'нейтрально'], [60, 'симпатия'], [79, 'симпатия'], [80, 'свой'], [100, 'свой']]) {
+    const profile = { relationship: score, attitude: 'Старое впечатление' };
+    const before = JSON.stringify(profile);
+    assert.ok(evidence.profileDescriptionHeader(profile, 'Тест').includes(`Отношение бота: ${label} (${score}/100)`));
+    const data = evidence.profileSourceData(profile);
+    assert.equal(data.relationshipStyle.label, label);
+    assert.ok(evidence.profileContext(profile).includes(data.relationshipStyle.tone));
+    assert.equal(JSON.stringify(profile), before);
+  }
+});

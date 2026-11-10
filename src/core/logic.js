@@ -101,13 +101,16 @@ function getSychErrorReply(errText) {
     return phrases[Math.floor(Math.random() * phrases.length)];
 }
 
-function addToHistory(chatId, sender, text, userId = null, relatedUserId = null) {
+function addToHistory(chatId, sender, text, userId = null, relatedUserId = null, profileScope = null) {
   if (!chatHistory[chatId]) chatHistory[chatId] = [];
   const entry = {
     role: sender,
     text: text,
     userId: userId === null ? null : String(userId),
     relatedUserId: relatedUserId === null ? null : String(relatedUserId),
+    profileScope,
+    // Image-memory enrichment may change text later; it is not the author's words.
+    profileText: typeof text === 'string' ? text.slice(0, 800) : '',
   };
   chatHistory[chatId].push(entry);
   if (chatHistory[chatId].length > config.contextSize) {
@@ -284,6 +287,17 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     const historyKey = directChat ? 'direct:' + chatId : chatId;
     const userId = msg.from?.id;
     if (!userId) return;
+    const userMemoryRevision = memoryRevision(userId);
+    const userChatMemoryRevision = chatMemoryRevision(chatId);
+    // Capture the preceding dialogue before any await (including voice/file
+    // decoding), so later updates cannot change this message's interpretation.
+    let threadId = msg.is_topic_message ? msg.message_thread_id : (msg.message_thread_id || msg.reply_to_message?.message_thread_id);
+    if (typeof threadId !== 'number') threadId = null;
+    const profileScope = JSON.stringify([threadId || null, msg.business_connection_id || null]);
+    const relationshipContext = (chatHistory[historyKey] || []).filter(entry => entry.profileScope === profileScope
+      && !entry.isForwarded && (entry.userId === String(userId)
+        || (entry.userId === String(config.botId) && entry.relatedUserId === String(userId))))
+      .slice(-6).map(entry => ({ speaker: entry.userId === String(config.botId) ? 'bot' : 'user', text: entry.profileText }));
     if (directChat && (!msg.text || msg.voice || msg.audio || msg.photo || msg.video || msg.document || msg.sticker)) {
         await bot.sendMessage(chatId, 'В пилоте личного чата я отвечаю на текстовые сообщения.');
         return false;
@@ -305,6 +319,8 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     const command = addressedCommand?.name || '';
     if (command === '/ask' || command === '/say') return;
     const commandSuffix = addressedCommand ? `@${addressedCommand.username}` : '';
+    if (profileDeletionPending(userId) || memoryRevision(userId) !== userMemoryRevision
+      || chatMemoryRevision(chatId) !== userChatMemoryRevision) return;
 
     const isBusinessMessage = Boolean(msg.business_connection_id);
 
@@ -320,12 +336,6 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
         return;
     }
     
-    // 1. УМНЫЙ ПОИСК ТОПИКА
-    // Если это топик, ID должен быть тут. Если это реплай, иногда ID лежит внутри reply_to_message.
-    // [FIX] ЖЕСТКАЯ ПРОВЕРКА: Топик должен быть числом.
-    // В обычных группах тут может быть undefined, null или мусор — всё превращаем в null.
-    let threadId = msg.is_topic_message ? msg.message_thread_id : (msg.message_thread_id || (msg.reply_to_message ? msg.reply_to_message.message_thread_id : null));
-    if (typeof threadId !== 'number') threadId = null;
     const isSilenced = () => storage.isTopicMuted(chatId, threadId)
         || (userId !== config.adminId && storage.isBanned(userId, chatId));
     
@@ -338,8 +348,6 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     let hasTriggerWord = config.triggerRegex.test(cleanText);
     let isDirectlyCalled = directChat || hasTriggerWord || isReplyToBot || Boolean(ownQuestionFollowup);
     const followupToken = conversationFollowups.begin(msg, threadId, { botId: config.botId, inherited: sourceFollowup });
-    const userMemoryRevision = memoryRevision(userId);
-    const userChatMemoryRevision = chatMemoryRevision(chatId);
     const isStaleProfileReply = () => profileDeletionPending(userId)
         || memoryRevision(userId) !== userMemoryRevision || chatMemoryRevision(chatId) !== userChatMemoryRevision || Boolean(followupToken?.cancelled);
 
@@ -681,7 +689,9 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     startTyping(); 
   }
 
-  const currentMsgEntry = addToHistory(historyKey, senderName, text, userId);
+  if (isStaleProfileReply()) return;
+  const currentMsgEntry = addToHistory(historyKey, senderName, text, userId, null, profileScope);
+  currentMsgEntry.isForwarded = Boolean(msg.forward_origin || msg.forward_from || msg.forward_from_chat || msg.forward_sender_name);
 
   // === СТАТИСТИКА ===
   if (!directChat && (cleanText === 'сыч стата' || cleanText === 'сыч статистика')) {
@@ -1107,7 +1117,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
         answerDelivered = Number.isSafeInteger(sent?.messageId) && sent.messageId > 0;
         stopTyping(); // <-- Всё, сообщение ушло, выключаем статус
         if (isSilenced() || isStaleProfileReply()) return directChat ? answerAvailable && answerDelivered : undefined;
-        if (!directChat || answerAvailable) addToHistory(historyKey, "Сыч", aiResponse, config.botId, userId);
+        if (!directChat || answerAvailable) addToHistory(historyKey, "Сыч", aiResponse, config.botId, userId, profileScope);
         if (sent?.ok !== false) conversationFollowups.confirm(followupToken, sent?.messageId);
 
     } catch (error) {
@@ -1152,7 +1162,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
                 else allChunksConfirmed = false;
              }
              if (isSilenced() || isStaleProfileReply()) return;
-             addToHistory(historyKey, "Сыч", aiResponse, config.botId, userId);
+             addToHistory(historyKey, "Сыч", aiResponse, config.botId, userId, profileScope);
              if (allChunksConfirmed) conversationFollowups.confirm(followupToken, confirmedMessageId);
         } catch (e2) { console.error("FATAL SEND ERROR (Даже аварийная не ушла):", e2.message); }
     }
@@ -1182,7 +1192,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     // Запускаем анализ
     const isCurrent = () => !profileDeletionPending(userId) && memoryRevision(userId) === userMemoryRevision
       && chatMemoryRevision(chatId) === userChatMemoryRevision;
-    ai.analyzeUserImmediate(profileMessage, userProfile).then(updated => {
+    ai.analyzeUserImmediate(profileMessage, userProfile, relationshipContext).then(updated => {
         if (updated?.relationshipEvent && isCurrent()) {
             return storage.bulkUpdateProfiles(chatId, { [userId]: { relationshipEvent: updated.relationshipEvent } }, { isCurrent });
         }
