@@ -48,11 +48,11 @@ function loadIndex({ member = { status: 'member' }, error, knownChats = {}, stor
   return { bot, handlers, calls, message, options, storage };
 }
 
-test('CHAT_ADMIN_REQUIRED leaves the group before any conversation processing', async () => {
+test('CHAT_ADMIN_REQUIRED suspends group work without leaving', async () => {
   const f = loadIndex({ error: new Error('ETELEGRAM: 400 Bad Request: CHAT_ADMIN_REQUIRED') });
   await f.handlers.message(f.message());
   assert.equal(f.calls.processed.length, 0);
-  assert.deepEqual(f.calls.left, [-123]);
+  assert.deepEqual(f.calls.left, []);
 });
 
 test('all failed owner checks block ordinary and hidden group inputs', async () => {
@@ -61,7 +61,7 @@ test('all failed owner checks block ordinary and hidden group inputs', async () 
       const f = loadIndex({ error: new Error(text) });
       await f.handlers.message(f.message(extra));
       assert.equal(f.calls.processed.length, 0, text);
-      assert.deepEqual(f.calls.left, [-123]);
+      assert.deepEqual(f.calls.left, []);
     }
   }
 });
@@ -74,7 +74,7 @@ test('owner membership allows messages, absence exits, including restricted memb
     assert.equal(f.calls.processed.length, 1);
     assert.equal(f.calls.left.length, 0);
   }
-  for (const member of [{ status: 'left' }, { status: 'kicked' }, { status: 'restricted', is_member: false }, null]) {
+  for (const member of [{ status: 'left' }, { status: 'kicked' }, { status: 'restricted', is_member: false }]) {
     const f = loadIndex({ member });
     await f.handlers.message(f.message());
     assert.equal(f.calls.processed.length, 0);
@@ -108,11 +108,11 @@ test('outgoing messages and reactions recheck access while private destinations 
   }
   await f.bot._request('sendMessage', { form: { chat_id: 1 } });
   assert.equal(f.calls.requests.length, 1);
-  assert.deepEqual(f.calls.left, [-123]);
+  assert.deepEqual(f.calls.left, []);
 });
 
 test('known groups are checked at startup', async () => {
-  const f = loadIndex({ error: new Error('CHAT_ADMIN_REQUIRED'), knownChats: { '-123': { chatName: 'Test group' } } });
+  const f = loadIndex({ member: { status: 'left' }, knownChats: { '-123': { chatName: 'Test group' } } });
   await new Promise(resolve => setTimeout(resolve, 20));
   assert.deepEqual(f.calls.left, [-123]);
   assert.equal(f.calls.notices.length, 1);
@@ -124,13 +124,98 @@ test('known groups are checked at startup', async () => {
 const { createGroupAccess } = require('../src/services/group-access');
 const quiet = { log() {}, error() {} };
 
+test('a failed owner lookup suspends group work without leaving and recovers on a later check', async () => {
+  const f = loadIndex({ error: new Error('ETIMEDOUT') });
+  await f.handlers.message(f.message());
+  assert.equal(f.calls.processed.length, 0);
+  assert.deepEqual(f.calls.left, [], 'lookup failure must not make the bot leave an authorized group');
+  assert.equal(Object.keys(f.storage.data.groupExitPending).length, 0);
+  assert.equal(Object.keys(f.storage.data.groupDeparted).length, 0);
+  assert.equal(f.calls.notices.length, 0);
+  f.bot.getChatMember = async () => ({ status: 'member' });
+  await f.handlers.message(f.message());
+  assert.equal(f.calls.processed.length, 1);
+});
+
+test('unknown owner statuses suspend work and can recover without a new invitation', async () => {
+  for (const member of [null, {}, { status: 'unknown' }, { status: 'restricted' }]) {
+    const f = loadIndex({ member });
+    await f.handlers.message(f.message());
+    assert.equal(f.calls.processed.length, 0);
+    assert.deepEqual(f.calls.left, []);
+    f.bot.getChatMember = async () => ({ status: 'member' });
+    await f.handlers.message(f.message());
+    assert.equal(f.calls.processed.length, 1);
+  }
+});
+
+test('startup lookup errors do not leave known groups or send exit notices', async () => {
+  const f = loadIndex({ error: new Error('502 Bad Gateway'), knownChats: { '-123': {} } });
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(f.calls.left, []);
+  assert.equal(f.calls.notices.length, 0);
+});
+
+test('rate limits block outbound operations until a successful fresh check without leaking errors', async () => {
+  const logs = [];
+  let failing = true;
+  let left = 0;
+  const access = createGroupAccess({
+    async getChatMember() {
+      if (failing) throw Object.assign(new Error('private error body'), {
+        response: { body: { error_code: 429, description: 'private body', parameters: { retry_after: 60 } } }
+      });
+      return { status: 'member' };
+    },
+    async leaveChat() { left++; return true; }
+  }, 1, { logger: { log: line => logs.push(line), error: line => logs.push(line) } });
+  await assert.rejects(access.requireAccess(-123), { code: 'GROUP_ACCESS_DENIED' });
+  assert.equal(left, 0);
+  assert.deepEqual(logs, ['[GROUP ACCESS] CHECK_DEFERRED chat=-123 reason=RATE_LIMIT']);
+  failing = false;
+  await access.requireAccess(-123);
+});
+
+test('legacy failed-check exits are cancelled on restart but confirmed-absence exits are retained', async () => {
+  const pending = {
+    '-123': { reason: 'OWNER_CHECK_FAILED', retryAt: 0 },
+    '-456': { reason: 'OWNER_ABSENT', retryAt: 0 }
+  };
+  const left = [];
+  let saved = 0;
+  const access = createGroupAccess({
+    async getChatMember() { return { status: 'member' }; },
+    async leaveChat(id) { left.push(id); return true; }
+  }, 1, { pending, logger: quiet, save: () => { saved++; } });
+  assert.equal(saved, 1, 'cancelled decisions must be persisted before exit recovery');
+  await access.retryExits();
+  assert.deepEqual(left, [-456]);
+  assert.equal(await access.check(-123), true);
+  assert.equal(await access.check(-456), false);
+});
+
+test('unknown lookup never overrides a real owner departure or a later membership epoch', async () => {
+  let resolve;
+  const left = [];
+  const access = createGroupAccess({
+    getChatMember: () => new Promise(done => { resolve = done; }),
+    async leaveChat(id) { left.push(id); return true; }
+  }, 1, { logger: quiet });
+  const checking = access.check(-123);
+  await access.deny(-123, 'OWNER_LEFT');
+  resolve({});
+  assert.equal(await checking, false);
+  assert.deepEqual(left, [-123]);
+  assert.equal(await access.check(-123), false);
+});
+
 test('failed exit stays persisted and blocked, respects retry_after, and succeeds on a later tick', async () => {
   let clock = 1000;
   let attempts = 0;
   let saved = '';
   const pending = {};
   const bot = {
-    async getChatMember() { throw new Error('CHAT_ADMIN_REQUIRED'); },
+    async getChatMember() { return { status: 'left' }; },
     async leaveChat() {
       if (++attempts === 1) throw Object.assign(new Error('Too Many Requests'), {
         response: { body: { parameters: { retry_after: 60 } } },
@@ -163,7 +248,7 @@ test('pending exits recover after a restart and do not enable message handling',
   assert.deepEqual(pending, {});
 });
 
-test('concurrent messages share one failed check and one exit', async () => {
+test('concurrent messages share one failed check without initiating an exit', async () => {
   let checks = 0;
   let exits = 0;
   const access = createGroupAccess({
@@ -173,15 +258,19 @@ test('concurrent messages share one failed check and one exit', async () => {
   const results = await Promise.all(Array.from({ length: 20 }, () => access.check(-123)));
   assert.ok(results.every(result => result === false));
   assert.equal(checks, 1);
-  assert.equal(exits, 1);
+  assert.equal(exits, 0);
 });
 
-test('a stuck membership lookup times out and initiates exit', async () => {
+test('a stuck membership lookup times out and suspends work without leaving', async () => {
   const left = [];
+  const logs = [];
   const access = createGroupAccess({ getChatMember: () => new Promise(() => {}),
-    async leaveChat(id) { left.push(id); return true; } }, 1, { timeoutMs: 10, logger: quiet });
+    async leaveChat(id) { left.push(id); return true; } }, 1, {
+    timeoutMs: 10, logger: { log() {}, error: line => logs.push(line) }
+  });
   assert.equal(await access.check(-123), false);
-  assert.deepEqual(left, [-123]);
+  assert.deepEqual(left, []);
+  assert.deepEqual(logs, ['[GROUP ACCESS] CHECK_DEFERRED chat=-123 reason=TIMEOUT']);
 });
 
 test('a delayed successful lookup cannot override a block', async () => {
@@ -270,7 +359,7 @@ test('a deactivated chat is retired only after Telegram confirms the bot itself 
   f.bot.leaveChat = async () => { throw new Error('ETELEGRAM: 400 Bad Request: chat is deactivated'); };
   f.bot.getChatMember = async (chatId, userId) => {
     lookedUp.push(userId);
-    if (userId === 1) throw new Error('CHAT_ADMIN_REQUIRED');
+    if (userId === 1) return { status: 'left' };
     assert.equal(userId, 99, 'confirm the bot, not the owner');
     return { status: 'left' };
   };

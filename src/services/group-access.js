@@ -14,9 +14,39 @@ function createGroupAccess(bot, ownerId, { pending = {}, notices = {}, departed 
       || (member?.status === 'restricted' && member.is_member === true);
   }
 
+  function isAbsent(member) {
+    return ['left', 'kicked'].includes(member?.status)
+      || (member?.status === 'restricted' && member.is_member === false);
+  }
+
   function persist() {
     try { save(); }
     catch (_) { logger.error('[GROUP ACCESS] Could not save pending exits'); }
+  }
+
+  // Older versions queued exits after inconclusive owner lookups. Discard only
+  // those unconfirmed decisions; every new operation still needs a fresh check.
+  let recovered = false;
+  for (const key of Object.keys(pending)) {
+    if (pending[key]?.reason !== 'OWNER_CHECK_FAILED') continue;
+    delete pending[key];
+    if (!departed[key]) blocked.delete(key);
+    recovered = true;
+    logger.log(`[GROUP ACCESS] CHECK_RECOVERY chat=${key}`);
+  }
+  if (recovered) persist();
+
+  function unknownOwner(key, error) {
+    const status = Number(error?.response?.body?.error_code || error?.response?.statusCode);
+    const description = error?.response?.body?.description || error?.message || '';
+    const reason = status === 429 ? 'RATE_LIMIT'
+      : status >= 500 && status < 600 ? 'TELEGRAM_UNAVAILABLE'
+      : /CHAT_ADMIN_REQUIRED/i.test(description) ? 'ADMIN_REQUIRED'
+      : status === 403 ? 'FORBIDDEN'
+      : error?.code === 'ETIMEDOUT' || /timeout|ETIMEDOUT/i.test(description) ? 'TIMEOUT'
+      : error ? 'LOOKUP_FAILED' : 'INVALID_MEMBER';
+    logger.error(`[GROUP ACCESS] CHECK_DEFERRED chat=${key} reason=${reason}`);
+    return false;
   }
 
   async function deliverNotice(key) {
@@ -111,13 +141,14 @@ function createGroupAccess(bot, ownerId, { pending = {}, notices = {}, departed 
       try {
         if (!Number.isSafeInteger(ownerId) || ownerId <= 0) throw new Error('INVALID_OWNER_ID');
         member = await withTimeout(bot.getChatMember(Number(chatId), ownerId), timeoutMs, 'getChatMember');
-      } catch (_) {
+      } catch (error) {
         if (epochs.get(key) !== epoch) return false;
-        return deny(chatId, 'OWNER_CHECK_FAILED');
+        return unknownOwner(key, error);
       }
       if (blocked.has(key) || epochs.get(key) !== epoch) return false;
-      if (!isMember(member)) return deny(chatId, 'OWNER_ABSENT');
-      return true;
+      if (isMember(member)) return true;
+      if (isAbsent(member)) return deny(chatId, 'OWNER_ABSENT');
+      return unknownOwner(key);
     })();
     checks.set(key, work);
     try { return await work; } finally { if (checks.get(key) === work) checks.delete(key); }
@@ -127,6 +158,7 @@ function createGroupAccess(bot, ownerId, { pending = {}, notices = {}, departed 
     const chatId = update.chat?.id;
     if (!(chatId < 0)) return;
     const key = String(chatId);
+    if (!isMember(update.new_chat_member) && !isAbsent(update.new_chat_member)) return;
     // A new membership event supersedes outstanding checks from the previous stay.
     epochs.set(key, (epochs.get(key) || 0) + 1);
     checks.delete(key);
