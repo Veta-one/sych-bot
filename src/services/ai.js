@@ -25,7 +25,7 @@ const { quickData } = require('./quick-data');
 const { research, evidenceContext, publicUrl, requestedUrls, sourceCoverageNote, answerAuditPrompt, shortResearchAnswer, conservativeAnswer, renderFoundSources, renderResearchImages, withoutResearchMedia, lookupAnswer, citedProviderSources, REVIEW_TIMEOUT_MS = 40000 } = require('./research');
 const { withTimeout } = require('../utils/async');
 const { isPrivateWork, runPrivateWork } = require('../utils/private-context');
-const { normalizeProfileMessages, normalizeRelationshipContext, relationshipUpdate, validateProfileUpdates, profileSourceData,
+const { MAX_RELATIONSHIP_DELTA, normalizeProfileMessages, normalizeRelationshipContext, relationshipUpdate, validateProfileUpdates, profileSourceData,
   profileContext, profileDescriptionHeader, conservativeProfileDescription } = require('../utils/profile-evidence');
 const { parseVoiceJson, readTranscript, shouldSummarizeVoice, selectVoiceSummary } = require('../utils/voice');
 const { resolveReminderDecision, isRecallQuestion } = require('../utils/reminders');
@@ -1167,7 +1167,7 @@ async analyzeBatch(messagesBatch, currentProfiles, chatContext = {}) {
     const knownInfo = [...new Set(messages.map(message => message.userId))];
     const itemSchema = properties => ({ type: 'object', properties, required: Object.keys(properties), additionalProperties: false });
     const responseSchema = itemSchema({
-        events: { type: 'array', items: itemSchema({ userId: { type: 'string' }, messageId: { type: 'string' }, delta: { type: 'integer', minimum: -3, maximum: 3 } }) },
+        events: { type: 'array', items: itemSchema({ userId: { type: 'string' }, messageId: { type: 'string' }, delta: { type: 'integer', minimum: -MAX_RELATIONSHIP_DELTA, maximum: MAX_RELATIONSHIP_DELTA } }) },
         evidence: { type: 'array', items: itemSchema({ userId: { type: 'string' }, messageId: { type: 'string' }, quote: { type: 'string' } }) },
     });
     try {

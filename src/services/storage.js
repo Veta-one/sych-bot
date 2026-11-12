@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { mergeProfileEvidence } = require('../utils/profile-evidence');
+const { mergeProfileEvidence, MAX_RELATIONSHIP_DELTA } = require('../utils/profile-evidence');
 
 const DEFAULT_DATA_DIR = path.join(__dirname, '../../data');
 const debounce = require('lodash.debounce');
@@ -698,7 +698,7 @@ class StorageService {
         // Each immediate message contributes one bounded delta to current state.
         const event = data.relationshipEvent;
         if (event && typeof event === 'object' && !Array.isArray(event)
-          && validMessageId(event.messageId) && Number.isInteger(event.delta) && event.delta >= -3 && event.delta <= 3) {
+          && validMessageId(event.messageId) && Number.isInteger(event.delta) && Math.abs(event.delta) <= MAX_RELATIONSHIP_DELTA) {
           const ledger = current.relationshipEvents || {};
           let floor = Number.isSafeInteger(ledger.floor) && ledger.floor >= 0 ? ledger.floor : 0;
           const ids = [...new Set((Array.isArray(ledger.ids) ? ledger.ids : []).filter(id => validMessageId(id) && id > floor))].sort((a, b) => a - b);

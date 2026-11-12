@@ -152,7 +152,7 @@ test('immediate analysis attaches the real message ID to a bounded delta and ign
   assert.match(request.prompt, /userId.*1/);
   assert.equal(request.options.temperature, 0);
   assert.equal(await ai.analyzeUserImmediate('А: Спасибо. Б: Я живу на Марсе.', profile), null);
-  for (const invalid of [{ relationship: 53 }, { relationshipDelta: 0.5 }, { relationshipDelta: -4 }, { relationshipDelta: 4 }]) {
+  for (const invalid of [{ relationship: 53 }, { relationshipDelta: 0.5 }, { relationshipDelta: -11 }, { relationshipDelta: 11 }]) {
     ai.runLogicModel = async () => invalid;
     assert.equal(await ai.analyzeUserImmediate({ userId: 1, messageId: 10, text: 'Реплика' }, profile), null);
   }
@@ -203,6 +203,19 @@ test('observer requires a validated event for each eligible message and logs inc
   assert.doesNotMatch(logs.join('\n'), /SECRET_WORDS/);
 });
 
+test('the observer accepts every integer step from minus ten to ten and rejects values beyond the range', async () => {
+  const { ai } = harness();
+  for (let delta = -10; delta <= 10; delta++) {
+    ai.runLogicModel = async () => ({ events: [{ userId: '1', messageId: '10', delta }], evidence: [] });
+    const result = await ai.analyzeBatch([{ userId: 1, messageId: 10, text: 'Реплика участника' }], {});
+    assert.equal(result?.[1]?.relationshipEvents[0].delta, delta);
+  }
+  for (const delta of [-11, 11, 3.5, '10']) {
+    ai.runLogicModel = async () => ({ events: [{ userId: '1', messageId: '10', delta }], evidence: [] });
+    assert.equal(await ai.analyzeBatch([{ userId: 1, messageId: 10, text: 'Реплика участника' }], {}), null);
+  }
+});
+
 test('live observer request uses the strict flat schema that replaced unreliable free JSON batches', async () => {
   const { ai } = harness(); let body, options;
   ai.openai.chat.completions.create = async (request, opts) => {
@@ -213,6 +226,8 @@ test('live observer request uses the strict flat schema that replaced unreliable
   assert.equal(result[1].relationshipEvents[0].delta, 1);
   assert.equal(body.response_format.type, 'json_schema');
   assert.equal(body.response_format.json_schema.strict, true);
+  assert.equal(body.response_format.json_schema.schema.properties.events.items.properties.delta.minimum, -10);
+  assert.equal(body.response_format.json_schema.schema.properties.events.items.properties.delta.maximum, 10);
   assert.deepEqual([...body.response_format.json_schema.schema.required], ['events', 'evidence']);
   assert.equal(body.provider.require_parameters, true);
   assert.equal(body.max_tokens, 2500);
@@ -305,8 +320,8 @@ test('relationship policy allows pleasant banter without penalising disagreement
   assert.match(policy, /критика ответа.*0/);
   assert.match(policy, /мат не в адрес бота.*0/);
   assert.match(policy, /приятный.*\+1/);
-  assert.match(policy, /от -1 до -3/);
-  assert.doesNotMatch(policy, /-5|-10/);
+  assert.match(policy, /от -10 до \+10/);
+  assert.match(policy, /-8\.\.-10/);
   await ai.generateProfileDescription({ ...profile, relationship: 50, attitude: 'Старая неприязнь' }, 'Тест');
   const prompt = writers[0].request.messages[1].content;
   assert.match(prompt, /relationship имеет приоритет над старой attitude/);

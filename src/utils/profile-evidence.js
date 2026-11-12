@@ -53,10 +53,12 @@ function normalizeProfileMessages(messages) {
   return selected;
 }
 
+const MAX_RELATIONSHIP_DELTA = 10;
+
 function relationshipUpdate(value, messageId) {
   const eventId = Number(id(messageId));
   if (!record(value) || !Number.isSafeInteger(eventId) || eventId <= 0
-    || !Number.isInteger(value.relationshipDelta) || value.relationshipDelta < -3 || value.relationshipDelta > 3) return {};
+    || !Number.isInteger(value.relationshipDelta) || Math.abs(value.relationshipDelta) > MAX_RELATIONSHIP_DELTA) return {};
   const event = { messageId: eventId, delta: value.relationshipDelta };
   if (typeof value.attitude === 'string' && value.attitude.trim() && value.attitude.length <= 400) event.attitude = value.attitude.trim();
   return { relationshipEvent: event };
@@ -195,5 +197,5 @@ function conservativeProfileDescription(profile, targetName, reason = 'insuffici
   return profileDescriptionHeader(profile, targetName) + '\n\n' + (messages[reason] || messages.unavailable);
 }
 
-module.exports = { normalizeProfileMessages, normalizeRelationshipContext, relationshipUpdate, validateProfileUpdates, mergeProfileEvidence,
+module.exports = { MAX_RELATIONSHIP_DELTA, normalizeProfileMessages, normalizeRelationshipContext, relationshipUpdate, validateProfileUpdates, mergeProfileEvidence,
   profileSourceData, profileContext, profileDescriptionHeader, conservativeProfileDescription };

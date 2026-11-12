@@ -81,7 +81,7 @@ test('legacy absolute scores, bare attitude and malformed event fields are ignor
   storage.bulkUpdateProfiles('-100', { 42: { relationship: 0, attitude: 'Подмена из batch' } });
   await storage.profileUpdateQueue;
   for (const [id, delta] of [[0, 1], [-1, 1], [1.5, 1], ['20', 1], [Number.MAX_SAFE_INTEGER + 1, 1],
-    [20, -4], [21, 4], [22, 0.5], [23, '1'], [24, NaN]]) await apply(storage, id, delta, 'Нельзя записывать');
+    [20, -11], [21, 11], [22, 0.5], [23, '1'], [24, NaN]]) await apply(storage, id, delta, 'Нельзя записывать');
   const profile = storage.getProfile('-100', 42);
   assert.equal(profile.relationship, 50);
   assert.equal(profile.attitude, 'Сохранённое отношение');
@@ -105,4 +105,20 @@ test('score boundaries clamp the applied delta and zero remains a valid score', 
   assert.equal((await apply(store(0), 1, -3)).relationship, 0);
   assert.equal((await apply(store(99), 1, 3)).relationship, 100);
   assert.equal((await apply(store(0), 1, 1)).relationship, 1);
+});
+
+test('ten-point reputation steps apply once, preserve memory and stay within 0–100', async () => {
+  const storage = store();
+  assert.equal((await apply(storage, 1, 10)).relationship, 60);
+  assert.equal((await apply(storage, 1, -10)).relationship, 60, 'The same message cannot change the score twice');
+  assert.equal((await apply(storage, 2, -10)).relationship, 50);
+  assert.equal((await apply(storage, 3, 7)).relationship, 57);
+  assert.equal((await apply(storage, 4, -6)).relationship, 51);
+  assert.equal((await apply(storage, 5, 0)).relationship, 51);
+  for (const delta of [-11, 11, 5.5, '10']) {
+    assert.equal((await apply(storage, 6, delta)).relationship, 51);
+  }
+  assert.equal(storage.getProfile('-100', 42).facts, 'Сохранённая память');
+  assert.equal((await apply(store(95), 1, 10)).relationship, 100);
+  assert.equal((await apply(store(5), 1, -10)).relationship, 0);
 });
