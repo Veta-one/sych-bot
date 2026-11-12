@@ -36,6 +36,125 @@ function harness(extraDependencies = {}, runtime = {}) {
   return { ai, calls, config, notifications };
 }
 
+test('creative and explanatory replies use the supplied post text without opening incidental links', async () => {
+  for (const text of ['Сыч, расскажи анекдот по этому сюжету',
+    'Сыч, а они тогда золотыми не станут? И охлаждение как выводить? Не проще подводные делать?']) {
+    const { ai, calls } = harness();
+    ai.runLogicModel = async () => ({ needsSearch: false, sourceUse: 'context' });
+    ai.extractUrl = async () => assert.fail('An incidental source must not block the current request');
+    ai.performSearch = async () => assert.fail('A contextual answer needs no external search');
+    const answer = await ai.getResponse([], { sender: 'Тест', text,
+      sourceContext: { text: 'Исходный пост: предлагается размещать дата-центры под землёй.', urls: ['https://t.me/+synthetic-invite'] } });
+    assert.match(answer, /Ответ Сыча/);
+    assert.equal(calls.length, 1);
+    assert.ok(Array.isArray(calls[0].messages[1].content));
+    assert.match(calls[0].messages[1].content[0].text, /дата-центры под землёй/);
+    assert.doesNotMatch(answer, /<details/);
+  }
+});
+
+test('asking for words after a source-only answer retains the original question without repeating its URL read', async () => {
+  const { ai, calls } = harness();
+  ai.runLogicModel = async () => ({ needsSearch: false, sourceUse: 'context' });
+  ai.extractUrl = async () => assert.fail('Do not loop over the failed URL');
+  await ai.getResponse([], { sender: 'Тест', text: 'заебал! буквами отвечай',
+    replyText: 'Источники. Не удалось прочитать исходную страницу.',
+    sourceContext: { text: 'Пост про подземный ЦОД. Вопрос: как отводить тепло и не станет ли он слишком дорогим?',
+      urls: ['https://t.me/synthetic/5010'] } });
+  const prompt = calls[0].messages[1].content[0].text;
+  assert.match(prompt, /как отводить тепло/);
+  assert.match(prompt, /буквами отвечай/);
+});
+
+test('a genuine web search can ignore a promotional context link while still reviewing its own sources', async () => {
+  const { ai, calls } = harness(); let searches = 0;
+  ai.runLogicModel = async () => ({ needsSearch: true, searchQuery: 'official countries', sourceUse: 'context' });
+  ai.performSearch = async () => { searches++; return [{ url: 'https://example.org/countries', content: 'Kazakhstan is supported for Claude.ai.' }]; };
+  ai.extractUrl = async url => { assert.notEqual(url, 'https://t.me/+promo'); return 'Kazakhstan is supported for Claude.ai.'; };
+  await ai.getResponse([], { sender: 'Тест', text: 'Сыч, найди в интернете список поддерживаемых стран',
+    sourceContext: { text: 'Пост со ссылкой на подписку.', urls: ['https://t.me/+promo'] } });
+  assert.ok(searches > 0);
+  assert.match(calls[0].messages[1].content[0].text, /РЕЗУЛЬТАТ ПРОВЕРКИ ИСТОЧНИКОВ/);
+});
+
+test('both writers retain the original topic and the bot answer requested for editing', async () => {
+  for (const native of [false, true]) {
+    const { ai, calls } = harness(); let nativePrompt;
+    ai.runLogicModel = async () => ({ needsSearch: false, sourceUse: 'context' });
+    ai.extractUrl = async () => assert.fail('Editing does not read the post again');
+    if (native) {
+      ai.openai = null;
+      ai.executeNativeWithRetry = fn => fn();
+      ai.nativeModel = { generateContent: async request => {
+        nativePrompt = request.contents[0].parts.map(part => part.text || '').join('\n');
+        return { response: { text: () => 'Короткое объяснение', candidates: [{}] } };
+      } };
+    }
+    await ai.getResponse([], { sender: 'Тест', text: 'Сократи свой ответ до двух предложений',
+      replyText: 'Мой длинный ответ: тепло отводят через жидкостный контур.',
+      sourceContext: { text: 'Исходный вопрос о подземном ЦОД.', urls: ['https://example.org/post'] } });
+    const prompt = native ? nativePrompt : calls[0].messages[1].content[0].text;
+    assert.match(prompt, /Исходный вопрос о подземном ЦОД/);
+    assert.match(prompt, /Мой длинный ответ: тепло отводят через жидкостный контур/);
+    assert.match(prompt, /Сократи свой ответ до двух предложений/);
+  }
+});
+
+test('incidental videos stay closed while summaries, fact checks and updates retain their planned work', async () => {
+  for (const action of ['context', 'summary', 'verify', 'update']) {
+    let transcripts = 0, searches = 0;
+    const { ai, calls } = harness({ './youtube': { isYouTubeUrl: () => true,
+      selectYoutubeTranscriptMaxChars: () => 1000,
+      getYoutubeContext: async () => { transcripts++; return { text: 'Video facts' }; },
+      buildYoutubePromptContext: () => 'Video facts',
+    } });
+    ai.runLogicModel = async () => ({ needsSearch: ['verify', 'update'].includes(action),
+      searchQuery: 'official countries', sourceUse: action === 'context' ? 'context' : 'read' });
+    ai.performSearch = async () => { searches++; return [{ url: 'https://example.org/countries', content: 'Kazakhstan is supported for Claude.ai.' }]; };
+    ai.extractUrl = async url => { assert.equal(url, 'https://example.org/countries'); return 'Kazakhstan is supported for Claude.ai.'; };
+    const text = action === 'context' ? 'Придумай диалог по этому сюжету'
+      : action === 'summary' ? 'Перескажи видео'
+      : action === 'verify' ? 'Проверь правдивость этого видео'
+      : 'Какая сейчас версия проекта из этого видео и что изменилось после него?';
+    await ai.getResponse([], { sender: 'Тест', text,
+      sourceContext: { text: 'Пост с видео.', urls: ['https://www.youtube.com/watch?v=synthetic'] } });
+    assert.equal(transcripts, action === 'context' ? 0 : 1);
+    assert.equal(searches, ['verify', 'update'].includes(action) ? 1 : 0);
+    if (action !== 'context') assert.match(calls[0].messages[1].content[0].text, /Video facts/);
+  }
+});
+
+test('bare current links still get read after planner failure, unlike incidental inherited links', async () => {
+  for (const bare of [false, true]) {
+    const { ai } = harness(); const reads = [];
+    ai.runLogicModel = async () => null;
+    ai.extractUrl = async url => { reads.push(url); return null; };
+    await ai.getResponse([], { sender: 'Тест', text: bare ? 'Сыч, https://example.org/page' : 'Напиши по этому сюжету диалог',
+      sourceContext: { text: 'Данный сюжет', urls: ['https://example.org/page'] } });
+    assert.deepEqual(reads, bare ? ['https://example.org/page'] : []);
+  }
+});
+
+test('a source-reading prohibition remains actionable when the planner is unavailable', async () => {
+  const { ai, calls } = harness();
+  ai.runLogicModel = async () => null;
+  ai.extractUrl = async () => assert.fail('The current request prohibits opening the inherited link');
+  await ai.getResponse([], { sender: 'Тест', text: 'Не открывай ссылки, просто объясни по тексту поста',
+    sourceContext: { text: 'Пост про отвод тепла от подземного ЦОД.', urls: ['https://example.org/promo'] } });
+  assert.ok(Array.isArray(calls[0].messages[1].content));
+  assert.match(calls[0].messages[1].content[0].text, /отвод тепла/);
+});
+
+test('strict publishing cannot waive supplied-source coverage through a context-only plan', async () => {
+  const { ai } = harness(); const reads = [];
+  ai.runLogicModel = async () => ({ needsSearch: false, sourceUse: 'context' });
+  ai.extractUrl = async url => { reads.push(url); return null; };
+  await assert.rejects(ai.getResponse([], { text: 'Поясни', sender: 'Тест',
+    sourceContext: { text: 'Предоставленная статья', urls: ['https://example.org/unread'] } },
+    null, undefined, '', null, false, null, '', { failOnUnavailable: true }), /PUBLIC_RESPONSE_UNAVAILABLE/);
+  assert.deepEqual(reads, ['https://example.org/unread']);
+});
+
 test('all links from the replied post are read even if the planner disables search', async () => {
   const { ai, calls } = harness();
   const urls = ['https://example.org/framework', 'https://example.org/model'];

@@ -1,7 +1,19 @@
 const assert = require('node:assert/strict');
 const test = require('node:test');
 
-const { shouldSkipSearchForPrimarySource, searchRequestIntent, requiresResearch } = require('../src/utils/content-policy');
+const { shouldSkipSearchForPrimarySource, searchRequestIntent, requiresResearch, sourceReadIntent } = require('../src/utils/content-policy');
+
+test('source-reading fallback follows the current action rather than link availability or short length', () => {
+  for (const text of ['Сыч, https://example.org/post', 'Прочитай исходную статью', 'Перескажи видео', 'Проверь правдивость поста']) {
+    assert.equal(sourceReadIntent(text, true), true, text);
+    assert.equal(sourceReadIntent(text, false), false, text);
+  }
+  for (const text of ['Расскажи анекдот по сюжету', 'И как отводить тепло?', 'буквами отвечай',
+    'Проверь орфографию в тексте', 'Шутку по сюжету https://example.org/post',
+    'Не открывай ссылки, объясни по тексту', 'Не надо читать сайт, придумай по этому сюжету диалог']) {
+    assert.equal(sourceReadIntent(text, true), false, text);
+  }
+});
 
 test('document and transcript questions do not trigger unrelated web search', () => {
   assert.equal(shouldSkipSearchForPrimarySource('Сыч, кто выполнил план и на сколько процентов?', true), true);

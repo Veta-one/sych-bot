@@ -88,7 +88,20 @@ function shouldSkipSearchForPrimarySource(message, hasPrimarySource) {
   return !explicitlyNeedsExternalData;
 }
 
+// A conservative compatibility hint when the semantic plan has no sourceUse.
+// The current request is authoritative; quoted posts/history are never scanned.
+function sourceReadIntent(message, hasLinks) {
+  if (!hasLinks) return false;
+  const text = String(message || '').slice(0, 8000);
+  if (/(?:^|[^\p{L}])не\s+(?:(?:надо|нужно|стоит)\s+)?(?:открыва\p{L}*|открыть|чита\p{L}*|читать|переходи\p{L}*)/iu.test(text)) return false;
+  if (/прочит|почита|изуч|откро|откры|перескаж|резюм|суммари|глянь|посмотри|разбер|проанализир|сопостав|сравн|\b(?:read|summari[sz]e|open|review|compare)\b/iu.test(text)) return true;
+  if (/провер|подтверди|\b(?:verify|check)\b/iu.test(text) && isVerificationRequest(text)) return true;
+  if (!/https?:\/\//i.test(text)) return false;
+  return !text.replace(/https?:\/\/\S+/gi, '').replace(/(?<![а-яёa-z])(?:сыч|sych)(?![а-яёa-z])/gi, '').replace(/[\s,.:;!?]+/g, '');
+}
+
 module.exports = {
+  sourceReadIntent,
   shouldSkipSearchForPrimarySource,
   isVerificationRequest,
   searchRequestIntent,
