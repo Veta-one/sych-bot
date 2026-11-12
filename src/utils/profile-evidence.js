@@ -39,6 +39,12 @@ function normalizeProfileMessages(messages) {
         || message.text.length > MAX_MESSAGE_CHARS || chars + message.text.length > MAX_BATCH_CHARS) continue;
     const normalized = { userId, messageId, name: boundedText(message.name, 120), text: message.text,
       isForwarded: message.isForwarded === true };
+    if (message.reputationEligible === false) normalized.reputationEligible = false;
+    if (typeof message.scope === 'string') normalized.scope = message.scope.slice(0, 200);
+    if (Number.isSafeInteger(message.threadId) && message.threadId > 0) normalized.threadId = message.threadId;
+    if (record(message.replyTo) && id(message.replyTo.userId) && typeof message.replyTo.text === 'string') {
+      normalized.replyTo = { userId: id(message.replyTo.userId), text: message.replyTo.text.slice(0, 800) };
+    }
     const date = sourceDate(message.date);
     if (date !== undefined) normalized.date = date;
     chars += message.text.length;
@@ -122,6 +128,17 @@ function validateProfileUpdates(modelUpdates, inputMessages) {
     }
     const validated = mergeProfileEvidence([], factEvidence, userId);
     if (validated.length) update.factEvidence = validated;
+    const events = new Map();
+    for (const entry of (Array.isArray(candidate.events) ? candidate.events : []).slice(0, MAX_MESSAGES)) {
+      if (!record(entry)) continue;
+      const source = byId.get(id(entry.messageId));
+      if (!source || source.isForwarded || source.reputationEligible === false || source.userId !== userId) continue;
+      const event = relationshipUpdate({ relationshipDelta: entry.delta, attitude: entry.attitude }, source.messageId).relationshipEvent;
+      if (!event) continue;
+      events.set(event.messageId, events.has(event.messageId) ? null : event);
+    }
+    const accepted = [...events.values()].filter(Boolean).sort((a, b) => a.messageId - b.messageId);
+    if (accepted.length) update.relationshipEvents = accepted;
     if (Object.keys(update).length) result[userId] = update;
   }
   return result;

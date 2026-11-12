@@ -180,11 +180,68 @@ test('relationship analysis receives bounded dialogue as context but attributes 
 
 test('batch discards fabricated evidence and model biographies', async () => {
   const { ai } = harness();
-  ai.runLogicModel = async () => ({ 1: { relationship: 0, attitude: 'Подмена отношения', relationshipEvent: { messageId: 1, delta: -3 }, facts: 'Марс', realName: 'Цезарь', evidence: [
-    { messageId: 1, quote: 'Я люблю шахматы.' }, { messageId: 1, quote: 'Живу на Марсе.' },
-  ] } });
+  ai.runLogicModel = async () => ({ relationship: 0, attitude: 'Подмена отношения', facts: 'Марс', realName: 'Цезарь',
+    events: [{ userId: 1, messageId: 1, delta: 1 }], evidence: [
+    { userId: 1, messageId: 1, quote: 'Я люблю шахматы.' }, { userId: 1, messageId: 1, quote: 'Живу на Марсе.' },
+  ] });
   const result = await ai.analyzeBatch([{ userId: 1, messageId: 1, name: 'А', text: 'Я люблю шахматы.' }], { 1: profile });
-  assert.deepEqual(JSON.parse(JSON.stringify(result)), { 1: { factEvidence: [{ userId: '1', messageId: '1', quote: 'Я люблю шахматы.' }] } });
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), { 1: { factEvidence: [{ userId: '1', messageId: '1', quote: 'Я люблю шахматы.' }], relationshipEvents: [{ messageId: 1, delta: 1 }] } });
+});
+
+test('observer requires a validated event for each eligible message and logs incomplete results without payloads', async () => {
+  const { ai, logs } = harness();
+  const messages = [{ userId: 1, messageId: 1, text: 'SECRET_WORDS', scope: '[184,null]' },
+    { userId: 1, messageId: 2, text: 'Новая реплика', scope: '[184,null]' }];
+  for (const events of [[], [{ messageId: 1, delta: 1 }], [{ messageId: 1, delta: 1 }, { messageId: 2, delta: '1' }]]) {
+    ai.runLogicModel = async () => ({ events: events.map(event => ({ ...event, userId: 1 })) });
+    assert.equal(await ai.analyzeBatch(messages, {}), null);
+  }
+  ai.runLogicModel = async () => ({ events: [{ userId: 1, messageId: 1, delta: 1 }, { userId: 1, messageId: 2, delta: -1 }] });
+  const result = await ai.analyzeBatch(messages, {});
+  assert.deepEqual([...result[1].relationshipEvents.map(e => e.delta)], [1, -1]);
+  assert.ok(logs.includes('[OBSERVER] INCOMPLETE_EVENTS'));
+  assert.doesNotMatch(logs.join('\n'), /SECRET_WORDS/);
+});
+
+test('live observer request uses the strict flat schema that replaced unreliable free JSON batches', async () => {
+  const { ai } = harness(); let body, options;
+  ai.openai.chat.completions.create = async (request, opts) => {
+    body = request; options = opts;
+    return { choices: [{ finish_reason: 'stop', message: { content: '{"events":[{"userId":"1","messageId":"10","delta":1}],"evidence":[]}' } }] };
+  };
+  const result = await ai.analyzeBatch([{ userId: 1, messageId: 10, text: 'Полезный вклад в разговор' }], {});
+  assert.equal(result[1].relationshipEvents[0].delta, 1);
+  assert.equal(body.response_format.type, 'json_schema');
+  assert.equal(body.response_format.json_schema.strict, true);
+  assert.deepEqual([...body.response_format.json_schema.schema.required], ['events', 'evidence']);
+  assert.equal(body.provider.require_parameters, true);
+  assert.equal(body.max_tokens, 2500);
+  assert.equal(options.maxRetries, 0);
+  assert.ok(options.signal.aborted);
+});
+
+test('bounded profile logic rejects truncated responses, classifies failures and aborts SDK work', async () => {
+  for (const [response, expected] of [
+    [{ choices: [{ finish_reason: 'length', message: { content: '{"ok":true}' } }] }, 'INCOMPLETE_RESPONSE'],
+    [{ choices: [{ finish_reason: 'stop', message: { content: 'SECRET_INVALID_JSON' } }] }, 'INVALID_JSON'],
+    [null, 'PROVIDER_UNAVAILABLE'],
+  ]) {
+    const { ai, logs } = harness(); let options;
+    ai.openai.chat.completions.create = async (body, opts) => {
+      options = opts;
+      if (response === null) throw new Error('SECRET_PROVIDER_PAYLOAD');
+      return response;
+    };
+    assert.equal(await ai.runLogicModel('SECRET_INPUT', { timeoutMs: 100 }), null);
+    assert.ok(options.signal.aborted);
+    assert.ok(logs.includes(`[PROFILE LOGIC] primary=${expected}`));
+    assert.doesNotMatch(logs.join('\n'), /SECRET_/);
+  }
+  const { ai, logs } = harness({ timeoutCapMs: 5 }); let signal;
+  ai.openai.chat.completions.create = (body, options) => { signal = options.signal; return new Promise(() => {}); };
+  assert.equal(await ai.runLogicModel('Синтетический тайм-аут', { timeoutMs: 100 }), null);
+  assert.ok(signal.aborted);
+  assert.ok(logs.includes('[PROFILE LOGIC] primary=TIMEOUT'));
 });
 
 test('stalled chat profile analysis returns null within its bounded deadline and disables SDK retries', async () => {
@@ -263,7 +320,7 @@ test('bounded profile logic disables SDK retries and native search without chang
   ai.keys = ['synthetic'];
   ai.nativeModel = { generateContent: async (request, options) => {
     requests.push({ request, options });
-    return { response: { text: () => '{"approved":true}' } };
+    return { response: { text: () => '{"approved":true}', candidates: [{ finishReason: 'STOP' }] } };
   } };
   const result = await ai.runLogicModel('synthetic profile source', { temperature: 0, timeoutMs: 1000 });
   assert.equal(result.approved, true);

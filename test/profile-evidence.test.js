@@ -8,6 +8,27 @@ const messages = [
   { userId: 1, messageId: 13, name: 'А', text: 'Меня зовут Пётр.', isForwarded: true },
 ];
 
+test('background events are bound to the author and message, never to model biographies or absolute scores', () => {
+  const result = evidence.validateProfileUpdates({
+    1: { relationship: 100, events: [{ messageId: 11, delta: 1, attitude: 'Помогает чату' },
+      { messageId: 12, delta: -3 }, { messageId: 13, delta: 3 }, { messageId: 999, delta: 3 }] },
+    2: { events: [{ messageId: 12, delta: -1 }] },
+    999: { events: [{ messageId: 11, delta: 3 }] },
+  }, messages);
+  assert.deepEqual(result, {
+    1: { relationshipEvents: [{ messageId: 11, delta: 1, attitude: 'Помогает чату' }] },
+    2: { relationshipEvents: [{ messageId: 12, delta: -1 }] },
+  });
+});
+
+test('duplicate, private, fractional and oversized background events cannot change reputation', () => {
+  const input = [...messages, { userId: 1, messageId: 14, text: 'Личное', reputationEligible: false }];
+  assert.deepEqual(evidence.validateProfileUpdates({ 1: { events: [
+    { messageId: 11, delta: 1 }, { messageId: 11, delta: -1 },
+    { messageId: 14, delta: 3 }, { messageId: 13, delta: 0.5 }, { messageId: 999, delta: 4 },
+  ] } }, input), {});
+});
+
 test('batch accepts only exact quotations owned by the target and strips invented fields', () => {
   const result = evidence.validateProfileUpdates({
     1: { facts: 'Живёт в Риме.', realName: 'Цезарь', location: 'Рим', relationship: 52, evidence: [

@@ -28,6 +28,10 @@ const chatHistory = {};
 const analysisBuffers = {};
 const chatAnalysisBuffers = {}; // Буфер для анализа профиля чата
 const activeProfileDrains = new Set();
+const activeProfileMessageIds = new Map();
+const profileFlushTimers = new Map();
+const profileFlushDue = new Set();
+const PROFILE_FLUSH_MS = 10000;
 const activeChatDrains = new Set();
 const chatMemoryRevisions = new Map();
 const chatMemoryRevision = chatId => chatMemoryRevisions.get(String(chatId)) || 0;
@@ -101,16 +105,13 @@ function getSychErrorReply(errText) {
     return phrases[Math.floor(Math.random() * phrases.length)];
 }
 
-function addToHistory(chatId, sender, text, userId = null, relatedUserId = null, profileScope = null) {
+function addToHistory(chatId, sender, text, userId = null, relatedUserId = null) {
   if (!chatHistory[chatId]) chatHistory[chatId] = [];
   const entry = {
     role: sender,
     text: text,
     userId: userId === null ? null : String(userId),
     relatedUserId: relatedUserId === null ? null : String(relatedUserId),
-    profileScope,
-    // Image-memory enrichment may change text later; it is not the author's words.
-    profileText: typeof text === 'string' ? text.slice(0, 800) : '',
   };
   chatHistory[chatId].push(entry);
   if (chatHistory[chatId].length > config.contextSize) {
@@ -135,7 +136,9 @@ function forgetUserFromRuntime(userId) {
 
   for (const chatId of Object.keys(analysisBuffers)) {
     analysisBuffers[chatId] = analysisBuffers[chatId]
-      .filter(entry => String(entry.userId) !== targetId);
+      .filter(entry => String(entry.userId) !== targetId)
+      .map(entry => String(entry.replyTo?.userId) === targetId ? { ...entry, replyTo: undefined } : entry);
+    if (!analysisBuffers[chatId].length) clearProfileFlush(chatId);
   }
 
   for (const chatId of Object.keys(chatAnalysisBuffers)) {
@@ -186,32 +189,97 @@ function bufferRevisionGuard(chatId, buffer) {
       && revisions.has(String(userId)) && revisions.get(String(userId)) === memoryRevision(userId);
 }
 
-async function processBuffer(chatId) {
-    if (activeProfileDrains.has(chatId)) return;
+function clearProfileFlush(chatId) {
+    const key = String(chatId);
+    clearTimeout(profileFlushTimers.get(key));
+    profileFlushTimers.delete(key);
+    profileFlushDue.delete(key);
+}
+
+function scheduleProfileFlush(chatId, bot) {
+    const key = String(chatId);
+    if (!analysisBuffers[chatId]?.length || profileFlushTimers.has(key)) return;
+    const timer = setTimeout(() => {
+        profileFlushTimers.delete(key);
+        processBuffer(chatId, true, bot);
+    }, PROFILE_FLUSH_MS);
+    timer.unref?.();
+    profileFlushTimers.set(key, timer);
+}
+
+async function processBuffer(chatId, flush = false, bot = null) {
+    const key = String(chatId);
+    if (activeProfileDrains.has(chatId)) {
+        if (flush) profileFlushDue.add(key);
+        return;
+    }
     activeProfileDrains.add(chatId);
+    clearProfileFlush(chatId);
+    let failed = false;
     try {
-      while (analysisBuffers[chatId]?.length >= BUFFER_SIZE) {
-        const batch = analysisBuffers[chatId].splice(0, BUFFER_SIZE);
-        const isCurrent = bufferRevisionGuard(chatId, batch);
-        const messages = batch.filter(message => isCurrent(message.userId));
-        if (!messages.length) continue;
+      while (analysisBuffers[chatId]?.length >= BUFFER_SIZE || (flush && analysisBuffers[chatId]?.length)) {
+        let chars = 0, take = 0;
+        for (const message of analysisBuffers[chatId].slice(0, BUFFER_SIZE)) {
+            if (chars + message.text.length > 32000) break;
+            chars += message.text.length; take++;
+        }
+        const batch = analysisBuffers[chatId].splice(0, take || 1).sort((a, b) => Number(a.messageId) - Number(b.messageId));
+        activeProfileMessageIds.set(chatId, new Set(batch.map(message => message.messageId)));
+        const revisionCurrent = bufferRevisionGuard(chatId, batch);
+        const isCurrent = userId => revisionCurrent(userId) && !storage.isBanned(userId, chatId)
+          && !storage.isChatMuted?.(chatId);
+        const dependencies = new Map();
+        for (const message of batch) {
+            const scope = message.scope || 'chat';
+            if (!dependencies.has(scope)) dependencies.set(scope, new Set());
+            dependencies.get(scope).add(String(message.userId));
+            if (message.replyTo?.userId) dependencies.get(scope).add(String(message.replyTo.userId));
+        }
+        const contextCurrent = bufferRevisionGuard(chatId, [...dependencies.values()]
+            .flatMap(ids => [...ids].map(userId => ({ userId }))));
         try {
+          if (batch.some(message => message.reputationEligible)) await bot?.requireGroupAccess?.(chatId);
+          const messages = batch.filter(message => isCurrent(message.userId) && !storage.isTopicMuted(chatId, message.threadId || null))
+            .map(message => message.replyTo && !contextCurrent(message.replyTo.userId) ? { ...message, replyTo: undefined } : message);
+          if (!messages.length) continue;
           const userIds = [...new Set(messages.map(message => message.userId))];
-          const updates = await ai.analyzeBatch(messages, storage.getProfilesForUsers(chatId, userIds));
+          const updates = await ai.analyzeBatch(messages, storage.getProfilesForUsers(chatId, userIds), storage.getChatProfile(chatId));
           if (updates == null) throw new Error('Batch unavailable');
-          // Batch has no relationship authority, even if a provider returns
-          // unexpected fields alongside its quoted evidence.
+          if (messages.some(message => message.reputationEligible)) await bot?.requireGroupAccess?.(chatId);
           const facts = Object.fromEntries(Object.entries(updates)
             .filter(([userId, update]) => isCurrent(userId) && Array.isArray(update?.factEvidence))
             .map(([userId, update]) => [userId, { factEvidence: update.factEvidence }]));
           if (Object.keys(facts).length) await storage.bulkUpdateProfiles(chatId, facts, { isCurrent });
-        } catch {
-          analysisBuffers[chatId] = [...batch.filter(message => isCurrent(message.userId)), ...(analysisBuffers[chatId] || [])];
+          const byId = new Map(messages.map(message => [Number(message.messageId), message]));
+          const events = Object.entries(updates).flatMap(([userId, update]) =>
+              (Array.isArray(update?.relationshipEvents) ? update.relationshipEvents : []).map(event => ({ userId, event })));
+          events.sort((a, b) => a.event.messageId - b.event.messageId);
+          for (const { userId, event } of events) {
+              const source = byId.get(event.messageId);
+              if (!source || String(source.userId) !== userId || source.isForwarded || !source.reputationEligible) continue;
+              const eventCurrent = () => isCurrent(userId) && !storage.isTopicMuted(chatId, source.threadId || null)
+                && [...dependencies.get(source.scope || 'chat')].every(contextCurrent);
+              if (eventCurrent()) await storage.bulkUpdateProfiles(chatId, { [userId]: { relationshipEvent: event } }, { isCurrent: eventCurrent });
+          }
+        } catch (error) {
+          if (error?.code !== 'GROUP_ACCESS_DENIED') {
+            const retry = batch.filter(message => isCurrent(message.userId)).map(message =>
+                message.replyTo && !contextCurrent(message.replyTo.userId) ? { ...message, replyTo: undefined } : message);
+            analysisBuffers[chatId] = [...retry, ...(analysisBuffers[chatId] || [])];
+          }
+          failed = true;
           console.warn('[OBSERVER] BATCH_UNAVAILABLE');
           break; // Retry only on a later input, never spin on an unavailable API.
         }
+        if (profileFlushDue.delete(key)) flush = true;
       }
-    } finally { activeProfileDrains.delete(chatId); }
+    } finally {
+      activeProfileDrains.delete(chatId);
+      activeProfileMessageIds.delete(chatId);
+      if (failed) clearProfileFlush(chatId);
+      else if (profileFlushDue.delete(key) && analysisBuffers[chatId]?.length) processBuffer(chatId, true, bot);
+      else scheduleProfileFlush(chatId, bot);
+    }
 }
 
 // Анализ профиля чата (каждые 50 сообщений)
@@ -289,15 +357,12 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     if (!userId) return;
     const userMemoryRevision = memoryRevision(userId);
     const userChatMemoryRevision = chatMemoryRevision(chatId);
-    // Capture the preceding dialogue before any await (including voice/file
-    // decoding), so later updates cannot change this message's interpretation.
+    const repliedAuthorId = msg.reply_to_message?.from?.id;
+    const repliedAuthorRevision = repliedAuthorId ? memoryRevision(repliedAuthorId) : null;
+    // Revisions are captured before any await, including voice/file decoding.
     let threadId = msg.is_topic_message ? msg.message_thread_id : (msg.message_thread_id || msg.reply_to_message?.message_thread_id);
     if (typeof threadId !== 'number') threadId = null;
     const profileScope = JSON.stringify([threadId || null, msg.business_connection_id || null]);
-    const relationshipContext = (chatHistory[historyKey] || []).filter(entry => entry.profileScope === profileScope
-      && !entry.isForwarded && (entry.userId === String(userId)
-        || (entry.userId === String(config.botId) && entry.relatedUserId === String(userId))))
-      .slice(-6).map(entry => ({ speaker: entry.userId === String(config.botId) ? 'bot' : 'user', text: entry.profileText }));
     if (directChat && (!msg.text || msg.voice || msg.audio || msg.photo || msg.video || msg.document || msg.sticker)) {
         await bot.sendMessage(chatId, 'В пилоте личного чата я отвечаю на текстовые сообщения.');
         return false;
@@ -557,6 +622,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
   }
 
   // === НАБЛЮДАТЕЛЬ ===
+  if (isStaleProfileReply()) return;
   if (!analysisBuffers[chatId]) analysisBuffers[chatId] = [];
   
   // Собираем полную инфу о юзере для лога
@@ -564,18 +630,26 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
   const senderUsername = msg.from.username ? `@${msg.from.username}` : "";
   const displayName = senderUsername ? `${senderName} (${senderUsername})` : senderName;
 
-  if (!directChat && !text.startsWith('/')) {
+  if (!directChat && !text.trimStart().startsWith('/') && !msg.from.is_bot && !msg.sender_chat && !isSilenced()) {
       // Пишем в буфер для анализа профилей юзеров
-      analysisBuffers[chatId].push({ userId, name: displayName, text,
+      const replyText = msg.reply_to_message?.text || msg.reply_to_message?.caption;
+      const replyTo = repliedAuthorId && replyText && !profileDeletionPending(repliedAuthorId)
+        && memoryRevision(repliedAuthorId) === repliedAuthorRevision
+        ? { userId: repliedAuthorId, text: replyText.slice(0, 800) } : undefined;
+      if (!activeProfileMessageIds.get(chatId)?.has(msg.message_id)
+        && !analysisBuffers[chatId].some(entry => entry.messageId === msg.message_id)) analysisBuffers[chatId].push({ userId, name: displayName, text: text.slice(0, 8000),
         messageId: msg.message_id, date: msg.date,
+        scope: profileScope, threadId, replyTo,
+        reputationEligible: ['group', 'supergroup'].includes(msg.chat.type),
         isForwarded: Boolean(msg.forward_origin || msg.forward_from || msg.forward_from_chat || msg.forward_sender_name) });
+      scheduleProfileFlush(chatId, bot);
 
       // Пишем в буфер для анализа профиля чата
       if (!chatAnalysisBuffers[chatId]) chatAnalysisBuffers[chatId] = [];
       chatAnalysisBuffers[chatId].push({ userId, name: displayName, text, messageId: msg.message_id });
   }
   if (analysisBuffers[chatId].length >= BUFFER_SIZE) {
-      processBuffer(chatId);
+      processBuffer(chatId, false, bot);
   }
   // Анализ профиля чата каждые 50 сообщений
   if (chatAnalysisBuffers[chatId] && chatAnalysisBuffers[chatId].length >= CHAT_BUFFER_SIZE) {
@@ -662,6 +736,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
     chatMemoryRevisions.set(String(chatId), chatMemoryRevision(chatId) + 1);
     chatHistory[historyKey] = [];
     analysisBuffers[chatId] = [];
+    clearProfileFlush(chatId);
     chatAnalysisBuffers[chatId] = [];
     conversationFollowups.forgetChat(chatId);
     autoTldrJobs.forgetChat(chatId);
@@ -690,8 +765,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
   }
 
   if (isStaleProfileReply()) return;
-  const currentMsgEntry = addToHistory(historyKey, senderName, text, userId, null, profileScope);
-  currentMsgEntry.isForwarded = Boolean(msg.forward_origin || msg.forward_from || msg.forward_from_chat || msg.forward_sender_name);
+  const currentMsgEntry = addToHistory(historyKey, senderName, text, userId);
 
   // === СТАТИСТИКА ===
   if (!directChat && (cleanText === 'сыч стата' || cleanText === 'сыч статистика')) {
@@ -1117,7 +1191,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
         answerDelivered = Number.isSafeInteger(sent?.messageId) && sent.messageId > 0;
         stopTyping(); // <-- Всё, сообщение ушло, выключаем статус
         if (isSilenced() || isStaleProfileReply()) return directChat ? answerAvailable && answerDelivered : undefined;
-        if (!directChat || answerAvailable) addToHistory(historyKey, "Сыч", aiResponse, config.botId, userId, profileScope);
+        if (!directChat || answerAvailable) addToHistory(historyKey, "Сыч", aiResponse, config.botId, userId);
         if (sent?.ok !== false) conversationFollowups.confirm(followupToken, sent?.messageId);
 
     } catch (error) {
@@ -1162,7 +1236,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
                 else allChunksConfirmed = false;
              }
              if (isSilenced() || isStaleProfileReply()) return;
-             addToHistory(historyKey, "Сыч", aiResponse, config.botId, userId, profileScope);
+             addToHistory(historyKey, "Сыч", aiResponse, config.botId, userId);
              if (allChunksConfirmed) conversationFollowups.confirm(followupToken, confirmedMessageId);
         } catch (e2) { console.error("FATAL SEND ERROR (Даже аварийная не ушла):", e2.message); }
     }
@@ -1184,19 +1258,7 @@ async function processMessage(bot, msg, { directChat = false } = {}) {
         }).catch(e => console.error(`[IMG MEMORY] ${e.message}`));
     }
 
-    // Рефлекс (Анализ стиля общения и репутации)
-    const profileMessage = { userId, messageId: msg.message_id, name: displayName,
-        text, date: msg.date,
-        isForwarded: Boolean(msg.forward_origin || msg.forward_from || msg.forward_from_chat || msg.forward_sender_name) };
-    
-    // Запускаем анализ
-    const isCurrent = () => !profileDeletionPending(userId) && memoryRevision(userId) === userMemoryRevision
-      && chatMemoryRevision(chatId) === userChatMemoryRevision;
-    ai.analyzeUserImmediate(profileMessage, userProfile, relationshipContext).then(updated => {
-        if (updated?.relationshipEvent && isCurrent()) {
-            return storage.bulkUpdateProfiles(chatId, { [userId]: { relationshipEvent: updated.relationshipEvent } }, { isCurrent });
-        }
-    }).catch(() => console.warn('[RELATIONSHIP] ANALYSIS_UNAVAILABLE'));
+    // Relationship events are owned by the observer for every ordinary message.
   }
     } finally {
       conversationFollowups.finish(followupToken);

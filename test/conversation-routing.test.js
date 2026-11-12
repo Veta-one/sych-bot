@@ -27,7 +27,15 @@ function useRealChatProfiles(h) {
   h.storage.updateChatProfile = chatProfileMethods.updateChatProfile;
 }
 
-function harness() {
+function harness({ manualProfileTimer = true } = {}) {
+  const profileTimers = [];
+  const timerSet = (fn, ms, ...args) => {
+    if (manualProfileTimer && ms === 10000) {
+      const timer = { fn, cancelled: false, unref() {} }; profileTimers.push(timer); return timer;
+    }
+    return setTimeout(fn, ms, ...args);
+  };
+  const timerClear = timer => profileTimers.includes(timer) ? timer.cancelled = true : clearTimeout(timer);
   const state = { sent: [], reminders: [], answers: [], summaries: [], tldrSummaries: [], parses: [], immediate: [], profileDescriptions: [], download: Buffer.from('audio'), transcript: 'Обычное сообщение.', muted: false, plan: { kind: 'answer' } };
   const storage = { isBanned: () => Boolean(state.banned), hasChat: () => true, updateChatName() {}, trackUser() {},
     isTopicMuted: () => state.muted, getProfile: () => ({}), getChatProfile: () => ({ topic: 'test' }),
@@ -50,7 +58,7 @@ function harness() {
       return state.answerResponder ? state.answerResponder(policy) : '4';
     },
     analyzeUserImmediate: async (input, profile, context) => { state.immediate.push(input); (state.relationshipContexts ||= []).push(context); return null; },
-    analyzeBatch: async () => ({}), analyzeChatProfile: async () => ({}),
+    analyzeBatch: async messages => { (state.batches ||= []).push(messages); return {}; }, analyzeChatProfile: async () => ({}),
     describeImage: async () => null,
     generateProfileDescription: async (profile, targetName) => {
       state.profileDescriptions.push({ profile, targetName });
@@ -83,7 +91,7 @@ function harness() {
   const box = { exports: {} };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../src/core/logic.js'), 'utf8'), {
     module: box, require: n => { assert.ok(Object.hasOwn(dependencies, n), n); return dependencies[n]; },
-    Buffer, console: { log() {}, error() {}, warn() {} }, setTimeout, clearTimeout, setInterval, clearInterval,
+    Buffer, console: { log() {}, error() {}, warn() {} }, setTimeout: timerSet, clearTimeout: timerClear, setInterval, clearInterval,
     Math: { random: () => 1 },
   });
   const bot = { getFileLink: async () => 'mock://voice', sendChatAction: async () => {},
@@ -92,7 +100,10 @@ function harness() {
       (state.legacySends ||= []).push(args);
       return state.legacyResponder ? state.legacyResponder(...args) : { message_id: ++messageId };
     } };
-  return { state, ai, storage, bot, async message(overrides) {
+  return { state, ai, storage, bot, async flushProfiles() {
+    for (const timer of profileTimers.splice(0)) if (!timer.cancelled) timer.fn();
+    await new Promise(setImmediate);
+  }, async message(overrides) {
     const msg = { message_id: ++messageId, from: { id: 999, first_name: 'Тест' },
       chat: { id: -100, type: 'supergroup' }, is_topic_message: true, message_thread_id: 184, ...overrides };
     await box.exports.processMessage(bot, msg); return msg;
@@ -109,6 +120,160 @@ test('an unconfirmed gallery recovery does not trigger a duplicate emergency mes
   await message({ text: 'Сыч, покажи как выглядит буханка' });
   assert.equal(attempts, 1);
   assert.equal(state.legacySends?.length || 0, 0);
+});
+
+test('ordinary unaddressed conversation gains and loses reputation through one background channel', async () => {
+  const h = harness({ manualProfileTimer: true });
+  h.ai.analyzeBatch = async messages => ({ 999: { relationshipEvents: messages.map(m => ({ messageId: m.messageId,
+    delta: m.text.includes('полезный') ? 1 : -1 })) } });
+  await h.message({ message_id: 1, text: 'Вот полезный разбор ошибки для всех.' });
+  await h.message({ message_id: 2, text: 'бессмысленный повторный спам' });
+  assert.equal(h.state.answers.length, 0);
+  await h.flushProfiles();
+  const events = h.state.profileWrites.flatMap(call => Object.values(call[1]).map(update => update.relationshipEvent).filter(Boolean));
+  assert.deepEqual(JSON.parse(JSON.stringify(events)), [{ messageId: 1, delta: 1 }, { messageId: 2, delta: -1 }]);
+  assert.equal(h.state.immediate.length, 0);
+});
+
+test('an answered request is scored once by the observer, never a second time after the answer', async () => {
+  const h = harness({ manualProfileTimer: true });
+  h.ai.analyzeBatch = async messages => ({ 999: { relationshipEvents: messages.map(m => ({ messageId: m.messageId, delta: 1 })) } });
+  await h.message({ message_id: 10, text: 'Сыч, спасибо за полезный разговор' });
+  await h.flushProfiles();
+  assert.equal(h.state.answers.length, 1);
+  assert.equal(h.state.immediate.length, 0);
+  assert.equal(h.state.profileWrites.filter(call => call[1][999]?.relationshipEvent).length, 1);
+});
+
+test('a flush due during an active drain processes the small new backlog when the drain ends', async () => {
+  const h = harness(), batches = [];
+  h.ai.analyzeBatch = messages => new Promise(resolve => batches.push({ messages, resolve }));
+  await h.message({ message_id: 1, text: 'Первая реплика' }); await h.flushProfiles();
+  await h.message({ message_id: 2, text: 'Вторая реплика' }); await h.flushProfiles();
+  assert.equal(batches.length, 1);
+  batches[0].resolve({}); await new Promise(setImmediate);
+  assert.equal(batches.length, 2);
+  assert.deepEqual([...batches[1].messages.map(m => m.messageId)], [2]);
+  batches[1].resolve({}); await new Promise(setImmediate);
+});
+
+test('a failed background batch waits for another input instead of retrying on a timer forever', async () => {
+  const h = harness(), batches = [];
+  h.ai.analyzeBatch = async messages => { batches.push(messages); return null; };
+  await h.message({ message_id: 1, text: 'Реплика' }); await h.flushProfiles();
+  await h.flushProfiles(); await h.flushProfiles();
+  assert.equal(batches.length, 1);
+  await h.message({ message_id: 2, text: 'Новая реплика' }); await h.flushProfiles();
+  assert.equal(batches.length, 2);
+  assert.deepEqual([...batches[1].map(m => m.messageId)], [1, 2]);
+});
+
+test('duplicate delivery during a failed active batch cannot poison the retry with ambiguous IDs', async () => {
+  const h = harness(), batches = [];
+  h.ai.analyzeBatch = messages => new Promise(resolve => batches.push({ messages, resolve }));
+  await h.message({ message_id: 1, text: 'Реплика' }); await h.flushProfiles();
+  await h.message({ message_id: 1, text: 'Реплика' });
+  batches[0].resolve(null); await new Promise(setImmediate);
+  await h.message({ message_id: 2, text: 'Новая реплика' }); await h.flushProfiles();
+  assert.deepEqual([...batches[1].messages.map(m => m.messageId)], [1, 2]);
+  batches[1].resolve({ 999: { relationshipEvents: [{ messageId: 1, delta: 1 }, { messageId: 2, delta: 1 }] } });
+  await new Promise(setImmediate);
+  assert.equal(h.state.profileWrites.filter(call => call[1][999]?.relationshipEvent).length, 2);
+});
+
+test('forgetting a context author invalidates nearby reputation but retains another authors own evidence', async () => {
+  const h = harness(); let finish;
+  h.ai.analyzeBatch = () => new Promise(resolve => { finish = resolve; });
+  await h.message({ message_id: 1, from: { id: 42 }, text: 'Слова участника A' });
+  await h.message({ message_id: 2, text: 'Я люблю шахматы.' }); await h.flushProfiles();
+  await h.message({ from: { id: 42 }, text: 'Сыч, забудь меня' });
+  finish({ 999: { factEvidence: [{ userId: '999', messageId: '2', quote: 'Я люблю шахматы.' }],
+    relationshipEvents: [{ messageId: 2, delta: 1, attitude: 'Отношение из старого контекста' }] } });
+  await new Promise(setImmediate);
+  assert.equal(h.state.profileWrites.length, 1);
+  assert.deepEqual(Object.keys(h.state.profileWrites[0][1][999]), ['factEvidence']);
+});
+
+test('context dependency is checked again inside the storage queue and stays scoped to its topic', async () => {
+  const h = harness();
+  h.ai.analyzeBatch = async () => ({ 999: { relationshipEvents: [{ messageId: 2, delta: 1 }, { messageId: 3, delta: 1 }] } });
+  await h.message({ message_id: 1, from: { id: 42 }, text: 'Контекст' });
+  await h.message({ message_id: 2, text: 'Участник B' });
+  await h.message({ message_id: 3, text: 'Другой топик', message_thread_id: 185 }); await h.flushProfiles();
+  const writes = h.state.profileWrites.filter(call => call[1][999]?.relationshipEvent);
+  assert.equal(writes.length, 2);
+  await h.message({ from: { id: 42 }, text: 'Сыч, забудь меня' });
+  assert.equal(writes[0][2].isCurrent(999), false);
+  assert.equal(writes[1][2].isCurrent(999), true);
+});
+
+test('a failed detached batch cannot requeue a forgotten replied authors words', async () => {
+  const h = harness(), batches = [];
+  h.ai.analyzeBatch = messages => new Promise(resolve => batches.push({ messages, resolve }));
+  await h.message({ message_id: 2, text: 'Мой ответ', reply_to_message: {
+    message_id: 1, from: { id: 42 }, text: 'FORGOTTEN_REPLY_CONTEXT',
+  } }); await h.flushProfiles();
+  await h.message({ from: { id: 42 }, text: 'Сыч, забудь меня' });
+  batches[0].resolve(null); await new Promise(setImmediate);
+  await h.message({ message_id: 3, text: 'Новая реплика' }); await h.flushProfiles();
+  assert.doesNotMatch(JSON.stringify(batches[1].messages), /FORGOTTEN_REPLY_CONTEXT/);
+  batches[1].resolve({}); await new Promise(setImmediate);
+});
+
+test('forgetting a reply author during group access lookup removes their context before the model request', async () => {
+  const h = harness(), requests = []; let allow, checks = 0;
+  h.bot.requireGroupAccess = () => ++checks === 1 ? new Promise(resolve => { allow = resolve; }) : Promise.resolve();
+  h.ai.analyzeBatch = async messages => { requests.push(messages); return {}; };
+  await h.message({ message_id: 2, text: 'Моя реплика', reply_to_message: {
+    message_id: 1, from: { id: 42 }, text: 'FORGOTTEN_BEFORE_MODEL',
+  } }); await h.flushProfiles();
+  await h.message({ from: { id: 42 }, text: 'Сыч, забудь меня' });
+  allow(); await new Promise(setImmediate);
+  assert.equal(requests.length, 1);
+  assert.doesNotMatch(JSON.stringify(requests), /FORGOTTEN_BEFORE_MODEL/);
+});
+
+test('only public human nonforwarded ordinary messages can receive background reputation', async () => {
+  const h = harness();
+  h.ai.analyzeBatch = async messages => Object.fromEntries(messages.map(m => [String(m.userId), {
+    relationshipEvents: messages.filter(other => other.userId === m.userId).map(other => ({ messageId: other.messageId, delta: 1 })),
+  }]));
+  await h.message({ message_id: 1, text: 'Пересланное', forward_origin: { type: 'user' } });
+  await h.message({ message_id: 2, text: 'Бот', from: { id: 77, is_bot: true } });
+  await h.message({ message_id: 3, text: 'Анонимный канал', sender_chat: { id: -500 } });
+  await h.message({ message_id: 4, text: ' /version@Siitch_bot' });
+  h.state.muted = true;
+  await h.message({ message_id: 5, text: 'Замьюченное' }); h.state.muted = false;
+  await h.message({ message_id: 6, text: 'Сыч, личное', chat: { id: 999, type: 'private' } });
+  await h.message({ message_id: 7, text: 'Обычный вклад' }); await h.flushProfiles();
+  const events = (h.state.profileWrites || []).flatMap(call => Object.values(call[1]).map(u => u.relationshipEvent).filter(Boolean));
+  assert.deepEqual(JSON.parse(JSON.stringify(events)), [{ messageId: 7, delta: 1 }]);
+});
+
+test('long messages are split into bounded batches without silently dropping the first messages', async () => {
+  const h = harness(), batches = [];
+  h.ai.analyzeBatch = async messages => { batches.push(messages); return {}; };
+  for (let id = 1; id <= 20; id++) await h.message({ message_id: id, text: 'А'.repeat(8100) });
+  await new Promise(setImmediate);
+  await h.flushProfiles();
+  assert.deepEqual(batches.flatMap(batch => [...batch.map(m => m.messageId)]), Array.from({ length: 20 }, (_, i) => i + 1));
+  assert.ok(batches.every(batch => batch.reduce((sum, m) => sum + m.text.length, 0) <= 32000));
+});
+
+test('forgetting during voice summary cannot enqueue the old transcript after deletion', async () => {
+  const h = harness({ manualProfileTimer: true });
+  const batches = [];
+  h.ai.analyzeBatch = async messages => { batches.push(messages); return {}; };
+  let finish;
+  h.ai.summarizeVoiceTranscript = () => new Promise(resolve => { finish = resolve; });
+  h.state.transcript = 'OLD_TRANSCRIPT_BEFORE_FORGET';
+  const pending = h.message({ message_id: 1, voice: { file_id: 'voice' } });
+  await new Promise(setImmediate);
+  await h.message({ text: 'Сыч, забудь меня' });
+  finish('Кратко'); await pending;
+  for (let id = 2; id <= 20; id++) await h.message({ message_id: id, text: 'Новая реплика' });
+  await h.flushProfiles();
+  assert.ok(batches.every(batch => batch.every(message => !message.text.includes('OLD_TRANSCRIPT_BEFORE_FORGET'))));
 });
 
 test('group delivery does not cut off the last link in a long collected source list', async () => {
@@ -164,7 +329,7 @@ test('observer drains accumulated batches sequentially and preserves new input a
   }
 });
 
-test('one answered message can collect batch facts but only immediate supplies its relationship event', async () => {
+test('one answered message collects facts and its sole relationship event from the observer', async () => {
   const { message, ai, state } = harness();
   let finishBatch;
   ai.analyzeBatch = () => new Promise(resolve => { finishBatch = resolve; });
@@ -174,6 +339,7 @@ test('one answered message can collect batch facts but only immediate supplies i
   state.answerResponder = () => new Promise(resolve => { finishAnswer = resolve; });
   const answer = message({ message_id: 20, text: 'Сыч, спасибо' }); await new Promise(setImmediate);
   finishBatch({ 999: { relationship: 53, attitude: 'Недопустимое мнение batch', relationshipEvent: { messageId: 20, delta: 3 },
+    relationshipEvents: [{ messageId: 20, delta: 1 }],
     factEvidence: [{ userId: '999', messageId: '20', quote: 'Сыч, спасибо' }] } });
   await new Promise(setImmediate);
   finishAnswer('Пожалуйста'); await answer; await new Promise(setImmediate);
@@ -183,8 +349,8 @@ test('one answered message can collect batch facts but only immediate supplies i
   assert.deepEqual(JSON.parse(JSON.stringify(updates[1])), { relationshipEvent: { messageId: 20, delta: 1 } });
 });
 
-test('relationship dialogue stays with the author, topic and business scope and excludes future replies and forwards', async () => {
-  const { message, state } = harness();
+test('background inputs preserve authors, topic and business scope without inserting bot answers', async () => {
+  const { message, state, flushProfiles } = harness();
   state.answerResponder = () => `BOT_${state.answers.at(-1).input.text}`;
   await message({ text: 'Сыч, OWN_OLD' });
   await message({ text: 'Сыч, FOREIGN_USER', from: { id: 77, first_name: 'Чужой' } });
@@ -197,15 +363,18 @@ test('relationship dialogue stays with the author, topic and business scope and 
   await new Promise(setImmediate);
   await message({ text: 'FUTURE_MESSAGE' });
   finish('CURRENT_BOT_REPLY'); await pending;
-  const context = state.relationshipContexts.at(-1);
-  assert.deepEqual(JSON.parse(JSON.stringify(context)), [
-    { speaker: 'user', text: 'Сыч, OWN_OLD' }, { speaker: 'bot', text: 'BOT_Сыч, OWN_OLD' },
-  ]);
-  assert.equal(state.immediate.at(-1).text, 'Сыч, TARGET_NOW');
+  await flushProfiles();
+  const batch = state.batches.at(-1);
+  assert.equal(batch.find(m => m.text.includes('FOREIGN_USER')).userId, 77);
+  const own = batch.find(m => m.text.includes('OWN_OLD'));
+  assert.notEqual(batch.find(m => m.text.includes('FOREIGN_TOPIC')).scope, own.scope);
+  assert.notEqual(batch.find(m => m.text.includes('FOREIGN_BUSINESS')).scope, own.scope);
+  assert.equal(batch.find(m => m.text === 'FORWARDED_TEXT').isForwarded, true);
+  assert.doesNotMatch(JSON.stringify(batch), /BOT_|CURRENT_BOT_REPLY/);
 });
 
 test('relationship context never attributes a generated image description to its sender', async () => {
-  const { ai, message, state } = harness();
+  const { ai, message, state, flushProfiles } = harness();
   ai.describeImage = async () => 'FOREIGN_PHOTO_DESCRIPTION';
   await message({ text: 'Сыч, посмотри', reply_to_message: {
     message_id: 10, from: { id: 77 }, photo: [{ file_id: 'foreign-photo' }],
@@ -214,13 +383,14 @@ test('relationship context never attributes a generated image description to its
   await message({ text: 'Сыч, продолжаем' });
   assert.ok(state.answers.at(-1).history.some(entry => entry.text.includes('FOREIGN_PHOTO_DESCRIPTION')),
     'The image-memory enrichment must actually have occurred');
-  const context = state.relationshipContexts.at(-1);
+  await flushProfiles();
+  const context = state.batches.at(-1);
   assert.equal(context[0].text, 'Сыч, посмотри');
   assert.doesNotMatch(JSON.stringify(context), /FOREIGN_PHOTO_DESCRIPTION/);
 });
 
-test('an earlier voice update cannot use a later text exchange while transcription is pending', async () => {
-  const { message, state } = harness();
+test('background batch restores message order after late voice recognition', async () => {
+  const { message, state, flushProfiles } = harness();
   await message({ message_id: 10, text: 'Сыч, OLD_MESSAGE' });
   let finish;
   state.transcriptionResponder = () => new Promise(resolve => { finish = resolve; });
@@ -228,14 +398,12 @@ test('an earlier voice update cannot use a later text exchange while transcripti
   await new Promise(setImmediate);
   await message({ message_id: 31, text: 'Сыч, FUTURE_MESSAGE' });
   finish({ text: 'Сыч, VOICE_MESSAGE' }); await pending;
-  const context = state.relationshipContexts.at(-1);
-  assert.equal(context[0].text, 'Сыч, OLD_MESSAGE');
-  assert.equal(context.length, 2);
-  assert.doesNotMatch(JSON.stringify(context), /FUTURE_MESSAGE/);
+  await flushProfiles();
+  assert.deepEqual([...state.batches.at(-1).map(m => m.messageId)], [10, 30, 31]);
 });
 
 test('forgetting during command address resolution invalidates its earlier relationship context', async () => {
-  const { message, state, bot } = harness();
+  const { message, state, bot, flushProfiles } = harness();
   await message({ text: 'Сыч, FORGOTTEN_MESSAGE' });
   let finish;
   bot.getMe = () => new Promise(resolve => { finish = resolve; });
@@ -247,7 +415,8 @@ test('forgetting during command address resolution invalidates its earlier relat
   assert.equal(state.immediate.length, before, 'Stale address resolution must not resurrect forgotten context');
   assert.equal(state.answers.length, 1);
   await message({ text: 'Сыч, новый разговор' });
-  assert.doesNotMatch(JSON.stringify(state.relationshipContexts.at(-1)), /FORGOTTEN_MESSAGE|\/comment/);
+  await flushProfiles();
+  assert.doesNotMatch(JSON.stringify(state.batches.at(-1)), /FORGOTTEN_MESSAGE|\/comment/);
 });
 
 test('forgotten in-flight batch results and failed-batch requeue cannot resurrect that user', async () => {
@@ -270,18 +439,20 @@ test('forgotten in-flight batch results and failed-batch requeue cannot resurrec
   }
 });
 
-test('forget/reset invalidates late immediate results and queued profile writes', async () => {
+test('forget/reset invalidates late background events and queued profile writes', async () => {
   for (const command of ['Сыч, забудь меня', '/reset@Siitch_bot']) {
     const h = harness();
     let finish;
-    h.ai.analyzeUserImmediate = () => new Promise(resolve => { finish = resolve; });
+    h.ai.analyzeBatch = () => new Promise(resolve => { finish = resolve; });
     await h.message({ message_id: 10, text: 'Сыч, привет' });
+    await h.flushProfiles();
     await h.message({ text: command });
-    finish({ relationshipEvent: { messageId: 10, delta: 3 } }); await new Promise(setImmediate);
+    finish({ 999: { relationshipEvents: [{ messageId: 10, delta: 3 }] } }); await new Promise(setImmediate);
     assert.equal(h.state.profileWrites?.length || 0, 0);
 
-    h.ai.analyzeUserImmediate = async () => ({ relationshipEvent: { messageId: 11, delta: 1 } });
+    h.ai.analyzeBatch = async () => ({ 999: { relationshipEvents: [{ messageId: 11, delta: 1 }] } });
     await h.message({ message_id: 11, text: 'Сыч, привет' }); await new Promise(setImmediate);
+    await h.flushProfiles();
     const guard = h.state.profileWrites.at(-1)[2].isCurrent;
     assert.equal(guard(999), true);
     await h.message({ text: command });
@@ -511,11 +682,12 @@ test('binary TXT produces a readable error without sending bytes to the AI', asy
   assert.match(state.sent[0].content.markdown, /Не смог разобрать файл/);
 });
 
-test('immediate profile analysis sees only the current user message, before any generated text', async () => {
-  const { state, message } = harness();
+test('background profile inputs retain actual ownership and never append generated text', async () => {
+  const { state, message, flushProfiles } = harness();
   await message({ from: { id: 41, first_name: 'Другой' }, text: 'Сыч, я живу в тестовом городе Alpha.' });
   await message({ from: { id: 999, first_name: 'Тест' }, date: 1790000000, text: 'Сыч, привет!' });
-  const input = state.immediate.at(-1);
+  await flushProfiles();
+  const input = state.batches.at(-1).find(m => m.userId === 999);
   assert.equal(input.userId, 999);
   assert.equal(input.text, 'Сыч, привет!');
   assert.equal(input.date, 1790000000);
