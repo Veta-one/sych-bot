@@ -300,6 +300,29 @@ test('search planning receives the replied claim, even outside the short history
   assert.match(prompt, /А кому из СНГ/);
 });
 
+test('a web answer uses the research model for planning and both reviews and the main model for writing', async () => {
+  const { ai, config, calls } = harness();
+  config.researchModel = 'research';
+  ai.runLogicModel = Object.getPrototypeOf(ai).runLogicModel.bind(ai);
+  ai.reviewEvidence = Object.getPrototypeOf(ai).reviewEvidence.bind(ai);
+  const draft = 'Kazakhstan supported. [Источник](https://example.org/countries)';
+  const responses = [
+    JSON.stringify({ needsSearch: true, output: 'answer', searchQuery: 'official supported countries' }),
+    JSON.stringify({ claims: [{ claim: 'Kazakhstan supported.', status: 'supported', sourceId: 'S1',
+      quote: 'Kazakhstan is supported for Claude.ai.' }], sufficient: true }),
+    draft,
+    JSON.stringify({ approved: true, addressesQuestion: true }),
+  ];
+  ai.openai.chat.completions.create = async body => {
+    calls.push(body);
+    return { choices: [{ finish_reason: 'stop', message: { content: responses.shift() } }] };
+  };
+  const answer = await ai.getResponse([], { text: 'Сыч, проверь актуальные сведения о доступности в Казахстане', sender: 'Тест' });
+  assert.equal(answer.split('\n\n<details>')[0], draft);
+  assert.deepEqual(calls.map(body => body.model), ['research', 'research', 'writer', 'research']);
+  assert.equal(responses.length, 0);
+});
+
 test('explicit verification cannot be skipped by the classifier or by supplied material', async () => {
   const { ai, calls } = harness();
   ai.runLogicModel = async () => ({ needsSearch: false });
@@ -949,8 +972,42 @@ test('a slow primary reviewer leaves time for native evidence and final-answer a
   assert.match(answer, /<details>[\s\S]*<summary>Источники<\/summary>/);
   assert.equal(events.filter(e => e.provider === 'native').length, 2);
   assert.ok(events.every(e => e.signal instanceof AbortSignal));
-  assert.ok(events.filter(e => e.provider === 'native').every(e => e.timeout >= 15000));
+  assert.ok(events.filter(e => e.provider === 'native').every(e => e.timeout >= 8000));
   assert.ok(context.clock() <= 80000);
+});
+
+test('after an incomplete first review and unavailable native provider, a slow technical retry can still produce the sourced answer', async () => {
+  const context = timedHarness();
+  const { ai, events, delay, drive } = context;
+  const draft = 'Kazakhstan supported. [Источник](https://example.org/countries)';
+  const complete = (content, finish_reason = 'stop') => ({ choices: [{ finish_reason, message: { content } }] });
+  let evidenceCalls = 0;
+  ai.openai.chat.completions.create = (body, options) => {
+    if (!options) {
+      events.push('writer');
+      return Promise.resolve(complete(draft));
+    }
+    if (!body.response_format) return Promise.resolve(complete('Техническая проверка прервалась.'));
+    if (body.messages[1].content.includes('ПРОВЕРКА ГОТОВОГО ОТВЕТА')) {
+      events.push('audit');
+      return Promise.resolve(complete('{"approved":true,"addressesQuestion":true}'));
+    }
+    events.push('evidence');
+    if (++evidenceCalls === 1) return delay(14700, options.signal, complete('', 'length'));
+    return delay(26000, options.signal, complete(JSON.stringify({
+      claims: [{ claim: 'Kazakhstan supported.', status: 'supported', sourceId: 'S1',
+        quote: 'Kazakhstan is supported for Claude.ai.' }], sufficient: true,
+    })));
+  };
+  ai.nativeModel = { generateContent: (_, options) => {
+    events.push('native');
+    return delay(44, options.signal, null, true);
+  } };
+
+  const answer = await drive(ai.getResponse([], { text: 'Сыч, проверь актуальные сведения о доступности в Казахстане', sender: 'Тест' }));
+  assert.equal(answer.split('\n\n<details>')[0], draft);
+  assert.match(answer, /<summary>Источники<\/summary>/);
+  assert.deepEqual(events, ['evidence', 'native', 'evidence', 'writer', 'audit']);
 });
 
 test('review deadlines abort both providers and shortened caller budgets preserve a native reserve', async () => {
@@ -967,7 +1024,7 @@ test('review deadlines abort both providers and shortened caller budgets preserv
   await assert.rejects(drive(ai.reviewEvidence('Synthetic evidence', { timeoutMs: 12000 })), /провер|review/i);
   assert.equal(context.clock(), 12000);
   assert.equal(events.length, 2);
-  assert.ok(events[0].timeout <= 5400);
-  assert.ok(events[1].timeout >= 6600);
+  assert.equal(events[0].timeout, 9600);
+  assert.equal(events[1].timeout, 2400);
   assert.ok(events.every(e => e.signal?.aborted));
 });

@@ -492,8 +492,11 @@ async function research({ question, plan, search, read, review, suppliedUrls = [
       const attempt = ++reviewAttempts;
       let code = 'OK';
       try {
-        const raw = await bounded(() => review(prompt, lookupOnly ? { timeoutMs, lookup: true } : { timeoutMs }), timeoutMs, 'Проверка подтверждений', phaseDeadline);
-        if (!raw || !reviewShapeValid(raw) || ((lookupOnly || requestedSources.length) && typeof raw.addressesQuestion !== 'boolean')) throw Object.assign(new Error('invalid review'),
+        const validate = raw => reviewShapeValid(raw)
+          && (!(lookupOnly || requestedSources.length) || typeof raw.addressesQuestion === 'boolean');
+        const reviewOptions = { timeoutMs, validate, ...(lookupOnly ? { lookup: true } : {}) };
+        const raw = await bounded(() => review(prompt, reviewOptions), timeoutMs, 'Проверка подтверждений', phaseDeadline);
+        if (!validate(raw)) throw Object.assign(new Error('invalid review'),
           { code: raw == null ? 'EVIDENCE_REVIEW_EMPTY' : 'EVIDENCE_REVIEW_INVALID' });
         assessment = validateReview(raw, reviewedSources);
         if (requestedSources.some(source => source.status === 'read') && assessment.claims.length
@@ -790,5 +793,5 @@ function conservativeAnswer(result) {
 }
 
 module.exports = { publicUrl, requestedUrls, sourceCoverageNote, pageExcerpt, normalizeSources, validateReview, reviewPrompt, research, evidenceContext, lookupAnswer,
-  answerAuditPrompt, shortResearchAnswer, conservativeAnswer, renderFoundSources, renderResearchImages, withoutResearchMedia, citedProviderSources, boundedSources, boundedQuestion,
+  reviewShapeValid, answerAuditPrompt, shortResearchAnswer, conservativeAnswer, renderFoundSources, renderResearchImages, withoutResearchMedia, citedProviderSources, boundedSources, boundedQuestion,
   REVIEW_TIMEOUT_MS, RESEARCH_TIMEOUT_MS, SOURCE_TEXT_MAX_CHARS, PAGE_MAX_CHARS, SNIPPET_MAX_CHARS, QUESTION_MAX_CHARS };

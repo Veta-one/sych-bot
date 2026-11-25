@@ -127,6 +127,51 @@ test('a sole primary reviewer completing at 20 seconds retains the audited answe
   assert.equal(h.clock(), 20000);
 });
 
+test('research settings keep chat model changes separate on OpenRouter and allow an explicit shared model', () => {
+  const gemini = 'google/gemini-3.8-flash';
+  const custom = 'deepseek/deepseek-test';
+  assert.equal(configuration().mainModel, gemini);
+  assert.equal(configuration().researchModel, gemini);
+  const openRouter = configuration({ MAIN_MODEL: custom });
+  assert.equal(openRouter.mainModel, custom);
+  assert.equal(openRouter.researchModel, gemini);
+  assert.equal(configuration({ MAIN_MODEL: custom, RESEARCH_MODEL: custom }).researchModel, custom);
+
+  const customEndpoint = { AI_BASE_URL: 'https://custom.example/v1', MAIN_MODEL: 'custom-chat' };
+  assert.equal(configuration(customEndpoint).researchModel, 'custom-chat');
+  assert.equal(configuration({ ...customEndpoint, RESEARCH_MODEL: 'custom-review' }).researchModel, 'custom-review');
+});
+
+test('auto accepts evidence returned beyond the previous 18-second cutoff without a native request', async () => {
+  for (const [budget, delay, expectedPrimaryBudget] of [[40000, 26000, 32000], [25000, 19000, 20000]]) {
+    const h = harness({ native: true });
+    h.plan.primary.push({ delay, value: { claims: [{ claim: 'Supported fact' }], sufficient: true } });
+    const result = await h.drive(h.ai.reviewEvidence('synthetic evidence', { timeoutMs: budget }));
+    assert.equal(result.claims[0].claim, 'Supported fact');
+    assert.deepEqual(h.calls.map(call => [call.provider, call.options.timeout]), [['primary', expectedPrimaryBudget]]);
+    assert.equal(h.clock(), delay);
+  }
+});
+
+test('a short lookup retains its own budget and does not reserve time when its primary succeeds', async () => {
+  const h = harness({ native: true });
+  h.plan.primary.push({ delay: 19000, value: { claims: [], sufficient: false } });
+  assert.equal((await h.drive(h.ai.reviewEvidence('synthetic lookup', { timeoutMs: 22000, lookup: true }))).sufficient, false);
+  assert.deepEqual(h.calls.map(call => [call.provider, call.options.timeout]), [['primary', 22000]]);
+  assert.equal(h.clock(), 19000);
+});
+
+test('the native fallback uses the whole remaining budget after an early primary error', async () => {
+  const h = harness({ native: true });
+  h.plan.primary.push({ delay: 2000, error: new Error('Synthetic upstream error') });
+  h.plan.native.push({ delay: 30000 });
+  assert.equal((await h.drive(h.ai.reviewEvidence('synthetic evidence'))).approved, true);
+  assert.deepEqual(h.calls.map(call => [call.provider, call.at, call.options.timeout]), [
+    ['primary', 0, 32000],
+    ['native', 2000, 38000],
+  ]);
+});
+
 test('explicit modes never call the other provider; auto still keeps the native reserve', async () => {
   for (const [mode, provider] of [['openrouter', 'primary'], ['google', 'native']]) {
     const h = harness({ mode, native: true });
@@ -137,9 +182,10 @@ test('explicit modes never call the other provider; auto still keeps the native 
     assert.equal(h.calls[0].options.timeout, 40000);
   }
   const h = harness({ native: true });
-  h.plan.primary.push({ delay: 100000 }); h.plan.native.push({ delay: 20000 });
+  h.plan.primary.push({ delay: 100000 }); h.plan.native.push({ delay: 7000 });
   assert.equal((await h.drive(h.ai.reviewEvidence('synthetic'))).approved, true);
-  assert.deepEqual(h.calls.map(call => call.options.timeout), [18000, 22000]);
+  assert.deepEqual(h.calls.map(call => call.options.timeout), [32000, 8000]);
+  assert.equal(h.clock(), 39000);
   assert.ok(h.calls[0].options.signal.aborted);
   const nativeOnly = harness({ primary: false, native: true });
   nativeOnly.plan.native.push({ delay: 20000 });
@@ -149,11 +195,12 @@ test('explicit modes never call the other provider; auto still keeps the native 
 
 test('incomplete, refused or malformed review responses fail safely without raw payloads or provider fallback in explicit mode', async () => {
   const secret = 'SYNTHETIC_SECRET_PAYLOAD';
-  for (const raw of [
-    { choices: [{ finish_reason: 'length', message: { content: '{"approved":true,"addressesQuestion":true}' } }] },
-    { choices: [{ finish_reason: 'stop', message: { refusal: secret, content: '{"approved":true}' } }] },
-    { choices: [{ finish_reason: 'stop', message: { content: secret } }] },
-    { choices: [{ finish_reason: 'stop', message: { content: '{}' } }] },
+  for (const [raw, reason] of [
+    [{ choices: [{ finish_reason: 'length', message: { content: '{"approved":true,"addressesQuestion":true}' } }] }, 'OUTPUT_LIMIT'],
+    [{ choices: [{ finish_reason: 'stop', message: { refusal: secret, content: '{"approved":true}' } }] }, 'REFUSAL'],
+    [{ choices: [{ finish_reason: 'stop', message: { content: '  ' } }] }, 'EMPTY_CONTENT'],
+    [{ choices: [{ finish_reason: 'stop', message: { content: secret } }] }, 'INVALID_JSON'],
+    [{ choices: [{ finish_reason: 'stop', message: { content: '{}' } }] }, 'INVALID_SCHEMA'],
   ]) {
     const h = harness({ mode: 'openrouter', native: true }); h.plan.primary.push({ raw });
     await assert.rejects(h.drive(h.ai.reviewEvidence('private synthetic question')), error => error.code === 'EVIDENCE_REVIEW_INVALID');
@@ -161,7 +208,24 @@ test('incomplete, refused or malformed review responses fail safely without raw 
     assert.equal(h.calls[0].options.maxRetries, 0);
     assert.ok(!h.logs.join('\n').includes(secret));
     assert.ok(!h.logs.join('\n').includes('private synthetic question'));
+    assert.ok(h.logs.some(line => line.includes('reason=' + reason)), 'expected metadata for ' + reason);
   }
+});
+
+test('a final audit falls back within the same attempt when the primary returns evidence instead of an audit', async () => {
+  const h = harness({ native: true });
+  h.plan.primary.push({ delay: 2000, value: { claims: [], sufficient: false } });
+  h.plan.native.push({ delay: 1000, value: { approved: true, addressesQuestion: true } });
+  const result = evidence();
+  result.requestedSources = [];
+  const draft = 'Проект работает локально. [Источник](https://example.org/project)';
+
+  assert.equal(await h.drive(h.ai.finalizeResearchedAnswer(draft, result)), draft);
+  assert.deepEqual(h.calls.map(call => [call.provider, call.options.timeout]), [
+    ['primary', 32000], ['native', 38000],
+  ]);
+  assert.equal(h.calls[0].prompt, h.calls[1].prompt);
+  assert.ok(h.logs.some(line => line.includes('provider=primary') && line.includes('reason=INVALID_SCHEMA')));
 });
 
 test('technical timeout and content rejection produce distinct honest refusals', async () => {

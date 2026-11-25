@@ -12,6 +12,15 @@ if (!['google', 'openrouter', 'off'].includes(voiceTranscriptionProvider)) {
 }
 const aiBaseUrl = process.env.AI_BASE_URL || 'https://openrouter.ai/api/v1';
 const aiKey = process.env.OPENROUTER_API_KEY || process.env.AI_API_KEY;
+let aiEndpoint;
+try { aiEndpoint = new URL(aiBaseUrl); } catch {}
+const usesOpenRouter = aiEndpoint?.protocol === 'https:' && aiEndpoint.hostname === 'openrouter.ai'
+  && !aiEndpoint.port && !aiEndpoint.username && !aiEndpoint.password && !aiEndpoint.search && !aiEndpoint.hash
+  && ['/api/v1', '/api/v1/'].includes(aiEndpoint.pathname);
+
+const defaultModel = 'google/gemini-3.8-flash';
+const mainModel = process.env.MAIN_MODEL?.trim() || defaultModel;
+const researchModel = process.env.RESEARCH_MODEL?.trim() || (usesOpenRouter ? defaultModel : mainModel);
 const researchReviewProvider = (process.env.RESEARCH_REVIEW_PROVIDER || 'auto').trim().toLowerCase();
 if (!['auto', 'openrouter', 'google'].includes(researchReviewProvider)) {
   throw new Error('RESEARCH_REVIEW_PROVIDER: допустимы auto, openrouter или google');
@@ -20,11 +29,7 @@ function requireOpenRouterConfig(setting) {
   if (!aiKey?.trim()) {
     throw new Error(`${setting}=openrouter требует OPENROUTER_API_KEY или AI_API_KEY`);
   }
-  let endpoint;
-  try { endpoint = new URL(aiBaseUrl); } catch {}
-  if (!endpoint || endpoint.protocol !== 'https:' || endpoint.hostname !== 'openrouter.ai'
-    || endpoint.port || endpoint.username || endpoint.password || endpoint.search || endpoint.hash
-    || !['/api/v1', '/api/v1/'].includes(endpoint.pathname)) {
+  if (!usesOpenRouter) {
     throw new Error(`${setting}=openrouter требует AI_BASE_URL=https://openrouter.ai/api/v1`);
   }
 }
@@ -59,7 +64,7 @@ module.exports = {
   // === АКТУАЛЬНЫЕ МОДЕЛИ (АВГУСТ 2026) ===
 
   // 1. УМНАЯ (Ответы в чате)
-  mainModel: 'google/gemini-3.8-flash',
+  mainModel,
   
   // 2. ЛОГИКА (Анализ, реакции, проверки)
   // Free версия недоступна, используем эффективную платную
@@ -72,6 +77,7 @@ module.exports = {
   // 'google'     -> Переключается на нативный Google API с встроенным поиском (Tools).
   // Если в .env не задано, по умолчанию используем 'tavily'
   searchProvider: process.env.SEARCH_PROVIDER || 'tavily',  
+  researchModel,
   researchReviewProvider,
   quickWeatherNoncommercial: process.env.QUICK_WEATHER_NONCOMMERCIAL === 'true',
   
